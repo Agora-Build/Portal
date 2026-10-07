@@ -1,0 +1,25 @@
+{
+  "name": "agora-build-portal",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The home of the Agora Build community.",
+  "scripts": {
+    "dev": "node scripts/serve.mjs",
+    "start": "node scripts/serve.mjs",
+    "build": "node scripts/build.mjs",
+    "preview": "node scripts/serve.mjs --dir dist",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20.12"
+  },
+  "dependencies": {
+    "agora-rtc-sdk-ng": "4.24.8",
+    "agora-token": "2.0.6",
+    "jose": "6.2.12",
+    "openid-client": "6.8.8",
+    "pg": "8.16.3",
+    "stripe": "20.2.0"
+  }
+}

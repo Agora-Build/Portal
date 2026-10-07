@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="540" viewBox="0 0 600 540" fill="none">
+  <defs>
+    <linearGradient id="floor" x1="180" y1="350" x2="430" y2="450" gradientUnits="userSpaceOnUse"><stop stop-color="#e2e2d4"/><stop offset="1" stop-color="#edecdf"/></linearGradient>
+    <linearGradient id="front" x1="170" y1="120" x2="350" y2="400" gradientUnits="userSpaceOnUse"><stop stop-color="#c96846"/><stop offset="1" stop-color="#b34e32"/></linearGradient>
+    <linearGradient id="side" x1="370" y1="170" x2="380" y2="390" gradientUnits="userSpaceOnUse"><stop stop-color="#ad4a30"/><stop offset="1" stop-color="#97402b"/></linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse" patternTransform="matrix(1 .5 -1 .5 300 170)"><path d="M40 0H0v40" stroke="#a4ac952e" stroke-width="1"/></pattern>
+    <filter id="shadow" x="-30%" y="-50%" width="180%" height="200%"><feGaussianBlur stdDeviation="9"/></filter>
+  </defs>
+  <circle cx="300" cy="253" r="189" stroke="#d0d3c4" stroke-width=".7" stroke-dasharray="3 6"/>
+  <path d="M300 35v15m0 410v15M80 255H65m470 0h-15" stroke="#bfc5b3" stroke-width="1"/>
+  <path d="M60 355 300 235l240 120-240 120L60 355Z" fill="url(#grid)"/>
+  <path d="m94 358 209 104 216-107-211-99L94 358Z" fill="#69735a" opacity=".11" filter="url(#shadow)"/>
+  <path d="m95 335 205-103 205 103-205 103L95 335Z" fill="url(#floor)" stroke="#bfc4b1" stroke-width="1"/>
+  <path d="M95 335v17l205 103v-17L95 335Z" fill="#c9cfbb" stroke="#b5bca7" stroke-width="1"/>
+  <path d="m300 438 205-103v17L300 455v-17Z" fill="#dce0cf" stroke="#b5bca7" stroke-width="1"/>
+  <path d="m146 336 153-77 156 77-155 78-154-78Z" stroke="#b4bda4" stroke-width=".8"/>
+  <path d="m197 336 102-51 104 51-103 52-103-52Z" stroke="#b4bda4" stroke-width=".8"/>
+  <path d="m146 336 154 78m-102-104 154 78m-102-129 154 77m-155-77-153 77m205-52-154 77m206-52-155 78" stroke="#bec6ad" stroke-width=".7"/>
+  <path d="m193 355 126 63 100-50-126-63-100 50Z" fill="#6d765d" opacity=".12"/>
+  <!-- An open pavilion built from shared blocks. -->
+  <path d="m293 192 57-28 57 28-57 29-57-29Z" fill="#dd8a62" stroke="#a74f34" stroke-width=".8"/>
+  <path d="m293 192 57 29v153l-57-29V192Z" fill="url(#front)" stroke="#a74f34" stroke-width=".8"/>
+  <path d="m350 221 57-29v153l-57 29V221Z" fill="url(#side)" stroke="#99432e" stroke-width=".8"/>
+  <path d="m293 243 57 29 57-29m-114 51 57 29 57-29" stroke="#8f412d" stroke-opacity=".45" stroke-width=".8"/>
+  <path d="m179 249 57-28 57 28-57 29-57-29Z" fill="#dd8a62" stroke="#a74f34" stroke-width=".8"/>
+  <path d="m179 249 57 29v125l-57-29V249Z" fill="url(#front)" stroke="#a74f34" stroke-width=".8"/>
+  <path d="m236 278 57-29v125l-57 29V278Z" fill="url(#side)" stroke="#99432e" stroke-width=".8"/>
+  <path d="m179 300 57 29 57-29m-114 51 57 29 57-29" stroke="#8f412d" stroke-opacity=".45" stroke-width=".8"/>
+  <path d="m179 142 171-85 57 28-171 86-57-29Z" fill="#e1946e" stroke="#a74f34" stroke-width=".8"/>
+  <path d="m179 142 57 29v107l-57-29V142Z" fill="url(#front)" stroke="#a74f34" stroke-width=".8"/>
+  <path d="m236 171 171-86v107l-57 29v-55l-57 29v55l-57 28V171Z" fill="url(#side)" stroke="#99432e" stroke-width=".8"/>
+  <path d="m179 193 57 29 171-85m-114-51 57 28v53m-114-53 57 28v52" stroke="#8f412d" stroke-opacity=".45" stroke-width=".8"/>
+  <path d="m179 142 57 29 171-86" stroke="#efb18d" stroke-width="1.3"/>
+  <path d="m236 171 1 106m56-82 1 151m56-181 1 208" stroke="#e4966d" stroke-opacity=".3" stroke-width="1"/>
+  <path d="m382 296 37-18 37 18-37 19-37-19Z" fill="#e8e9de" stroke="#aab49b" stroke-width=".8"/>
+  <path d="m382 296 37 19v51l-37-19v-51Z" fill="#c4ccb6" stroke="#aab49b" stroke-width=".8"/>
+  <path d="m419 315 37-19v51l-37 19v-51Z" fill="#b4bfa3" stroke="#a0ac90" stroke-width=".8"/>
+  <path d="m382 322 37 19 37-19" stroke="#99a68a" stroke-width=".6"/>
+  <path d="m111 285 37-18 37 18-37 19-37-19Z" fill="#e8e9de" stroke="#aab49b" stroke-width=".8"/>
+  <path d="m111 285 37 19v51l-37-19v-51Z" fill="#c4ccb6" stroke="#aab49b" stroke-width=".8"/>
+  <path d="m148 304 37-19v51l-37 19v-51Z" fill="#b4bfa3" stroke="#a0ac90" stroke-width=".8"/>
+  <path d="m111 311 37 19 37-19" stroke="#99a68a" stroke-width=".6"/>
+  <path d="m276 386 38-19 38 19-38 19-38-19Z" fill="#e8e9de" stroke="#aab49b" stroke-width=".8"/>
+  <path d="m276 386 38 19v25l-38-19v-25Z" fill="#c4ccb6" stroke="#aab49b" stroke-width=".8"/>
+  <path d="m314 405 38-19v25l-38 19v-25Z" fill="#b4bfa3" stroke="#a0ac90" stroke-width=".8"/>
+  <path d="m155 394-26 13 109 55m139-25 31 15 86-43" stroke="#a1ad92" stroke-width=".7"/>
+  <path d="m126 404 6 6m103 49 6 6m164-16 6 6m80-49 6 6" stroke="#a1ad92" stroke-width=".7"/>
+  <path d="M447 135h49v41M447 135l-37 19" stroke="#acb69c" stroke-width=".8"/>
+  <circle cx="410" cy="154" r="2" fill="#acb69c"/>
+  <text x="426" y="127" fill="#859078" font-family="monospace" font-size="7" letter-spacing=".6">OPEN BY DESIGN</text>
+  <text x="132" y="429" fill="#859078" font-family="monospace" font-size="7" transform="rotate(26.6 132 429)" letter-spacing="1">A SHARED FOUNDATION</text>
+  <path d="M84 155v23m-11-12h22" stroke="#acb69c" stroke-width=".7"/>
+  <circle cx="83" cy="165" r="15" stroke="#cbd0c0" stroke-width=".7"/>
+  <text x="65" y="196" fill="#859078" font-family="monospace" font-size="7" letter-spacing="1">FIG. 01</text>
+</svg>

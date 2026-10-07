@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#202824">
+  <meta name="description" content="Agora Build is the Builder's Foundry, a hacker house for people building real-time communication, voice AI, and useful tools. Find collaborators, share your intent, and build together.">
+  <title>The Builder's Foundry | Agora Build</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/script.js"></script><script type="module" src="/people.js"></script><script type="module" src="/activity.js"></script>
+</head>
+<body class="foundry-home">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="workspace">
+    <header class="site-header">
+      <a class="wordmark" href="/index.html" aria-label="Agora Build home"><span class="brand-symbol" aria-hidden="true">b_</span><span>agora<span class="brand-dot">.</span>build<small>THE BUILDER'S FOUNDRY</small></span></a>
+      <nav id="site-nav" class="site-nav" aria-label="Main navigation"><a href="/index.html" class="is-active" aria-current="page">The floor</a><a href="/explore.html">Projects</a><a href="/meetings.html">Rooms</a><a href="/radar.html">Radar</a><a href="/services.html">Services</a><a href="/account.html">Account</a><a class="nav-github" href="https://github.com/Agora-Build" target="_blank" rel="noopener noreferrer">GitHub <span aria-hidden="true">&#8599;</span></a></nav>
+      <div class="header-actions"><button class="button button-small" type="button" data-join data-guest-label="Take a seat" data-member-label="Your profile">Take a seat <span aria-hidden="true">+</span></button><button type="button" class="nav-toggle" aria-controls="site-nav" aria-expanded="false" aria-label="Toggle navigation"><span></span><span></span></button></div>
+    </header>
+    <main id="main" class="main-content home-canvas">
+      <div class="canvas-coordinates" aria-hidden="true"><span>AGORA BUILD / OPEN WORKSPACE</span><span>RTC &middot; VOICE AI &middot; DEVELOPER TOOLS</span></div>
+      <section class="foundry-hero" aria-labelledby="home-heading">
+        <div class="hero-copy"><p class="kicker"><span class="signal"></span> THE BUILDER'S FOUNDRY</p><h1 id="home-heading">Good work.<br><span>Better company.</span></h1><p class="hero-description">A shared workspace for real-time technology, voice AI, and useful tools. Build together online. Meet in person when it matters. Bring the work back, and keep going.</p>
+          <div class="hero-links"><a href="#people" class="inline-link">Find your people <span aria-hidden="true">&#8600;</span></a><button class="inline-link" type="button" data-new-room>Start a working session <span aria-hidden="true">&#8599;</span></button><a href="#physical-forge" class="inline-link">Meet in person <span aria-hidden="true">&#8600;</span></a></div>
+        </div>
+        <div class="project-desk" aria-label="On the workbench">
+          <span class="desk-caption mono">ON THE WORKBENCH / BUILT IN THE OPEN</span>
+          <a class="desk-card desk-code" href="https://github.com/Agora-Build/Atem" target="_blank" rel="noopener noreferrer"><div class="mini-terminal-bar"><span><i></i><i></i><i></i></span><span>atem / Rust</span></div><div class="mini-terminal-body"><span class="terminal-comment">// tools for the people at the keys</span><strong><span>&gt;_</span> Atem</strong><p>Your terminal, your agents,<br>your next build.</p></div><span class="desk-card-footer">OPEN THE SOURCE <span aria-hidden="true">&#8599;</span></span></a>
+          <a class="desk-card desk-voice" href="https://github.com/Agora-Build/Vox" target="_blank" rel="noopener noreferrer"><span class="paper-tab mono">VOICE AI / EVALUATION</span><div class="desk-title"><h2>Vox</h2><span aria-hidden="true">&#8599;</span></div><div class="voice-trace" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><p>Real conversations.<br>Measurable performance.</p><span class="desk-note mono">MAKE THE NEXT TURN BETTER.</span></a>
+          <a class="desk-card desk-rtc" href="https://github.com/Agora-Build/RTC-Egress" target="_blank" rel="noopener noreferrer"><span class="kicker">REAL-TIME / INFRASTRUCTURE</span><h2>RTC-Egress <span aria-hidden="true">&#8599;</span></h2><p>Give a live stream<br>a life beyond live.</p><span class="rtc-route mono">STREAM &#8594; RECORD &#8594; BUILD</span></a>
+          <span class="desk-annotation">Things worth taking apart.<br>And putting back together.</span>
+        </div>
+      </section>
+      <section class="finder terminal-finder" aria-labelledby="finder-heading">
+        <div class="terminal-titlebar"><span class="terminal-window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="mono">foundry / people-search</span><span class="terminal-path mono">~/your-next-collaborator</span></div>
+        <div class="terminal-content"><div class="finder-heading"><h2 id="finder-heading">Who do you need at your workbench?</h2><span class="mono finder-label">START WITH A REAL INTENT</span></div>
+          <form id="people-search" class="people-search" role="search"><label class="sr-only" for="people-query">Describe the person you want to meet</label><span class="search-prefix" aria-hidden="true">&gt;_</span><input id="people-query" name="q" maxlength="1000" placeholder="Someone building voice agents who knows Rust..." autocomplete="off"><span class="terminal-cursor" aria-hidden="true"></span><button class="button" type="submit">Find people <span aria-hidden="true">&#8629;</span></button></form>
+          <div class="search-below"><p id="search-mode" class="mono">CHECKING SEARCH CONNECTION...</p><span>Specific beats impressive. What are you trying to do?</span></div>
+          <div class="prompt-row"><span class="mono">try:</span><button type="button" data-prompt="Someone working on voice AI">voice AI builders</button><button type="button" data-prompt="Someone who knows Rust and developer tools">Rust & tooling</button><button type="button" data-prompt="People building real-time communication">real-time projects</button></div>
+        </div>
+      </section>
+      <section class="motion-section" aria-labelledby="activity-heading">
+        <div class="section-heading"><div><p class="kicker">01 / SIGNALS FROM THE FLOOR</p><h2 id="activity-heading">Work in motion.</h2></div><div class="activity-controls"><span class="activity-status" id="activity-status" role="status">Checking public activity...</span><button class="activity-refresh" id="refresh-activity" type="button" aria-label="Refresh activity">&#8635;</button></div></div>
+        <ol class="activity-feed" id="activity-feed" aria-label="Recent public activity"><li class="activity-placeholder">Reading the public workshop log...</li></ol>
+        <div class="activity-foot"><p id="activity-note">Repository events have source links and timestamps. Community activity reflects profiles and room rosters.</p><a href="https://github.com/Agora-Build" class="inline-link" target="_blank" rel="noopener noreferrer">Follow the code <span aria-hidden="true">&#8599;</span></a></div>
+      </section>
+      <section class="people-section" id="people" aria-labelledby="people-heading">
+        <div class="section-heading"><div><span class="kicker" id="result-mode">02 / PEOPLE BEHIND THE WORK</span><h2 id="people-heading">Find your people.</h2></div><div class="floor-totals"><span><strong id="builder-total">&#8212;</strong> public profiles</span><span><strong id="project-total">&#8212;</strong> open projects</span></div></div>
+        <div class="people-toolbar"><div class="filters" role="group" aria-label="Filter people by interest"><button type="button" data-skill="all" class="is-active" aria-pressed="true">Everyone</button><button type="button" data-skill="AI" aria-pressed="false">AI & voice</button><button type="button" data-skill="Real-time" aria-pressed="false">Real-time</button><button type="button" data-skill="Rust" aria-pressed="false">Rust</button><button type="button" data-skill="tools" aria-pressed="false">Tools</button></div><span class="count" id="people-count" aria-live="polite">Loading...</span></div>
+        <div id="people-grid" class="people-grid"></div><div id="people-empty" class="empty-panel" hidden><h3>No people matched this search.</h3><p>Try a skill, project, or a broader description.</p><button class="button button-secondary" id="clear-people" type="button">Clear search</button></div>
+        <p class="section-note">Public GitHub contributors are labeled. Their collaboration intent is shared only when they join.</p>
+      </section>
+      <section class="bench-tools" aria-labelledby="bench-heading"><div class="bench-label"><span class="kicker">03 / MAKE YOURSELF AT HOME</span><h2 id="bench-heading">More than <br>a directory.</h2><p>Pull up a chair.<br>Put something in motion.</p></div>
+        <a class="tool-note note-room" href="/meetings.html"><span class="note-index mono">01 / THE COMMON ROOM</span><h3>Get around <br>the same table. <span aria-hidden="true">&#8599;</span></h3><p>A room, a purpose, a few good people. Talk it through. Share your screen. Build together.</p><span class="note-bottom mono">OPEN A WORKING SESSION &#8594;</span></a>
+        <a class="tool-note note-radar" href="/radar.html"><span class="note-index mono">02 / YOUR RADAR</span><h3>Keep an eye on <br>what comes next. <span aria-hidden="true">&#8599;</span></h3><p>Public signals, people to know, resources to use. Guided by what you actually want to do.</p><span class="note-bottom mono">PUT YOUR INTENT TO WORK &#8594;</span></a>
+        <a class="tool-note note-service" href="/services.html"><span class="note-index mono">03 / SHARED TOOLS</span><h3>Less setup. <br>More making. <span aria-hidden="true">&#8599;</span></h3><p>Language models, speech, and confirmed community perks. Ready when providers are connected.</p><span class="note-bottom mono">EXPLORE THE WORKBENCH &#8594;</span></a>
+      </section>
+      <section class="physical-forge" id="physical-forge" aria-labelledby="forge-heading">
+        <div class="forge-heading"><div><p class="kicker">04 / THE PHYSICAL FORGE</p><h2 id="forge-heading">Keep building online.<br>Come together in person.</h2></div><p>The foundry is a boundaryless workspace. Code, conversations, and shared intent keep the work moving every day. When a problem needs everyone around the same table, take it into the room. Build trust, work intensely, then bring what you learn back here.</p></div>
+        <div class="forge-sessions">
+          <article class="forge-session"><span class="mono forge-number">01 / SHOW THE WORK</span><h3>Demo days.</h3><p>Bring what you shipped online to a live audience. Show it working, get direct feedback, and meet the people who can help with the next version.</p><button class="inline-link" type="button" data-new-room data-room-title="Demo day">Plan a demo day <span aria-hidden="true">&#8599;</span></button></article>
+          <article class="forge-session"><span class="mono forge-number">02 / BUILD AT FULL SPEED</span><h3>Hackathons.</h3><p>A focused sprint in the same place. Form a small team, choose a hard problem, and take it from an idea to something you can run.</p><button class="inline-link" type="button" data-new-room data-room-title="Hackathon sprint">Start a sprint <span aria-hidden="true">&#8599;</span></button></article>
+          <article class="forge-session"><span class="mono forge-number">03 / THINK OUT LOUD</span><h3>Whiteboard sessions.</h3><p>Pull apart a Rust system design or an AI audio route. Draw, challenge assumptions, and leave with an approach everyone understands.</p><button class="inline-link" type="button" data-new-room data-room-title="Whiteboard session">Gather a few minds <span aria-hidden="true">&#8599;</span></button></article>
+        </div>
+        <p class="forge-footnote">Start with a shared room and a clear purpose. Add a place and time to your session plan, meet in person, and keep the code and conversation here.</p>
+      </section>
+      <section class="intent-banner"><span class="intent-symbol mono" aria-hidden="true">[ _ ]</span><div><span class="kicker">YOUR REAL INTENT IS THE STARTING POINT.</span><h2>What do you want to make happen?</h2><p>A problem worth solving. Someone you want to work with. An idea that needs a first step.</p></div><button class="button" type="button" data-join data-guest-label="Share your intent" data-member-label="Update your intent">Share your intent <span aria-hidden="true">&#8599;</span></button></section>
+    </main>
+    <footer class="site-footer"><span>The frontier is a shared workspace.</span><a href="https://github.com/Agora-Build" target="_blank" rel="noopener noreferrer">Open minds. Open doors. <span aria-hidden="true">&#8599;</span></a></footer>
+  </div>
+  <dialog id="join-dialog" aria-labelledby="join-title">
+    <div class="dialog-head"><span class="kicker">YOUR PLACE IN THE HOUSE</span><button class="close-button" type="button" data-close aria-label="Close profile form">&times;</button></div>
+    <h2 id="join-title">Pull up a chair.</h2>
+    <p class="dialog-intro">Good connections start with honest intent. Your profile and participation in rooms are public. Sign in to keep access across devices, or continue with this browser.</p>
+    <form id="profile-form" class="stack-form">
+      <div class="form-row"><label>Your name<input name="name" required minlength="2" maxlength="60" autocomplete="name" placeholder="What should we call you?"></label><label>Location <span class="optional">optional</span><input name="location" maxlength="80" placeholder="City or remote" autocomplete="address-level2"></label></div>
+      <label>A little about you<textarea name="bio" required minlength="2" maxlength="400" rows="2" placeholder="Your work, experience, or interests."></textarea></label>
+      <label>Your real intent <span class="required-label">required</span><textarea name="intent" required minlength="2" maxlength="400" rows="3" placeholder="I am building a voice agent for language practice. I need help making interruptions feel natural."></textarea></label>
+      <label>Who would you like to meet? <span class="optional">optional</span><input name="lookingFor" maxlength="300" placeholder="Audio engineers, language teachers, people building similar things."></label>
+      <label>Skills & interests <span class="optional">comma separated, up to 8</span><input name="skills" required maxlength="327" placeholder="Rust, voice AI, WebRTC"></label>
+      <label>A public contact link<input name="contact" type="url" required maxlength="240" placeholder="https://github.com/yourname"></label>
+      <label class="checkbox-label"><input name="monitor" type="checkbox"><span>Keep a radar on my intent.<small>When connected, web search checks public sources for relevant people and resources. Your intent and interests are sent to the configured model provider.</small></span></label>
+      <p class="form-note">Your profile and room activity are shared with the foundry. Model search may use its public text. Save your intent here; keep personal or sensitive details out.</p>
+      <p id="profile-error" class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button class="button" id="profile-submit" type="submit">Join the house</button><button class="delete-button" id="profile-delete" type="button" hidden>Remove my profile</button></div>
+    </form>
+  </dialog>
+  <dialog id="person-dialog" aria-labelledby="person-title"><div class="dialog-head"><span class="kicker">BUILDER PROFILE</span><button class="close-button" type="button" data-close aria-label="Close builder profile">&times;</button></div><div id="profile-content"></div></dialog>
+  <dialog id="room-dialog" aria-labelledby="room-title">
+    <div class="dialog-head"><span class="kicker">MAKE ROOM FOR A CONVERSATION</span><button class="close-button" type="button" data-close aria-label="Close room form">&times;</button></div>
+    <h2 id="room-title">Meet around a purpose.</h2><p class="dialog-intro">Create a group room, share the invite, and open a video call together.</p>
+    <form id="room-form" class="stack-form"><label>Room name<input name="title" required minlength="2" maxlength="80" placeholder="Voice agents build session"></label><label>What are we meeting for?<textarea name="intent" required minlength="2" maxlength="300" rows="3" placeholder="Debug a problem, plan a demo day, or bring a whiteboard session into the next sprint."></textarea></label><p class="form-note">Room names, purposes, and rosters are public. Audio, video, and screen sharing stay in this workspace, powered by Agora.</p><p id="room-error" class="form-error" role="alert"></p><button type="submit" class="button">Create meeting room <span aria-hidden="true">&#8599;</span></button></form>
+  </dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

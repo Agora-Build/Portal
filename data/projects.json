@@ -1,0 +1,162 @@
+[
+  {
+    "name": "Atem",
+    "title": "Atem",
+    "url": "https://github.com/Agora-Build/Atem",
+    "description": "A terminal that connects builders, Agora platform, and AI agents.",
+    "language": "Rust",
+    "categories": "tools",
+    "updatedAt": "2026-10-02T08:46:13Z",
+    "featured": 0
+  },
+  {
+    "name": "Vox",
+    "title": "Vox",
+    "url": "https://github.com/Agora-Build/Vox",
+    "description": "Vox for every engagement \u2014 real-time experience evaluation for conversational AI voice agents. Measures turn success, response and interrupt latency across web and phone, from regions worldwide.",
+    "language": "TypeScript",
+    "categories": "ai",
+    "updatedAt": "2026-10-04T09:56:09Z",
+    "featured": 1
+  },
+  {
+    "name": "chisel",
+    "title": "Chisel",
+    "url": "https://github.com/Agora-Build/chisel",
+    "description": "Dev panel for visual annotation and UI editing by anyone, including AI agents",
+    "language": "TypeScript",
+    "categories": "tools",
+    "updatedAt": "2026-02-25T22:17:39Z",
+    "featured": 2
+  },
+  {
+    "name": "RTC-Egress",
+    "title": "RTC-Egress",
+    "url": "https://github.com/Agora-Build/RTC-Egress",
+    "description": "A high-performance egress service solution for Agora RTC streams",
+    "language": "C++",
+    "categories": "rtc",
+    "updatedAt": "2026-10-04T09:44:15Z",
+    "featured": 3
+  },
+  {
+    "name": "Astation",
+    "title": "Astation",
+    "url": "https://github.com/Agora-Build/Astation",
+    "description": "Astation \u2014 macOS menubar hub that coordinates Chisel, Atem, and AI agents \u2014 talk to your coding agent from anywhere",
+    "language": "Rust",
+    "categories": "tools",
+    "updatedAt": "2026-10-04T10:02:54Z",
+    "featured": 4
+  },
+  {
+    "name": "libretto",
+    "title": "Libretto",
+    "url": "https://github.com/Agora-Build/libretto",
+    "description": "A portable action-script protocol: one declarative script, many engines \u2014 browser, phone, app. Spec + conformance.",
+    "language": "Protocol",
+    "categories": "ai tools",
+    "updatedAt": "2026-09-21T17:29:23Z",
+    "featured": 5
+  },
+  {
+    "name": "DialF",
+    "title": "DialF",
+    "url": "https://github.com/Agora-Build/DialF",
+    "description": "Autonomous phone pick/call system: a CLI + daemon that drives a phone's calls, SMS, and scripted audio (ten-vad) over WiFi, with a USB sound-card audio bridge. macOS & Linux.",
+    "language": "Rust",
+    "categories": "ai",
+    "updatedAt": "2026-09-27T11:59:41Z",
+    "featured": 6
+  },
+  {
+    "name": "HapticHatch",
+    "title": "HapticHatch",
+    "url": "https://github.com/Agora-Build/HapticHatch",
+    "description": "ESP32-S3 firmware demonstrating high-frequency, high-resolution data streaming between two devices over Agora Signaling at 100 Hz",
+    "language": "C",
+    "categories": "rtc experiments",
+    "updatedAt": "2026-06-06T03:05:57Z",
+    "featured": 7
+  },
+  {
+    "name": "snora",
+    "title": "snora",
+    "url": "https://github.com/Agora-Build/snora",
+    "description": "Bio-adaptive audio engine for sleep, focus, exercise & meditation. Real-time soundscapes driven by heart rate, HRV, respiration & stress via Agora RTC.",
+    "language": "C++",
+    "categories": "rtc experiments",
+    "updatedAt": "2026-04-04T00:45:21Z",
+    "featured": 8
+  },
+  {
+    "name": "stream-to-agora",
+    "title": "stream-to-agora",
+    "url": "https://github.com/Agora-Build/stream-to-agora",
+    "description": "Stream local files or http(s)/rtmp/rtsp URLs to an Agora RTC channel",
+    "language": "Rust",
+    "categories": "rtc",
+    "updatedAt": "2026-05-26T18:24:56Z",
+    "featured": 9
+  },
+  {
+    "name": "audictl",
+    "title": "audictl",
+    "url": "https://github.com/Agora-Build/audictl",
+    "description": "Cross-platform audio-device control for macOS and Linux using CoreAudio, PipeWire, and ALSA",
+    "language": "Swift",
+    "categories": "tools",
+    "updatedAt": "2026-09-16T23:44:24Z",
+    "featured": 10
+  },
+  {
+    "name": "TermCap",
+    "title": "TermCap",
+    "url": "https://github.com/Agora-Build/TermCap",
+    "description": "Capture the last command and its output from your terminal, ready to pipe into an LLM",
+    "language": "Rust",
+    "categories": "tools",
+    "updatedAt": "2026-09-11T08:48:55Z",
+    "featured": 11
+  },
+  {
+    "name": "skills",
+    "title": "skills",
+    "url": "https://github.com/Agora-Build/skills",
+    "description": "Reusable agent skills from Agora Build",
+    "language": "Skills",
+    "categories": "tools ai",
+    "updatedAt": "2026-09-05T03:24:19Z",
+    "featured": 12
+  },
+  {
+    "name": "Hatch",
+    "title": "Hatch",
+    "url": "https://github.com/Agora-Build/Hatch",
+    "description": "Secure, versioned file release CLI for S3-compatible storage",
+    "language": "Rust",
+    "categories": "tools",
+    "updatedAt": "2026-06-25T08:54:42Z",
+    "featured": 13
+  },
+  {
+    "name": "aeval",
+    "title": "aeval",
+    "url": "https://github.com/Agora-Build/aeval",
+    "description": "Binary releases for aeval(Eval system from Agora)",
+    "language": "Releases",
+    "categories": "ai",
+    "updatedAt": "2026-10-03T05:05:32Z",
+    "featured": 14
+  },
+  {
+    "name": "Helm-Charts",
+    "title": "Helm-Charts",
+    "url": "https://github.com/Agora-Build/Helm-Charts",
+    "description": "Helm charts for Agora",
+    "language": "Smarty",
+    "categories": "rtc tools",
+    "updatedAt": "2026-02-13T20:12:13Z",
+    "featured": 15
+  }
+]

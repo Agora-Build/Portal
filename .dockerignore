@@ -1,0 +1,11 @@
+.git
+.github
+.data
+.env
+.env.*
+!.env.example
+dist
+node_modules
+test-results
+Dockerfile
+.dockerignore

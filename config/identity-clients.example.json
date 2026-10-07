@@ -1,0 +1,17 @@
+[
+  {
+    "id": "vox",
+    "name": "Vox",
+    "secretEnv": "VOX_IDENTITY_CLIENT_SECRET",
+    "redirects": ["https://vox.agora.build/auth/agora-build/callback"],
+    "scopes": ["identity", "credits", "services"],
+    "identityLookup": true,
+    "rates": { "evaluation": 1 }
+  },
+  {
+    "id": "astation",
+    "name": "Astation",
+    "loopback": true,
+    "scopes": ["identity", "credits", "services", "agora:projects"]
+  }
+]

@@ -1,0 +1,105 @@
+[
+  {
+    "id": "github:guohai",
+    "name": "Brent G",
+    "username": "guohai",
+    "bio": "Building developer tools, conversational AI evaluations, and real-time infrastructure. Contributor across the Agora Build projects.",
+    "intent": "",
+    "lookingFor": "",
+    "location": "Santa Clara, CA",
+    "contact": "https://github.com/guohai",
+    "avatar": "assets/guohai.jpg",
+    "skills": [
+      "Rust",
+      "TypeScript",
+      "C++",
+      "Real-time communication",
+      "Conversational AI",
+      "Developer tools"
+    ],
+    "projects": [
+      {
+        "name": "Atem",
+        "description": "A terminal that connects builders, Agora platform, and AI agents.",
+        "url": "https://github.com/Agora-Build/Atem"
+      },
+      {
+        "name": "Vox",
+        "description": "Vox for every engagement \u2014 real-time experience evaluation for conversational AI voice agents. Measures turn success, response and interrupt latency across web and phone, from regions worldwide.",
+        "url": "https://github.com/Agora-Build/Vox"
+      },
+      {
+        "name": "Chisel",
+        "description": "Dev panel for visual annotation and UI editing by anyone, including AI agents",
+        "url": "https://github.com/Agora-Build/chisel"
+      },
+      {
+        "name": "RTC-Egress",
+        "description": "A high-performance egress service solution for Agora RTC streams",
+        "url": "https://github.com/Agora-Build/RTC-Egress"
+      },
+      {
+        "name": "Astation",
+        "description": "Astation \u2014 macOS menubar hub that coordinates Chisel, Atem, and AI agents \u2014 talk to your coding agent from anywhere",
+        "url": "https://github.com/Agora-Build/Astation"
+      },
+      {
+        "name": "Libretto",
+        "description": "A portable action-script protocol: one declarative script, many engines \u2014 browser, phone, app. Spec + conformance.",
+        "url": "https://github.com/Agora-Build/libretto"
+      },
+      {
+        "name": "DialF",
+        "description": "Autonomous phone pick/call system: a CLI + daemon that drives a phone's calls, SMS, and scripted audio (ten-vad) over WiFi, with a USB sound-card audio bridge. macOS & Linux.",
+        "url": "https://github.com/Agora-Build/DialF"
+      },
+      {
+        "name": "HapticHatch",
+        "description": "ESP32-S3 firmware demonstrating high-frequency, high-resolution data streaming between two devices over Agora Signaling at 100 Hz",
+        "url": "https://github.com/Agora-Build/HapticHatch"
+      },
+      {
+        "name": "snora",
+        "description": "Bio-adaptive audio engine for sleep, focus, exercise & meditation. Real-time soundscapes driven by heart rate, HRV, respiration & stress via Agora RTC.",
+        "url": "https://github.com/Agora-Build/snora"
+      },
+      {
+        "name": "stream-to-agora",
+        "description": "Stream local files or http(s)/rtmp/rtsp URLs to an Agora RTC channel",
+        "url": "https://github.com/Agora-Build/stream-to-agora"
+      },
+      {
+        "name": "audictl",
+        "description": "Cross-platform audio-device control for macOS and Linux using CoreAudio, PipeWire, and ALSA",
+        "url": "https://github.com/Agora-Build/audictl"
+      },
+      {
+        "name": "TermCap",
+        "description": "Capture the last command and its output from your terminal, ready to pipe into an LLM",
+        "url": "https://github.com/Agora-Build/TermCap"
+      },
+      {
+        "name": "skills",
+        "description": "Reusable agent skills from Agora Build",
+        "url": "https://github.com/Agora-Build/skills"
+      },
+      {
+        "name": "Hatch",
+        "description": "Secure, versioned file release CLI for S3-compatible storage",
+        "url": "https://github.com/Agora-Build/Hatch"
+      },
+      {
+        "name": "aeval",
+        "description": "Binary releases for aeval(Eval system from Agora)",
+        "url": "https://github.com/Agora-Build/aeval"
+      },
+      {
+        "name": "Helm-Charts",
+        "description": "Helm charts for Agora",
+        "url": "https://github.com/Agora-Build/Helm-Charts"
+      }
+    ],
+    "source": "github",
+    "monitor": false
+  }
+]

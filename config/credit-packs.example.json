@@ -1,0 +1,8 @@
+[
+  {
+    "id": "builder-pack",
+    "name": "Builder credits",
+    "credits": 100,
+    "priceId": "price_ReplaceWithYourStripePrice"
+  }
+]
