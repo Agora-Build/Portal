@@ -35,8 +35,8 @@ export function newSpace(fields, { id, ownerId, now }) {
 
 export function systemSpaces(plazaMap, now, plazaCapacity = PLAZA_CAPACITY) {
   const at = new Date(now).toISOString();
-  const base = { type: "stoa", worldId: "plaza", themeId: "agora", visibility: "listed", access: "open", ownerId: null, members: [], ...runtime(), purpose: "", createdAt: at, updatedAt: at };
-  return [{ ...base, id: PLAZA_ID, title: "The plaza", capacity: plazaCapacity }, ...plazaMap.lots.map((lot) => ({ ...base, id: lotSpaceId(lot.slug), slug: lot.slug, lot: { worldId: "plaza", lotId: lot.lotId }, title: lot.title, capacity: lot.capacity }))];
+  const makeBase = () => ({ type: "stoa", worldId: "plaza", themeId: "agora", visibility: "listed", access: "open", ownerId: null, members: [], ...runtime(), purpose: "", createdAt: at, updatedAt: at });
+  return [{ ...makeBase(), id: PLAZA_ID, title: "The plaza", capacity: plazaCapacity }, ...plazaMap.lots.map((lot) => ({ ...makeBase(), id: lotSpaceId(lot.slug), slug: lot.slug, lot: { worldId: "plaza", lotId: lot.lotId }, title: lot.title, capacity: lot.capacity }))];
 }
 
 export function migratedRoom(room, now) {

@@ -135,3 +135,12 @@ test("public spaces hide invitation hashes and the channel epoch", () => {
   assert.deepEqual(managed.members, ["account:o"]);
   assert.equal(JSON.stringify(managed).includes("secret"), false);
 });
+test("system spaces have independent array instances", () => {
+  const [plaza, ...lots] = systemSpaces(plazaMap, 0);
+  plaza.decor.push("lamp");
+  plaza.members.push("account:test");
+  assert.deepEqual(lots[0].decor, []);
+  assert.deepEqual(lots[0].members, []);
+  assert.notEqual(plaza.decor, lots[0].decor);
+  assert.notEqual(plaza.members, lots[0].members);
+});
