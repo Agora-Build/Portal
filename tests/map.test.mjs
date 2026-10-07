@@ -62,3 +62,36 @@ test("received paths are rejected when they jump or cross blocked tiles", () => 
   assert.equal(validPath(map, "nope"), false);
   assert.equal(validPath(map, new Array(401).fill({ x: 0, y: 0 })), false);
 });
+
+import { readFile } from "node:fs/promises";
+const world = async (id) => parseMap(JSON.parse(await readFile(new URL("../worlds/" + id + "/map.json", import.meta.url), "utf8")));
+const seatsIn = (map, area) => { const seats = []; for (let y = area.y; y < area.y + area.height; y += 1) for (let x = area.x; x < area.x + area.width; x += 1) if (roleAt(map, x, y) === "seat") seats.push({ x, y }); return seats; };
+
+test("the plaza has six reachable lots whose interiors are separate and fully reachable", async () => {
+  const plaza = await world("plaza");
+  assert.equal(plaza.id, "plaza");
+  assert.deepEqual(plaza.lots.map((lot) => [lot.slug, lot.capacity]), [["ai-agents", 8], ["voice-ai", 8], ["rtc-lab", 6], ["founders-table", 6], ["open-source", 10], ["lounge", 12]]);
+  const [spawn] = plaza.spawns;
+  assert.ok(walkable(plaza, spawn.x, spawn.y));
+  const outside = reachable(plaza, spawn);
+  for (const lot of plaza.lots) {
+    assert.equal(roleAt(plaza, lot.door.x, lot.door.y), "door", lot.slug);
+    assert.ok(outside.has(lot.door.x + "," + lot.door.y), lot.slug + " door is reachable");
+    assert.ok(!outside.has(lot.entry.x + "," + lot.entry.y), lot.slug + " interior is separate");
+    const inside = reachable(plaza, lot.entry);
+    const seats = seatsIn(plaza, lot.interior);
+    assert.equal(seats.length, 6, lot.slug);
+    for (const seat of seats) assert.ok(inside.has(seat.x + "," + seat.y), lot.slug + " seat");
+    assert.ok(inside.has(lot.entry.x + "," + (lot.entry.y + 1)), lot.slug + " exit");
+    assert.equal(roleAt(plaza, lot.entry.x, lot.entry.y + 1), "door");
+  }
+  assert.deepEqual(plaza.interactables.map((entry) => [entry.id, entry.kind]), [["collaborators", "noticeboard"], ["voice-ai", "noticeboard"], ["offers", "noticeboard"]]);
+});
+test("the room world seats everyone reachably", async () => {
+  const room = await world("room");
+  assert.equal(room.id, "room");
+  const open = reachable(room, room.spawns[0]);
+  const seats = seatsIn(room, { x: 0, y: 0, width: room.width, height: room.height });
+  assert.equal(seats.length, 8);
+  for (const seat of seats) assert.ok(open.has(seat.x + "," + seat.y));
+});
