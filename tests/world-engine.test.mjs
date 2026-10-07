@@ -21,7 +21,7 @@ function setup({ reducedMotion = false } = {}) {
   // Runs only the frames already requested, so a walking avatar cannot loop forever inside one flush.
   const flush = () => { for (const callback of frames.splice(0)) callback(); };
   flush();
-  return { engine, handlers, drawn, themes, events, timers, flush, advance: (ms) => { time += ms; } };
+  return { engine, handlers, drawn, themes, events, timers, frames, flush, advance: (ms) => { time += ms; } };
 }
 
 test("walking to a tile follows a path and arrives", () => {
@@ -94,4 +94,46 @@ test("themes, names, and people can change while walking; destroy removes input"
   assert.deepEqual(drawn.at(-1).avatars.map((avatar) => avatar.name), ["Ada", "Bo"]);
   engine.destroy();
   assert.deepEqual(Object.keys(handlers), []);
+});
+test("destroy stops the loop", () => {
+  const { engine, frames, timers, drawn, flush } = setup();
+  engine.walkTo({ x: 21, y: 12 });
+  engine.destroy();
+  const [drawnBefore, timersBefore] = [drawn.length, timers.length];
+  engine.setLabels([{ x: 1, y: 1, text: "Hi" }]); flush();
+  for (const callback of timers) callback();
+  flush();
+  assert.equal(drawn.length, drawnBefore);
+  assert.equal(timers.length, timersBefore);
+  assert.equal(frames.length, 0);
+});
+test("walking to a new tile mid-walk keeps the avatar where it is", () => {
+  const { engine, events, drawn, flush, advance } = setup();
+  engine.walkTo({ x: 21, y: 12 });
+  const first = events.move[0];
+  advance(300); flush();
+  const before = drawn.at(-1).avatars[0];
+  assert.equal(engine.walkTo({ x: 23, y: 17 }), true);
+  flush();
+  const after = drawn.at(-1).avatars[0];
+  assert.deepEqual([after.x, after.y], [before.x, before.y]);
+  const { path, startedAt } = events.move.at(-1);
+  assert.deepEqual(path[0], first.path[1]);
+  assert.deepEqual(path.at(-1), { x: 23, y: 17 });
+  assert.equal(startedAt, 1000 + 300 - 100);
+});
+test("modified keys and secondary buttons are ignored, and listeners can be removed", () => {
+  const { engine, handlers, events } = setup();
+  let prevented = false;
+  handlers.keydown({ key: "ArrowLeft", ctrlKey: true, preventDefault() { prevented = true; } });
+  assert.equal(prevented, false);
+  assert.equal(events.move.length, 0);
+  handlers.pointerup({ button: 2, clientX: 0, clientY: 0 });
+  assert.equal(events.move.length, 0);
+  const seen = [];
+  const off = engine.on("move", (value) => seen.push(value));
+  engine.walkTo({ x: 21, y: 12 });
+  off();
+  engine.walkTo({ x: 23, y: 17 });
+  assert.equal(seen.length, 1);
 });
