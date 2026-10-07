@@ -22,7 +22,7 @@ import { loadThemes } from "./spaces/themes.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const sdkFile = createRequire(import.meta.url).resolve("agora-rtc-sdk-ng");
-const publicFiles = new Set(["index.html", "explore.html", "services.html", "radar.html", "meetings.html", "account.html", "account.js", "stoa.html", "world/map.js", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "services.js", "radar.js", "meetings.js", "call.js", "assets/agora-rtc.js", "assets/favicon.svg", "assets/guohai.jpg"]);
+const publicFiles = new Set(["index.html", "explore.html", "services.html", "radar.html", "meetings.html", "account.html", "account.js", "stoa.html", "stoa.js", "world/map.js", "world/kinds.js", "world/themes.js", "world/camera.js", "world/motion.js", "world/renderer-canvas.js", "world/engine.js", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "services.js", "radar.js", "meetings.js", "call.js", "assets/agora-rtc.js", "assets/favicon.svg", "assets/guohai.jpg"]);
 const types = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".jpg": "image/jpeg" };
 
 function json(response, status, body, headers = {}) {

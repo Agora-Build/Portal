@@ -545,3 +545,23 @@ dialog h2 { font-size: 30px; line-height: 1.25; font-weight: 500; letter-spacing
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+.stoa-main { max-width: 1400px; }
+.stoa { color: var(--ink); background: var(--paper); padding: 18px; border-radius: 5px; }
+.stoa-heading { display: flex; justify-content: space-between; align-items: end; gap: 20px; flex-wrap: wrap; margin-bottom: 18px; }
+.stoa-heading h1 { margin: 6px 0 0; font-size: clamp(30px, 4vw, 46px); font-weight: 500; letter-spacing: -1.5px; }
+.stoa-heading [aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.stoa-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 18px; }
+.stoa-stage { background: var(--paper); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+#stoa-canvas { display: block; width: 100%; height: min(72vh, 720px); min-height: 420px; touch-action: none; cursor: pointer; }
+#stoa-canvas:focus-visible { outline: 3px solid var(--accent); outline-offset: -3px; }
+.stoa-help { margin: 0; padding: 9px 14px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); background: var(--surface); }
+.stoa-panel { padding: 20px; background: var(--surface); border: 1px solid var(--line); border-radius: 5px; align-self: start; }
+.stoa-status { margin: 0 0 18px; font-size: 13px; color: var(--muted); }
+.stoa-panel-title { margin: 22px 0 10px; font: 500 12px var(--mono); letter-spacing: 1px; text-transform: uppercase; color: var(--muted); }
+.stoa-rooms, .stoa-people { list-style: none; margin: 0; padding: 0; }
+.stoa-room { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--line); }
+.stoa-room strong { font-weight: 500; }
+.stoa-room span { grid-column: 1; font-size: 12px; color: var(--muted); }
+.stoa-room button { grid-row: 1 / span 2; grid-column: 2; }
+.stoa-people li { font-size: 14px; padding: 6px 0; }
+@media (max-width: 900px) { .stoa-layout { grid-template-columns: 1fr; } #stoa-canvas { height: 62vh; min-height: 340px; } }

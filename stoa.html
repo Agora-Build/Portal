@@ -7,11 +7,56 @@
   <title>Stoa | Agora Build</title>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/script.js"></script><script type="module" src="/stoa.js"></script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
-  <main id="main" class="main-content">
-    <section class="page-intro"><div><p class="kicker">THE STOA</p><h1>The plaza is being built.</h1><p>Soon you can walk in, meet builders, start a topic, and work together.</p></div></section>
-  </main>
+  <div class="workspace">
+    <header class="site-header">
+      <a class="wordmark" href="/index.html" aria-label="Agora Build home"><span class="brand-symbol" aria-hidden="true">b_</span><span>agora<span class="brand-dot">.</span>build<small>THE BUILDER'S FOUNDRY</small></span></a>
+      <nav id="site-nav" class="site-nav" aria-label="Main navigation"><a href="/index.html">The floor</a><a href="/explore.html">Projects</a><a href="/meetings.html">Rooms</a><a href="/radar.html">Radar</a><a href="/services.html">Services</a><a href="/account.html">Account</a><a class="nav-github" href="https://github.com/Agora-Build" target="_blank" rel="noopener noreferrer">GitHub <span aria-hidden="true">&#8599;</span></a></nav>
+      <div class="header-actions"><button class="button button-small" type="button" data-join data-guest-label="Take a seat" data-member-label="Your profile">Take a seat <span aria-hidden="true">+</span></button><button type="button" class="nav-toggle" aria-controls="site-nav" aria-expanded="false" aria-label="Toggle navigation"><span></span><span></span></button></div>
+    </header>
+    <main id="main" class="main-content stoa-main">
+      <section class="stoa" id="stoa" aria-labelledby="stoa-title">
+        <div class="stoa-heading"><div><p class="kicker">THE STOA / PUBLIC PLAZA</p><h1 id="stoa-title">Walk into the plaza.</h1></div><button class="button button-secondary button-small" type="button" id="stoa-minimal" aria-pressed="false">Minimal view</button></div>
+        <div class="stoa-layout">
+          <div class="stoa-stage"><canvas id="stoa-canvas" tabindex="0" aria-label="Plaza map" aria-describedby="stoa-help"></canvas><p class="stoa-help" id="stoa-help">Click or tap to walk. Select the map to use the arrow keys or WASD.</p></div>
+          <aside class="stoa-panel" aria-label="Around you">
+            <p class="stoa-status" id="stoa-status" role="status" aria-live="polite">Opening the plaza...</p>
+            <h2 class="stoa-panel-title">Rooms</h2>
+            <ul class="stoa-rooms" id="stoa-rooms"></ul>
+            <h2 class="stoa-panel-title">Here now</h2>
+            <ul class="stoa-people" id="stoa-people"></ul>
+          </aside>
+        </div>
+      </section>
+    </main>
+    <footer class="site-footer"><span>The frontier is a shared workspace.</span><a href="https://github.com/Agora-Build" target="_blank" rel="noopener noreferrer">Open minds. Open doors. <span aria-hidden="true">&#8599;</span></a></footer>
+  </div>
+  <dialog id="join-dialog" aria-labelledby="join-title">
+    <div class="dialog-head"><span class="kicker">YOUR PLACE IN THE HOUSE</span><button class="close-button" type="button" data-close aria-label="Close profile form">&times;</button></div>
+    <h2 id="join-title">Pull up a chair.</h2>
+    <p class="dialog-intro">Good connections start with honest intent. Your profile and participation in rooms are public. Sign in to keep access across devices, or continue with this browser.</p>
+    <form id="profile-form" class="stack-form">
+      <div class="form-row"><label>Your name<input name="name" required minlength="2" maxlength="60" autocomplete="name" placeholder="What should we call you?"></label><label>Location <span class="optional">optional</span><input name="location" maxlength="80" placeholder="City or remote" autocomplete="address-level2"></label></div>
+      <label>A little about you<textarea name="bio" required minlength="2" maxlength="400" rows="2" placeholder="Your work, experience, or interests."></textarea></label>
+      <label>Your real intent <span class="required-label">required</span><textarea name="intent" required minlength="2" maxlength="400" rows="3" placeholder="I am building a voice agent for language practice. I need help making interruptions feel natural."></textarea></label>
+      <label>Who would you like to meet? <span class="optional">optional</span><input name="lookingFor" maxlength="300" placeholder="Audio engineers, language teachers, people building similar things."></label>
+      <label>Skills & interests <span class="optional">comma separated, up to 8</span><input name="skills" required maxlength="327" placeholder="Rust, voice AI, WebRTC"></label>
+      <label>A public contact link<input name="contact" type="url" required maxlength="240" placeholder="https://github.com/yourname"></label>
+      <label class="checkbox-label"><input name="monitor" type="checkbox"><span>Keep a radar on my intent.<small>When connected, web search checks public sources for relevant people and resources. Your intent and interests are sent to the configured model provider.</small></span></label>
+      <p class="form-note">Your profile and room activity are shared with the foundry. Model search may use its public text. Save your intent here; keep personal or sensitive details out.</p>
+      <p id="profile-error" class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button class="button" id="profile-submit" type="submit">Join the house</button><button class="delete-button" id="profile-delete" type="button" hidden>Remove my profile</button></div>
+    </form>
+  </dialog>
+  <dialog id="person-dialog" aria-labelledby="person-title"><div class="dialog-head"><span class="kicker">BUILDER PROFILE</span><button class="close-button" type="button" data-close aria-label="Close builder profile">&times;</button></div><div id="profile-content"></div></dialog>
+  <dialog id="room-dialog" aria-labelledby="room-title">
+    <div class="dialog-head"><span class="kicker">MAKE ROOM FOR A CONVERSATION</span><button class="close-button" type="button" data-close aria-label="Close room form">&times;</button></div>
+    <h2 id="room-title">Meet around a purpose.</h2><p class="dialog-intro">Create a group room, share the invite, and open a video call together.</p>
+    <form id="room-form" class="stack-form"><label>Room name<input name="title" required minlength="2" maxlength="80" placeholder="Voice agents build session"></label><label>What are we meeting for?<textarea name="intent" required minlength="2" maxlength="300" rows="3" placeholder="Debug a problem, plan a demo day, or bring a whiteboard session into the next sprint."></textarea></label><p class="form-note">Room names, purposes, and rosters are public. Audio, video, and screen sharing stay in this workspace, powered by Agora.</p><p id="room-error" class="form-error" role="alert"></p><button type="submit" class="button">Create meeting room <span aria-hidden="true">&#8599;</span></button></form>
+  </dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
 </body>
 </html>

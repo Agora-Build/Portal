@@ -143,3 +143,21 @@ test("the themes API returns the three built-in themes", async () => {
     assert.deepEqual((await response.json()).themes.map((theme) => theme.id), ["agora", "minimal", "cyberpunk"]);
   } finally { await close(instance); }
 });
+
+test("the plaza page loads its engine modules and every linked file", async () => {
+  const { instance, url } = await start();
+  try {
+    const page = await request(url, "/stoa/");
+    const html = await page.text();
+    assert.match(html, /<canvas id="stoa-canvas"/);
+    assert.match(html, /id="stoa-rooms"/);
+    assert.match(html, /aria-live="polite"/);
+    const links = new Set([...html.matchAll(/(?:src|href)="([^"#]+)"/g)].map((match) => match[1]).filter((link) => !link.startsWith("https://")));
+    for (const link of links) assert.equal((await fetch(new URL(link, url + "/stoa/"))).status, 200, link);
+    for (const module of ["/stoa.js", "/world/map.js", "/world/kinds.js", "/world/themes.js", "/world/camera.js", "/world/motion.js", "/world/renderer-canvas.js", "/world/engine.js"]) {
+      const response = await request(url, module);
+      assert.equal(response.status, 200, module);
+      assert.match(response.headers.get("content-type"), /text\/javascript/, module);
+    }
+  } finally { await close(instance); }
+});
