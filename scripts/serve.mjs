@@ -15,10 +15,13 @@ import { createLedger } from "./ledger.mjs";
 import { createBilling } from "./billing.mjs";
 import { createConnections } from "./connections.mjs";
 import { createPostgresPersistence } from "./persistence.mjs";
+import { createSignaling, signalingConfig } from "./spaces/signaling.mjs";
+import { createSpaces, loadWorlds } from "./spaces/service.mjs";
+import { handleSpaces } from "./spaces/routes.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const sdkFile = createRequire(import.meta.url).resolve("agora-rtc-sdk-ng");
-const publicFiles = new Set(["index.html", "explore.html", "services.html", "radar.html", "meetings.html", "account.html", "account.js", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "services.js", "radar.js", "meetings.js", "call.js", "assets/agora-rtc.js", "assets/favicon.svg", "assets/guohai.jpg"]);
+const publicFiles = new Set(["index.html", "explore.html", "services.html", "radar.html", "meetings.html", "account.html", "account.js", "stoa.html", "world/map.js", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "services.js", "radar.js", "meetings.js", "call.js", "assets/agora-rtc.js", "assets/favicon.svg", "assets/guohai.jpg"]);
 const types = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".jpg": "image/jpeg" };
 
 function json(response, status, body, headers = {}) {
@@ -65,6 +68,9 @@ export function createAppServer(directory = root, options = {}) {
   const connections = options.connections || createConnections(store, auth);
   const models = options.models || createModelClient(modelConfig());
   const activity = options.activity || createActivityFeed({ store, projectsFile: resolve(dataDirectory, "projects.json"), snapshotFile: resolve(dataDirectory, "activity.json") });
+  const worlds = options.worlds || loadWorlds(directory);
+  const signaling = options.signaling || createSignaling(signalingConfig());
+  const spaces = options.spaces || createSpaces({ store, worlds, signaling, calls, secret: options.channelSecret ?? signalingConfig().secret, admins: (process.env.PLATFORM_ADMINS || "").split(",").map((id) => id.trim()).filter(Boolean), plazaCapacity: options.plazaCapacity });
   const windows = new Map();
   const scanning = new Set();
   const radarHours = Math.max(1, Number(process.env.RADAR_INTERVAL_HOURS) || 24);
@@ -323,13 +329,19 @@ export function createAppServer(directory = root, options = {}) {
           if (!room) throw new AppError(404, "This room was not found.");
           limit("call:" + person.id, 30, 60000);
           json(response, 200, calls.issue(room, person, await body(request)));
-        } else throw new AppError(404, "This page or service was not found.");
+        } else {
+          const handled = await handleSpaces({ path, method: request.method, url: requestUrl, token, read: () => body(request), spaces, worlds, limit, ip: request.socket.remoteAddress });
+          if (!handled) throw new AppError(404, "This page or service was not found.");
+          json(response, handled.status, handled.body);
+        }
         return;
       }
       if (!["GET", "HEAD"].includes(request.method)) { response.writeHead(405, { Allow: "GET, HEAD" }).end("Method not allowed"); return; }
       const meeting = /^\/meet\/([a-f0-9-]{36})$/.exec(path);
       if (meeting && !(await store.rooms()).some((room) => room.id === meeting[1])) { response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("This meeting room was not found."); return; }
-      const filename = meeting ? "meetings.html" : path === "/" ? "index.html" : path.slice(1);
+      const stoa = /^\/stoa(?:\/|\/room\/([a-z0-9-]{2,40})|\/s\/([a-f0-9-]{36}))$/.exec(path);
+      if (stoa && ((stoa[1] && !worlds.plaza.map.lots.some((lot) => lot.slug === stoa[1])) || (stoa[2] && !(await spaces.visible(token, stoa[2], requestUrl.searchParams.get("invite")))))) { response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("This space was not found."); return; }
+      const filename = stoa ? "stoa.html" : meeting ? "meetings.html" : path === "/" ? "index.html" : path.slice(1);
       if (!publicFiles.has(filename)) { response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found"); return; }
       const file = resolve(directory, filename);
       const content = await readFile(filename === "assets/agora-rtc.js" && !existsSync(file) ? sdkFile : file);
@@ -363,6 +375,9 @@ export function createAppServer(directory = root, options = {}) {
   const expiry = setInterval(() => { ledger.expire().catch(() => {}); }, 5 * 60000);
   expiry.unref();
   server.on("close", () => { clearInterval(expiry); persistence?.close().catch(() => {}); });
+  const spaceSweep = setInterval(() => { spaces.sweep().catch(() => {}); }, 15000);
+  spaceSweep.unref();
+  server.on("close", () => clearInterval(spaceSweep));
   return server;
 }
 

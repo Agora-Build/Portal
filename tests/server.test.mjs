@@ -272,7 +272,7 @@ test("automatic radar scans only opted-in members and respects the scan interval
 test("production output includes six pages, platform backend, seed data, and no private state", async () => {
   await import("../scripts/build.mjs");
   for (const file of ["account.html", "account.js", "scripts/identity.mjs", "scripts/ledger.mjs", "scripts/credits.mjs", "scripts/billing.mjs", "scripts/connections.mjs", "scripts/plans.mjs", "scripts/persistence.mjs", "scripts/platform-admin.mjs"]) assert.deepEqual(await readFile(resolve(root, "dist", file)), await readFile(resolve(root, file)), file);
-  const files = ["index.html", "explore.html", "services.html", "radar.html", "meetings.html", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "services.js", "radar.js", "meetings.js", "call.js", "package.json", "package-lock.json", "assets/favicon.svg", "assets/guohai.jpg", "scripts/serve.mjs", "scripts/store.mjs", "scripts/models.mjs", "scripts/activity.mjs", "scripts/calls.mjs", "scripts/auth.mjs", "data/people.json", "data/projects.json", "data/offers.json", "data/activity.json"];
+  const files = ["index.html", "explore.html", "services.html", "radar.html", "meetings.html", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "services.js", "radar.js", "meetings.js", "call.js", "package.json", "package-lock.json", "assets/favicon.svg", "assets/guohai.jpg", "scripts/serve.mjs", "scripts/store.mjs", "scripts/models.mjs", "scripts/activity.mjs", "scripts/calls.mjs", "scripts/auth.mjs", "stoa.html", "world/map.js", "worlds/plaza/map.json", "worlds/room/map.json", "scripts/spaces/service.mjs", "scripts/spaces/routes.mjs", "data/people.json", "data/projects.json", "data/offers.json", "data/activity.json"];
   for (const file of files) assert.deepEqual(await readFile(resolve(root, "dist", file)), await readFile(resolve(root, file)), file);
   for (const file of [".env", ".data/community.json"]) await assert.rejects(readFile(resolve(root, "dist", file)), { code: "ENOENT" });
   const built = await start({}, resolve(root, "dist"));
@@ -281,6 +281,7 @@ test("production output includes six pages, platform backend, seed data, and no 
     assert.equal((await request("/account.html", { base: built.url })).status, 200);
     assert.equal((await request("/assets/agora-rtc.js", { base: built.url })).status, 200);
     assert.equal((await request("/call.js", { base: built.url })).status, 200);
+    assert.equal((await request("/stoa/", { base: built.url })).status, 200);
     assert.equal((await (await request("/api/projects", { base: built.url })).json()).projects.length, 16);
   } finally { await close(built.instance); }
 });
