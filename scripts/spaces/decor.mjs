@@ -1,9 +1,9 @@
 import { AppError } from "../store.mjs";
 import { reachable, roleAt, walkable } from "../../world/map.js";
-import { DECOR_KINDS } from "./model.mjs";
+import { BLOCKING_DECOR, DECOR_KINDS } from "../../world/kinds.js";
 
 // Decorations are semantic kinds; the theme draws them. Blocking kinds must never cut people off.
-export const BLOCKING_DECOR = new Set(["sofa", "table", "whiteboard", "bookshelf", "statue", "fountain"]);
+export { BLOCKING_DECOR };
 export const DECOR_LIMIT = 60;
 const tilesIn = (map, area, role) => { const tiles = []; for (let y = area.y; y < area.y + area.height; y += 1) for (let x = area.x; x < area.x + area.width; x += 1) if (roleAt(map, x, y) === role) tiles.push({ x, y }); return tiles; };
 

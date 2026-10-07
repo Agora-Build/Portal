@@ -95,3 +95,24 @@ test("the room world seats everyone reachably", async () => {
   assert.equal(seats.length, 8);
   for (const seat of seats) assert.ok(open.has(seat.x + "," + seat.y));
 });
+
+import { BLOCKING_DECOR, DECOR_KINDS, THEMED_KINDS } from "../world/kinds.js";
+import { DECOR_KINDS as SERVER_KINDS } from "../scripts/spaces/model.mjs";
+import { BLOCKING_DECOR as SERVER_BLOCKING } from "../scripts/spaces/decor.mjs";
+
+test("decoration kinds are shared by the browser and the server", () => {
+  assert.deepEqual(DECOR_KINDS, ["plant", "lamp", "rug", "sofa", "chair", "table", "whiteboard", "bookshelf", "screen", "banner", "poster", "statue", "fountain"]);
+  assert.deepEqual(THEMED_KINDS, [...DECOR_KINDS, "noticeboard"]);
+  assert.deepEqual([...BLOCKING_DECOR], ["sofa", "table", "whiteboard", "bookshelf", "statue", "fountain"]);
+  assert.equal(SERVER_KINDS, DECOR_KINDS);
+  assert.equal(SERVER_BLOCKING, BLOCKING_DECOR);
+});
+test("maps keep the ground role beneath structures", async () => {
+  const plaza = await world("plaza");
+  const at = (x, y) => [plaza.ground[y * plaza.width + x], plaza.roles[y * plaza.width + x]];
+  assert.deepEqual(at(20, 7), ["path", "seat"]);
+  assert.deepEqual(at(5, 8), ["grass", "plant"]);
+  assert.deepEqual(at(0, 0), ["floor", "wall"]);
+  assert.deepEqual(at(21, 17), ["path", "path"]);
+  assert.equal(plaza.ground.length, plaza.width * plaza.height);
+});

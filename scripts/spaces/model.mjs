@@ -1,7 +1,7 @@
 import { AppError } from "../store.mjs";
 import { validCombination } from "./permissions.mjs";
 
-export const DECOR_KINDS = ["plant", "lamp", "rug", "sofa", "chair", "table", "whiteboard", "bookshelf", "screen", "banner", "poster", "statue", "fountain"];
+export { DECOR_KINDS } from "../../world/kinds.js";
 export const THEMES = ["agora", "minimal", "cyberpunk"];
 export const PLAZA_ID = "plaza";
 export const PLAZA_CAPACITY = 1000;

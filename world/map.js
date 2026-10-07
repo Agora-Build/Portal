@@ -10,6 +10,7 @@ export function parseMap(source) {
   const tiles = new Map();
   for (const tileset of source.tilesets || []) for (const tile of tileset.tiles || []) tiles.set(tileset.firstgid + tile.id, props(tile));
   const roles = new Array(width * height).fill(null);
+  const ground = new Array(width * height).fill(null);
   const blocked = new Uint8Array(width * height);
   for (const name of ["ground", "structure"]) {
     const data = source.layers.find((layer) => layer.type === "tilelayer" && layer.name === name)?.data;
@@ -20,13 +21,14 @@ export function parseMap(source) {
       const tile = tiles.get(gid);
       if (!tile || !CORE_ROLES.includes(tile.role)) throw new Error("Unknown tile " + gid + ".");
       roles[index] = tile.role;
+      if (name === "ground") ground[index] = tile.role;
       blocked[index] = (tile.walkable === undefined ? BLOCKING.has(tile.role) : !tile.walkable) ? 1 : 0;
     });
   }
   roles.forEach((role, index) => { if (!role) blocked[index] = 1; });
   const objects = (name) => (source.layers.find((layer) => layer.type === "objectgroup" && layer.name === name)?.objects || []).map((object) => ({ name: object.name, ...props(object), x: Math.floor(object.x / size), y: Math.floor(object.y / size), width: Math.round((object.width || 0) / size), height: Math.round((object.height || 0) / size) }));
   return {
-    id: props(source).id, width, height, tileSize: size, roles, blocked,
+    id: props(source).id, width, height, tileSize: size, roles, ground, blocked,
     lots: objects("lot").map((lot) => ({ lotId: lot.lotId, slug: lot.slug, title: lot.title, capacity: lot.capacity, door: { x: lot.doorX, y: lot.doorY }, entry: { x: lot.entryX, y: lot.entryY }, interior: { x: lot.x, y: lot.y, width: lot.width, height: lot.height } })),
     spawns: objects("spawn").map(({ x, y }) => ({ x, y })),
     zones: objects("zone").map(({ name, x, y, width: w, height: h }) => ({ name, x, y, width: w, height: h })),

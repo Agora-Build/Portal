@@ -9,13 +9,13 @@ const prop = (values) => Object.entries(values).map(([name, value]) => ({ name, 
 const blank = (width, height, role) => Array.from({ length: height }, () => new Array(width).fill(role));
 const fill = (grid, x, y, width, height, role) => { for (let row = y; row < y + height; row += 1) for (let column = x; column < x + width; column += 1) grid[row][column] = role; };
 
-export function tiled(id, grid, objects) {
+export function tiled(id, grid, objects, under = null) {
   const height = grid.length, width = grid[0].length, gid = (role) => CORE_ROLES.indexOf(role) + 1;
   const ground = [], structure = [];
-  for (const row of grid) for (const role of row) {
-    const base = ["water", "grass", "path"].includes(role) ? role : "floor";
+  grid.forEach((row, y) => row.forEach((role, x) => {
+    const base = ["water", "grass", "path"].includes(role) ? role : under ? under[y][x] : "floor";
     ground.push(gid(base)); structure.push(role === base ? 0 : gid(role));
-  }
+  }));
   let next = 1;
   const group = (name, list) => ({ type: "objectgroup", name, objects: list.map(({ x, y, width: w = 0, height: h = 0, name: label = "", ...rest }) => ({ id: next++, name: label, x: x * SIZE, y: y * SIZE, width: w * SIZE, height: h * SIZE, point: !w && !h, properties: prop(rest) })) });
   const layers = [{ type: "tilelayer", name: "ground", width, height, data: ground }, { type: "tilelayer", name: "structure", width, height, data: structure }, ...Object.entries(objects).map(([name, list]) => group(name, list))];
@@ -38,6 +38,10 @@ export function plaza() {
   fill(grid, 1, 1, 42, 18, "grass");
   fill(grid, 1, 9, 42, 2, "path"); fill(grid, 21, 1, 2, 18, "path");
   fill(grid, 17, 6, 10, 8, "path"); fill(grid, 19, 8, 6, 4, "water");
+  const under = blank(44, 34, "floor");
+  fill(under, 1, 1, 42, 18, "grass");
+  fill(under, 1, 9, 42, 2, "path"); fill(under, 21, 1, 2, 18, "path");
+  fill(under, 17, 6, 10, 8, "path"); fill(under, 19, 8, 6, 4, "water");
   for (const [x, y] of [[17, 6], [26, 6], [17, 13], [26, 13]]) grid[y][x] = "column";
   for (const [x, y] of [[20, 7], [23, 7], [20, 12], [23, 12]]) grid[y][x] = "seat";
   for (const [x, y] of [[5, 8], [38, 8], [5, 11], [38, 11]]) grid[y][x] = "plant";
@@ -62,7 +66,7 @@ export function plaza() {
       { x: 31, y: 8, id: "voice-ai", kind: "noticeboard", label: "Voice AI", query: "voice ai" },
       { x: 25, y: 16, id: "offers", kind: "noticeboard", label: "Offers", query: "offers" }
     ]
-  });
+  }, under);
 }
 
 export function room() {
