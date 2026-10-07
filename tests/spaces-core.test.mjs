@@ -144,3 +144,65 @@ test("system spaces have independent array instances", () => {
   assert.notEqual(plaza.decor, lots[0].decor);
   assert.notEqual(plaza.members, lots[0].members);
 });
+
+import { LEASE_MS, enter, heartbeat, leaseOf, leasesFor, leave, sweep } from "../scripts/spaces/leases.mjs";
+
+const walker = (id) => ({ id: "account:" + id, ids: ["account:" + id, "member:" + id], name: id.toUpperCase() });
+const world = () => { const state = { spaces: systemSpaces(plazaMap, 0), spaceLeases: [] }; return { state, plaza: state.spaces[0], lot: state.spaces.find((space) => space.id === "lot-rtc-lab") }; };
+
+test("the first person in hosts, capacity holds, and one person holds one lease", () => {
+  const { state, lot } = world();
+  const first = enter(state, lot, walker("a"), 0);
+  assert.equal(first.firstIn, true);
+  assert.equal(lot.hostId, "account:a");
+  assert.deepEqual(first.events, [{ type: "entered", spaceId: lot.id, actorId: "account:a" }, { type: "host", spaceId: lot.id, hostId: "account:a" }]);
+  const again = enter(state, lot, walker("a"), 5000);
+  assert.equal(again.firstIn, false);
+  assert.equal(leasesFor(state, lot.id, 5000).length, 1);
+  assert.equal(again.lease.expiresAt, 5000 + LEASE_MS);
+  assert.equal(leaseOf(state, lot.id, "member:a", 5000), again.lease, "leases match any of the person's IDs");
+  for (const id of ["b", "c", "d", "e", "f"]) assert.equal(enter(state, lot, walker(id), 6000).firstIn, false);
+  assert.equal(lot.hostId, "account:a");
+  assert.throws(() => enter(state, lot, walker("g"), 7000), { status: 409, message: "This space is full right now." });
+});
+test("hosting passes to the longest-present person, and the owner hosts whenever present", () => {
+  const { state } = world();
+  const space = newSpace(spaceInput({ title: "Team", access: "open" }), { id: "s1", ownerId: "account:o", now: 0 });
+  state.spaces.push(space);
+  enter(state, space, walker("a"), 0);
+  enter(state, space, walker("b"), 1000);
+  enter(state, space, walker("o"), 2000);
+  assert.equal(space.hostId, "account:o");
+  assert.deepEqual(leave(state, space, "account:o", 3000), [{ type: "left", spaceId: "s1", actorId: "account:o" }, { type: "host", spaceId: "s1", hostId: "account:a" }]);
+  leave(state, space, "account:a", 4000);
+  assert.equal(space.hostId, "account:b");
+  assert.deepEqual(leave(state, space, "account:nobody", 5000), []);
+});
+test("an emptied lot clears its session, but a user space keeps its own", () => {
+  const { state, lot } = world();
+  enter(state, lot, walker("a"), 0);
+  Object.assign(lot, { topic: "Demos", tags: ["rtc"], decor: [{ id: "p", kind: "plant", x: 1, y: 1 }], blocked: ["account:z"] });
+  const events = leave(state, lot, "account:a", 1000);
+  assert.ok(events.some((event) => event.type === "emptied"));
+  assert.deepEqual([lot.topic, lot.tags, lot.decor, lot.blocked, lot.hostId], [null, [], [], [], null]);
+  const space = { ...newSpace(spaceInput({ title: "Team", access: "open" }), { id: "s2", ownerId: "account:o", now: 0 }), topic: "Keep" };
+  state.spaces.push(space);
+  enter(state, space, walker("a"), 0);
+  leave(state, space, "account:a", 1000);
+  assert.equal(space.topic, "Keep");
+});
+test("expired leases are swept, freeing seats and handing over the host", () => {
+  const { state, lot } = world();
+  enter(state, lot, walker("a"), 0);
+  enter(state, lot, walker("b"), 10000);
+  assert.deepEqual(sweep(state, 30000), []);
+  const events = sweep(state, LEASE_MS + 1);
+  assert.deepEqual(events, [{ type: "left", spaceId: lot.id, actorId: "account:a" }, { type: "host", spaceId: lot.id, hostId: "account:b" }]);
+  assert.equal(heartbeat(state, lot, "account:b", 65000).expiresAt, 65000 + LEASE_MS);
+  assert.throws(() => heartbeat(state, lot, "account:a", 65000), { status: 410 });
+});
+test("the plaza never has a host", () => {
+  const { state, plaza } = world();
+  assert.deepEqual(enter(state, plaza, walker("a"), 0).events, [{ type: "entered", spaceId: "plaza", actorId: "account:a" }]);
+  assert.equal(plaza.hostId, null);
+});
