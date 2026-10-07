@@ -206,3 +206,41 @@ test("the plaza never has a host", () => {
   assert.deepEqual(enter(state, plaza, walker("a"), 0).events, [{ type: "entered", spaceId: "plaza", actorId: "account:a" }]);
   assert.equal(plaza.hostId, null);
 });
+
+import { BLOCKING_DECOR, DECOR_LIMIT, validateDecor } from "../scripts/spaces/decor.mjs";
+
+const roomMap = parseMap(JSON.parse(await readFile(new URL("../worlds/room/map.json", import.meta.url), "utf8")));
+const userSpace = { id: "s1" };
+const lotSpace = { id: "lot-rtc-lab", lot: { worldId: "plaza", lotId: "rtc" } };
+const rejects = (items, map, space, message) => assert.throws(() => validateDecor(items, map, space), { status: 422, message });
+
+test("valid decorations are normalized", () => {
+  assert.equal(DECOR_LIMIT, 60);
+  assert.ok(BLOCKING_DECOR.has("sofa") && !BLOCKING_DECOR.has("plant"));
+  assert.deepEqual(validateDecor([{ id: "p1", kind: "plant", x: 3, y: 3 }, { id: "s1", kind: "sofa", x: 4, y: 3, rotation: 90, variant: 2, extra: "ignored" }], roomMap, userSpace), [{ id: "p1", kind: "plant", x: 3, y: 3, rotation: 0, variant: 0 }, { id: "s1", kind: "sofa", x: 4, y: 3, rotation: 90, variant: 2 }]);
+  assert.deepEqual(validateDecor([], roomMap, userSpace), []);
+});
+test("decorations must be known, well-formed, on open floor, and inside the room", () => {
+  rejects(new Array(61).fill(0).map((_, index) => ({ id: "d" + index, kind: "plant", x: 2 + (index % 16), y: 2 + Math.floor(index / 16) })), roomMap, userSpace, "Place up to 60 decorations.");
+  rejects("plant", roomMap, userSpace, "Place up to 60 decorations.");
+  rejects([{ id: "bad id!", kind: "plant", x: 3, y: 3 }], roomMap, userSpace, "Each decoration needs a short ID.");
+  rejects([{ id: "d", kind: "dragon", x: 3, y: 3 }], roomMap, userSpace, "Choose a known decoration.");
+  rejects([{ id: "d", kind: "plant", x: 3, y: 3, rotation: 45 }], roomMap, userSpace, "This decoration's rotation or style is not available.");
+  rejects([{ id: "d", kind: "plant", x: 3, y: 3, variant: 8 }], roomMap, userSpace, "This decoration's rotation or style is not available.");
+  rejects([{ id: "d", kind: "plant", x: 0, y: 3 }], roomMap, userSpace, "Place decorations on open floor inside the room.");
+  rejects([{ id: "d", kind: "plant", x: 9, y: 6 }], roomMap, userSpace, "Place decorations on open floor inside the room.");
+  rejects([{ id: "d", kind: "plant", x: 9, y: 11 }], roomMap, userSpace, "Keep doors and entrances clear.");
+  rejects([{ id: "a", kind: "plant", x: 3, y: 3 }, { id: "b", kind: "lamp", x: 3, y: 3 }], roomMap, userSpace, "Only one decoration fits on each tile.");
+});
+test("blocking decorations may not cut off seats, doors, or entrances", () => {
+  const walls = [[8, 11], [11, 11], [9, 10], [10, 10], [9, 12], [10, 12]].map(([x, y], index) => ({ id: "w" + index, kind: "statue", x, y }));
+  rejects(walls, roomMap, userSpace, "Keep every door, entrance, and seat reachable.");
+  assert.equal(validateDecor(walls.map((item) => ({ ...item, kind: "plant" })), roomMap, userSpace).length, 6, "non-blocking decorations never cut anything off");
+  rejects([{ id: "d", kind: "sofa", x: 8, y: 4 }], roomMap, userSpace, "Keep every door, entrance, and seat reachable.");
+});
+test("lot decorations stay inside the lot's interior and keep its doors clear", () => {
+  assert.equal(validateDecor([{ id: "p", kind: "plant", x: 15, y: 22 }], plazaMap, lotSpace).length, 1);
+  rejects([{ id: "p", kind: "plant", x: 22, y: 22 }], plazaMap, lotSpace, "Place decorations on open floor inside the room.");
+  rejects([{ id: "p", kind: "plant", x: 17, y: 31 }], plazaMap, lotSpace, "Keep doors and entrances clear.");
+  rejects([{ id: "p", kind: "plant", x: 17, y: 32 }], plazaMap, lotSpace, "Keep doors and entrances clear.");
+});
