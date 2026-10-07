@@ -37,7 +37,10 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
     await ready();
     const events = [];
     const result = await store.transaction((state) => { events.push(...sweepLeases(state, now())); return work(state, events); });
-    if (events.length) for (const listener of listeners) listener(events);
+    if (events.length) for (const listener of listeners) {
+      // The change is already committed, so a failing listener must never turn it into an error.
+      try { Promise.resolve(listener(events)).catch(() => {}); } catch { /* ignored */ }
+    }
     return result;
   }
   async function actorFor(token) {
@@ -60,7 +63,11 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
 
   const spaces = {
     onEvents(listener) { listeners.push(listener); },
-    async sweep() { await mutate(() => null); },
+    async sweep() {
+      const state = await store.snapshot();
+      if (!state.spaceLeases.some((lease) => lease.expiresAt <= now())) return;
+      await mutate(() => null);
+    },
     async list({ q = "" } = {}) {
       await ready();
       const state = await store.snapshot();
@@ -99,12 +106,16 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
         if (system(space)) throw new AppError(403, "The map sets the plaza and its rooms.");
         if (!can(actor, "edit", space)) throw new AppError(403, "Only the owner can change this space.");
         const fields = spaceInput(input || {}, space);
-        if (fields.visibility !== space.visibility) space.channelEpoch += 1;
+        const visibilityChanged = fields.visibility !== space.visibility;
+        if (visibilityChanged) space.channelEpoch += 1;
         Object.assign(space, fields, { updatedAt: new Date(now()).toISOString() });
+        let evicted = false;
         for (const lease of leasesFor(state, space.id, now())) {
           const holder = { id: lease.actorId, ids: lease.ids, hasProfile: lease.ids.some((entry) => entry.startsWith("member:")), admin: false };
-          if (!can(holder, "enter", space)) events.push(...leaveLease(state, space, lease.actorId, now()));
+          if (!can(holder, "enter", space)) { events.push(...leaveLease(state, space, lease.actorId, now())); evicted = true; }
         }
+        // Evicted people still know the old channel name and key, so rotate them unless the channel is public.
+        if (evicted && !visibilityChanged && space.visibility !== "listed") space.channelEpoch += 1;
         return view(state, space, actor);
       });
     },
@@ -230,10 +241,12 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
     },
     async removeMember(token, id, memberId) {
       const actor = signedIn(await actorFor(token));
+      if (!ACTOR_ID.test(memberId || "")) throw new AppError(422, "Choose a builder to remove.");
       return mutate((state, events) => {
         const space = findVisible(state, id, actor);
         if (system(space) || !can(actor, "edit", space)) throw new AppError(403, "Only the owner can change members.");
         if (memberId === space.ownerId) throw new AppError(422, "The owner stays a member.");
+        if (!space.members.includes(memberId)) return { members: space.members };
         space.members = space.members.filter((entry) => entry !== memberId);
         if (space.visibility !== "listed") space.channelEpoch += 1;
         events.push(...leaveLease(state, space, memberId, now()), { type: "member-removed", spaceId: space.id, actorId: memberId });
@@ -245,7 +258,7 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
       const actor = await actorFor(token);
       const state = await store.snapshot();
       const channels = [{ spaceId: PLAZA_ID, name: channelName(secret, find(state, PLAZA_ID)), write: Boolean(actor), key: null }];
-      if (actor) for (const lease of state.spaceLeases.filter((entry) => entry.actorId === actor.id && entry.expiresAt > now() && entry.spaceId !== PLAZA_ID)) {
+      if (actor) for (const lease of state.spaceLeases.filter((entry) => (actor.ids.includes(entry.actorId) || entry.ids.some((id) => actor.ids.includes(id))) && entry.expiresAt > now() && entry.spaceId !== PLAZA_ID)) {
         const space = state.spaces.find((entry) => entry.id === lease.spaceId);
         if (space) channels.push({ spaceId: space.id, name: channelName(secret, space), write: true, key: spaceKey(secret, space) });
       }

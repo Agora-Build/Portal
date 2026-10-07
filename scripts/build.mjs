@@ -1,8 +1,10 @@
-import { mkdir, copyFile, cp } from "node:fs/promises";
+import { mkdir, copyFile, cp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 
 const root = new URL("../", import.meta.url);
 const output = new URL("dist/", root);
+// Start clean so stale private state under dist/ can never be packaged.
+await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
 await Promise.all(["index.html", "explore.html", "services.html", "radar.html", "meetings.html", "account.html", "account.js", "stoa.html", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "services.js", "radar.js", "meetings.js", "call.js", "package.json", "package-lock.json", ".env.example"].map((file) => copyFile(new URL(file, root), new URL(file, output))));
 await cp(new URL("assets/", root), new URL("assets/", output), { recursive: true });

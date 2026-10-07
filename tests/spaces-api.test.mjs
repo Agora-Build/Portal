@@ -121,3 +121,16 @@ test("missing Signaling or call configuration is reported plainly", async () => 
     assert.equal((await post(url, "/api/spaces/lot-lounge/rtc-token", ada)).status, 503);
   } finally { await close(instance); }
 });
+
+test("a JSON null body never causes a server error", async () => {
+  const { instance, url } = await start();
+  try {
+    const cookie = await join(url, "Nina");
+    for (const path of ["/api/spaces/plaza/enter", "/api/spaces/plaza/members", "/api/spaces/plaza/topic"]) {
+      const response = await request(url, path, { cookie, method: "POST", data: null });
+      assert.ok(response.status < 500, path + " " + response.status);
+    }
+    assert.ok((await request(url, "/api/spaces/plaza/decor", { cookie, method: "PUT", data: null })).status < 500);
+    assert.ok((await request(url, "/api/spaces", { cookie, method: "POST", data: null })).status < 500);
+  } finally { await close(instance); }
+});

@@ -3,7 +3,8 @@ import { AppError } from "../store.mjs";
 const SPACE = /^\/api\/spaces\/(plaza|lot-[a-z0-9-]{2,40}|[a-f0-9-]{36})(?:\/(enter|leave|heartbeat|topic|host|decor|remove|invitations|members|rtc-token)(?:\/((?:member|account):[a-f0-9-]{36}))?)?$/;
 
 // Maps HTTP requests to the spaces service. Returns null when the request is not a spaces route.
-export async function handleSpaces({ path, method, url, token, read, spaces, worlds, limit, ip }) {
+export async function handleSpaces({ path, method, url, token, read: readBody, spaces, worlds, limit, ip }) {
+  const read = async () => { const data = await readBody(); return data && typeof data === "object" && !Array.isArray(data) ? data : {}; };
   if (path === "/api/spaces" && method === "GET") return { status: 200, body: await spaces.list({ q: url.searchParams.get("q") || "" }) };
   if (path === "/api/spaces" && method === "POST") { limit("spaces:" + ip, 20, 3600000); return { status: 201, body: { space: await spaces.create(token, await read()) } }; }
   if (path === "/api/signaling/token" && method === "POST") { limit("signaling:" + ip, 30, 60000); return { status: 200, body: await spaces.signalingToken(token) }; }
