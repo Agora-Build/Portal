@@ -37,3 +37,55 @@ test("the store resolves the acting person for accounts, profiles, and guests", 
     assert.deepEqual([state.spaces, state.spaceLeases], [[], []]);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+import { ACCESS, VISIBILITY, can, validCombination } from "../scripts/spaces/permissions.mjs";
+
+const actor = (id, extra = {}) => ({ id: "account:" + id, ids: ["account:" + id, ...(extra.memberId ? [extra.memberId] : [])], hasProfile: Boolean(extra.memberId), admin: false, ...extra });
+const owner = actor("owner"), member = actor("member"), stranger = actor("stranger", { memberId: "member:stranger" }), noProfile = actor("plain"), admin = actor("admin", { admin: true });
+const space = (visibility, access, extra = {}) => ({ visibility, access, ownerId: owner.id, members: [owner.id, member.id], blocked: [], hostId: null, ...extra });
+
+test("visibility and access combine except private with open or house access", () => {
+  assert.deepEqual(VISIBILITY, ["listed", "unlisted", "private"]);
+  assert.deepEqual(ACCESS, ["open", "house", "members"]);
+  for (const visibility of VISIBILITY) for (const access of ACCESS) assert.equal(validCombination(visibility, access), visibility !== "private" || access === "members", visibility + "/" + access);
+  assert.equal(validCombination("secret", "open"), false);
+});
+test("seeing a space depends only on visibility, membership, invitation, or presence", () => {
+  for (const visibility of ["listed", "unlisted"]) assert.equal(can(null, "see", space(visibility, "members")), true);
+  const hidden = space("private", "members");
+  assert.equal(can(null, "see", hidden), false);
+  assert.equal(can(stranger, "see", hidden), false);
+  assert.equal(can(stranger, "see", hidden, { invited: true }), true);
+  assert.equal(can(member, "see", hidden), true);
+  assert.equal(can(owner, "see", hidden), true);
+  assert.equal(can(admin, "see", hidden), true);
+});
+test("entering follows the access rule and never admits guests or blocked people", () => {
+  assert.equal(can(null, "enter", space("listed", "open")), false);
+  assert.equal(can(noProfile, "enter", space("listed", "open")), true);
+  assert.equal(can(noProfile, "enter", space("unlisted", "house")), false);
+  assert.equal(can(stranger, "enter", space("unlisted", "house")), true);
+  assert.equal(can(member, "enter", space("unlisted", "house")), true, "members may enter house spaces without a profile");
+  assert.equal(can(stranger, "enter", space("unlisted", "members")), false);
+  assert.equal(can(stranger, "enter", space("unlisted", "members"), { invited: true }), true);
+  assert.equal(can(member, "enter", space("private", "members")), true);
+  assert.equal(can(stranger, "enter", space("listed", "open", { blocked: ["member:stranger"] })), false, "blocks match any of the person's IDs");
+});
+test("hosting powers belong to the present host or the present owner; editing belongs to the owner", () => {
+  const hosted = space("unlisted", "open", { hostId: member.id });
+  for (const action of ["host", "decorate", "moderate"]) {
+    assert.equal(can(member, action, hosted, { present: true }), true, action);
+    assert.equal(can(member, action, hosted), false, action + " requires presence");
+    assert.equal(can(owner, action, hosted, { present: true }), true, action + " owner");
+    assert.equal(can(stranger, action, hosted, { present: true }), false, action + " stranger");
+  }
+  for (const action of ["edit", "invite", "delete"]) {
+    assert.equal(can(owner, action, hosted), true, action);
+    assert.equal(can(member, action, hosted), false, action);
+  }
+  assert.equal(can(stranger, "chat", hosted, { present: true }), true);
+  assert.equal(can(stranger, "chat", hosted), false);
+  assert.equal(can(null, "speak", hosted, { present: true }), false);
+  assert.equal(can(admin, "delete", hosted), true);
+  assert.equal(can(owner, "fly", hosted), false);
+});
