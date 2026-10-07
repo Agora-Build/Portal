@@ -55,3 +55,12 @@ test("themes cannot carry code, files, or unknown styling", () => {
   assert.deepEqual(validateTheme(null), ["A theme must be an object."]);
   assert.deepEqual(validateTheme([]), ["A theme must be an object."]);
 });
+test("themes reject unknown fields", () => {
+  assert.ok(broken((theme) => { theme.roles.floor.image = "floor.svg"; }).some((msg) => msg.includes("unknown field")));
+  assert.ok(broken((theme) => { theme.script = "alert('hi')"; }).some((msg) => msg.includes("unknown field")));
+  assert.ok(broken((theme) => { theme.roles.lava = { pattern: "flat", colors: ["#111111"] }; }).some((msg) => msg.includes("unknown field")));
+  assert.deepEqual(validateTheme(sampleTheme()), []);
+});
+test("lighting.ambient rejects NaN", () => {
+  assert.notDeepEqual(broken((theme) => { theme.lighting.ambient = NaN; }), []);
+});
