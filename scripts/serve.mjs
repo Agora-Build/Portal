@@ -18,6 +18,7 @@ import { createPostgresPersistence } from "./persistence.mjs";
 import { createSignaling, signalingConfig } from "./spaces/signaling.mjs";
 import { createSpaces, loadWorlds } from "./spaces/service.mjs";
 import { handleSpaces } from "./spaces/routes.mjs";
+import { loadThemes } from "./spaces/themes.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const sdkFile = createRequire(import.meta.url).resolve("agora-rtc-sdk-ng");
@@ -69,6 +70,7 @@ export function createAppServer(directory = root, options = {}) {
   const models = options.models || createModelClient(modelConfig());
   const activity = options.activity || createActivityFeed({ store, projectsFile: resolve(dataDirectory, "projects.json"), snapshotFile: resolve(dataDirectory, "activity.json") });
   const worlds = options.worlds || loadWorlds(directory);
+  const themes = options.themes || loadThemes(directory);
   const signaling = options.signaling || createSignaling(signalingConfig());
   const spaces = options.spaces || createSpaces({ store, worlds, signaling, calls, secret: options.channelSecret ?? signalingConfig().secret, admins: (process.env.PLATFORM_ADMINS || "").split(",").map((id) => id.trim()).filter(Boolean), plazaCapacity: options.plazaCapacity });
   const windows = new Map();
@@ -330,7 +332,7 @@ export function createAppServer(directory = root, options = {}) {
           limit("call:" + person.id, 30, 60000);
           json(response, 200, calls.issue(room, person, await body(request)));
         } else {
-          const handled = await handleSpaces({ path, method: request.method, url: requestUrl, token, read: () => body(request), spaces, worlds, limit, ip: request.socket.remoteAddress });
+          const handled = await handleSpaces({ path, method: request.method, url: requestUrl, token, read: () => body(request), spaces, worlds, themes, limit, ip: request.socket.remoteAddress });
           if (!handled) throw new AppError(404, "This page or service was not found.");
           json(response, handled.status, handled.body);
         }

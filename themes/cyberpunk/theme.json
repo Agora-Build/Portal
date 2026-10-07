@@ -1,0 +1,39 @@
+{
+  "id": "cyberpunk",
+  "name": "Cyberpunk",
+  "version": 1,
+  "roles": {
+    "floor": { "pattern": "neon", "colors": ["#14151f", "#ff2bd6"] },
+    "path": { "pattern": "neon", "colors": ["#1b1d2b", "#00e5ff"] },
+    "grass": { "pattern": "tiles", "colors": ["#16202a", "#1f2e3a"] },
+    "water": { "pattern": "water", "colors": ["#0b2a3a", "#00e5ff"] },
+    "wall": { "pattern": "wall", "colors": ["#252838", "#11121a", "#3a3e57"] },
+    "column": { "pattern": "column", "colors": ["#2e3250", "#00e5ff"] },
+    "door": { "pattern": "door", "colors": ["#ff2bd6", "#5c0f4f"] },
+    "table": { "pattern": "table", "colors": ["#2b2f45", "#1a1c2b"] },
+    "seat": { "pattern": "seat", "colors": ["#00e5ff", "#007d8c"] },
+    "plant": { "pattern": "plant", "colors": ["#39ff88", "#2b2f45"] },
+    "decor": { "pattern": "decor", "colors": ["#ffd400"] }
+  },
+  "decor": {
+    "plant": { "colors": ["#39ff88", "#2b2f45"] },
+    "lamp": { "colors": ["#ff2bd6", "#2b2f45"] },
+    "rug": { "colors": ["#3a1d5c", "#ff2bd6"] },
+    "sofa": { "colors": ["#00e5ff", "#005c66"] },
+    "chair": { "colors": ["#ff2bd6", "#5c0f4f"] },
+    "table": { "colors": ["#2b2f45", "#1a1c2b"] },
+    "whiteboard": { "colors": ["#0b2a3a", "#00e5ff"] },
+    "bookshelf": { "colors": ["#ff2bd6", "#11121a", "#00e5ff"] },
+    "screen": { "colors": ["#00e5ff", "#05060a"] },
+    "banner": { "colors": ["#ffd400", "#11121a"] },
+    "poster": { "colors": ["#ff2bd6", "#11121a"] },
+    "statue": { "colors": ["#9d7bff", "#2e3250"] },
+    "fountain": { "colors": ["#2e3250", "#00e5ff"] },
+    "noticeboard": { "colors": ["#151724", "#00e5ff", "#ff2bd6"] }
+  },
+  "avatar": { "style": "pawn", "palette": ["#ff2bd6", "#00e5ff", "#39ff88", "#ffd400", "#ff6b2b", "#9d7bff"], "outline": "#0b0c12" },
+  "ui": { "--paper": "#0b0c12", "--surface": "#151724", "--ink": "#e8eaff", "--muted": "#9aa0c3", "--line": "#2a2d44", "--accent": "#ff2bd6", "--accent-dark": "#c21fa3", "--green": "#39ff88", "font": "IBM Plex Mono" },
+  "lighting": { "ambient": 0.7, "tint": "#1a0b3d" },
+  "effects": ["rain", "neon-glow"],
+  "video": "strip"
+}

@@ -64,3 +64,36 @@ test("themes reject unknown fields", () => {
 test("lighting.ambient rejects NaN", () => {
   assert.notDeepEqual(broken((theme) => { theme.lighting.ambient = NaN; }), []);
 });
+
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import { loadThemes } from "../scripts/spaces/themes.mjs";
+import { THEMES } from "../scripts/spaces/model.mjs";
+
+const root = new URL("../", import.meta.url).pathname;
+
+test("the three built-in themes are valid and look different", () => {
+  const themes = loadThemes(root);
+  assert.deepEqual(themes.map((theme) => theme.id), THEMES);
+  for (const theme of themes) assert.deepEqual(validateTheme(theme), [], theme.id);
+  const [agora, minimal, cyberpunk] = themes;
+  assert.notEqual(agora.roles.floor.colors[0], cyberpunk.roles.floor.colors[0]);
+  assert.deepEqual(minimal.effects, [], "Minimal has no effects");
+  assert.ok(cyberpunk.effects.includes("rain") && cyberpunk.effects.includes("neon-glow"));
+  assert.equal(agora.ui["--accent"], "#ce4b24", "Agora keeps the portal's terracotta");
+});
+test("an invalid built-in theme stops the server from starting", async () => {
+  const directory = await mkdtemp(resolve(tmpdir(), "themes-"));
+  try {
+    for (const id of THEMES) {
+      await mkdir(resolve(directory, "themes", id), { recursive: true });
+      await writeFile(resolve(directory, "themes", id, "theme.json"), JSON.stringify({ ...sampleTheme(), id }));
+    }
+    assert.equal(loadThemes(directory).length, 3);
+    await writeFile(resolve(directory, "themes", "minimal", "theme.json"), JSON.stringify({ ...sampleTheme(), id: "minimal", effects: ["fireworks"] }));
+    assert.throws(() => loadThemes(directory), /Theme minimal is invalid/);
+    await writeFile(resolve(directory, "themes", "minimal", "theme.json"), JSON.stringify({ ...sampleTheme(), id: "other" }));
+    assert.throws(() => loadThemes(directory), /Theme minimal is invalid/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

@@ -15,4 +15,5 @@ await Promise.all(["serve.mjs", "store.mjs", "models.mjs", "activity.mjs", "call
 await cp(new URL("scripts/spaces/", root), new URL("scripts/spaces/", output), { recursive: true });
 await cp(new URL("world/", root), new URL("world/", output), { recursive: true });
 await cp(new URL("worlds/", root), new URL("worlds/", output), { recursive: true });
+await cp(new URL("themes/", root), new URL("themes/", output), { recursive: true });
 console.log("House app built in dist/. Run with: node dist/scripts/serve.mjs");

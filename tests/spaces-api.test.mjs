@@ -134,3 +134,12 @@ test("a JSON null body never causes a server error", async () => {
     assert.ok((await request(url, "/api/spaces", { cookie, method: "POST", data: null })).status < 500);
   } finally { await close(instance); }
 });
+
+test("the themes API returns the three built-in themes", async () => {
+  const { instance, url } = await start();
+  try {
+    const response = await request(url, "/api/themes");
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).themes.map((theme) => theme.id), ["agora", "minimal", "cyberpunk"]);
+  } finally { await close(instance); }
+});
