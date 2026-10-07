@@ -89,3 +89,49 @@ test("hosting powers belong to the present host or the present owner; editing be
   assert.equal(can(admin, "delete", hosted), true);
   assert.equal(can(owner, "fly", hosted), false);
 });
+
+import { readFile } from "node:fs/promises";
+import { parseMap } from "../world/map.js";
+import { DECOR_KINDS, PLAZA_CAPACITY, PLAZA_ID, THEMES, lotSpaceId, migratedRoom, newSpace, normalizeTags, publicSpace, spaceInput, systemSpaces } from "../scripts/spaces/model.mjs";
+
+const plazaMap = parseMap(JSON.parse(await readFile(new URL("../worlds/plaza/map.json", import.meta.url), "utf8")));
+
+test("space input is validated with defaults and partial updates", () => {
+  assert.deepEqual(spaceInput({ title: "  Demo night  " }), { title: "Demo night", purpose: "", visibility: "unlisted", access: "members", capacity: 12, themeId: "agora" });
+  const current = spaceInput({ title: "Team", visibility: "private", access: "members", capacity: 4, themeId: "cyberpunk" });
+  assert.deepEqual(spaceInput({ capacity: 6 }, current), { ...current, capacity: 6 });
+  for (const bad of [{ title: "x" }, { title: "Ok", visibility: "listed" }, { title: "Ok", visibility: "private", access: "open" }, { title: "Ok", capacity: 1 }, { title: "Ok", capacity: 51 }, { title: "Ok", capacity: 2.5 }, { title: "Ok", themeId: "neon" }, { title: "Ok", purpose: "p".repeat(301) }]) assert.throws(() => spaceInput(bad), { status: 422 }, JSON.stringify(bad));
+});
+test("tags are limited to five and normalized", () => {
+  assert.deepEqual(normalizeTags([" Voice  AI ", "voice ai", "Rust"]), ["voice ai", "rust"]);
+  assert.deepEqual(normalizeTags(), []);
+  assert.throws(() => normalizeTags(["a", "b", "c", "d", "e", "f"]), { status: 422 });
+  assert.throws(() => normalizeTags(["t".repeat(31)]), { status: 422 });
+  assert.throws(() => normalizeTags("rust"), { status: 422 });
+});
+test("system spaces come from the plaza map and lots are listed, open, and FCFS", () => {
+  assert.equal(DECOR_KINDS.length, 13);
+  assert.deepEqual(THEMES, ["agora", "minimal", "cyberpunk"]);
+  const [plaza, ...lots] = systemSpaces(plazaMap, 0);
+  assert.equal(plaza.id, PLAZA_ID);
+  assert.equal(plaza.capacity, PLAZA_CAPACITY);
+  assert.equal(systemSpaces(plazaMap, 0, 2)[0].capacity, 2);
+  assert.equal(lots.length, 6);
+  assert.deepEqual(lots[0], { ...lots[0], id: lotSpaceId("ai-agents"), slug: "ai-agents", lot: { worldId: "plaza", lotId: "agents" }, visibility: "listed", access: "open", ownerId: null, capacity: 8, worldId: "plaza", topic: null, tags: [], decor: [] });
+});
+test("legacy meeting rooms become unlisted members-only spaces with their rosters", () => {
+  const room = { id: "fd616fdb-aa48-4c67-bd26-222222222222", title: "Demo", intent: "Plan the demo", ownerId: "member:a", participants: ["member:a", "member:b"], createdAt: "2026-01-01T00:00:00.000Z" };
+  const space = migratedRoom(room, 0);
+  assert.deepEqual([space.id, space.visibility, space.access, space.ownerId, space.purpose, space.createdAt], [room.id, "unlisted", "members", "member:a", "Plan the demo", room.createdAt]);
+  assert.deepEqual(space.members, ["member:a", "member:b"]);
+});
+test("public spaces hide invitation hashes and the channel epoch", () => {
+  const space = { ...newSpace(spaceInput({ title: "Team" }), { id: "s1", ownerId: "account:o", now: 0 }), invitations: [{ id: "i1", tokenHash: "secret", usesLeft: 1, expiresAt: 1 }], channelEpoch: 3 };
+  const outside = publicSpace(space, { occupants: [{ id: "account:o", name: "O" }] });
+  assert.equal(outside.occupancy, 1);
+  for (const field of ["invitations", "members", "blocked", "channelEpoch"]) assert.equal(field in outside, false, field);
+  const managed = publicSpace(space, { manage: true });
+  assert.deepEqual(managed.invitations, [{ id: "i1", usesLeft: 1, expiresAt: 1 }]);
+  assert.deepEqual(managed.members, ["account:o"]);
+  assert.equal(JSON.stringify(managed).includes("secret"), false);
+});
