@@ -4,7 +4,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { effectivePlan, entitlements } from "./plans.mjs";
 
 export class AppError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
+  constructor(status, message, details) { super(message); this.status = status; if (details) this.details = details; }
 }
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const publicProfile = ({ sessionHash, accountId, ...person }) => person;
@@ -40,7 +40,7 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
   let queue = Promise.resolve();
   const normalize = (state) => {
     state.accounts ||= []; state.sessions ||= []; state.authorizationCodes ||= []; state.grants ||= [];
-    state.people ||= []; state.rooms ||= []; state.radar ||= {};
+    state.people ||= []; state.rooms ||= []; state.radar ||= {}; state.spaces ||= []; state.spaceLeases ||= [];
     return state;
   };
   async function read() {
@@ -48,7 +48,7 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
     try {
       const state = JSON.parse(await readFile(storageFile, "utf8"));
       return normalize(state);
-    } catch (error) { if (error.code === "ENOENT") return { people: [], rooms: [], radar: {}, accounts: [], sessions: [], authorizationCodes: [], grants: [] }; throw error; }
+    } catch (error) { if (error.code === "ENOENT") return { people: [], rooms: [], radar: {}, accounts: [], sessions: [], authorizationCodes: [], grants: [], spaces: [], spaceLeases: [] }; throw error; }
   }
   function update(change) {
     // Keep concurrent joins and room updates inside one atomic read/write cycle.
@@ -110,6 +110,14 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
     },
     async people() { return [...(await read()).people.map(publicProfile), ...JSON.parse(await readFile(seedFile, "utf8"))]; },
     async me(token) { const person = personFor(await read(), token); return person ? publicProfile(person) : null; },
+    async actor(token) {
+      if (!token) return null;
+      const state = await read();
+      const account = accountFor(state, token);
+      const person = personFor(state, token);
+      if (!account && !person) return null;
+      return { id: account?.id || person.id, accountId: account?.id || null, memberId: person?.id || null, name: person?.name || account?.name || "Builder", avatar: person?.avatar || account?.avatar || "", hasProfile: Boolean(person), plan: effectivePlan(account) };
+    },
     async session(token) {
       const state = await read();
       const person = personFor(state, token);

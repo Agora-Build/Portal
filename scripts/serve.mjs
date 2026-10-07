@@ -337,7 +337,7 @@ export function createAppServer(directory = root, options = {}) {
       response.end(request.method === "HEAD" ? undefined : content);
     } catch (error) {
       if (response.headersSent) { response.end(); return; }
-      json(response, error.code === "ENOENT" ? 404 : error.status || 500, { error: error.code === "ENOENT" ? "This page was not found." : error.status ? error.message : "The house could not complete this request. Please try again." });
+      json(response, error.code === "ENOENT" ? 404 : error.status || 500, { error: error.code === "ENOENT" ? "This page was not found." : error.status ? error.message : "The house could not complete this request. Please try again.", ...(error.status && error.details ? error.details : {}) });
     }
   });
 

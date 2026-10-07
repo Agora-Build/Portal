@@ -143,7 +143,7 @@ test("Vox-compatible entitlements depend on verified subscription state and peri
   for (const status of ["past_due", "unpaid", "canceled", "incomplete"]) assert.equal(effectivePlan({ subscription: { ...subscription, status } }, now), "basic");
   assert.equal(effectivePlan({ subscription }, now + 2000000), "basic");
   assert.equal(effectivePlan({ assignedPlan: "principal" }, now), "principal");
-  assert.deepEqual(entitlements("basic"), { projects: 5, evalFlowsPerProject: 10, apiEvalFlows: 50, privateResources: false, ownStorage: false, publishMainline: false });
+  assert.deepEqual(entitlements("basic"), { projects: 5, evalFlowsPerProject: 10, apiEvalFlows: 50, privateResources: false, ownStorage: false, publishMainline: false, spaces: 3 });
   assert.equal(entitlements("premium").publishMainline, false);
   assert.equal(entitlements("fellow").publishMainline, true);
 });
