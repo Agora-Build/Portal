@@ -43,3 +43,14 @@ test("renewals reject other members, screen identities, and malformed identifier
   assert.throws(() => calls.issue(room, { id: "member:stranger" }), { status: 403 });
   assert.throws(() => createAgoraCalls(agoraConfig({})).issue(room, person), { status: 503 });
 });
+test("space calls use the space channel and an identity derived from the account", () => {
+  const calls = createAgoraCalls(config);
+  const actor = { id: "account:72a639ba-3a45-4afe-936b-333333333333" };
+  const credentials = calls.issueSpace({ id: "lot-ai-agents" }, actor);
+  assert.equal(credentials.channel, "agora-build-space-lot-ai-agents");
+  assert.match(credentials.uid, /^72a639ba-3a45-4afe-936b-333333333333_[a-f0-9]{12}$/);
+  assert.equal(credentials.screenUid, credentials.uid + "_screen");
+  assert.equal(calls.issueSpace({ id: "lot-ai-agents" }, actor, { uid: credentials.uid }).uid, credentials.uid);
+  assert.throws(() => calls.issueSpace({ id: "lot-ai-agents" }, actor, { uid: "someone_123456789abc" }), { status: 422 });
+  assert.throws(() => createAgoraCalls(agoraConfig({})).issueSpace({ id: "lot-ai-agents" }, actor), { status: 503 });
+});
