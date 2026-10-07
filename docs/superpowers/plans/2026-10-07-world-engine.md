@@ -1438,3 +1438,18 @@ git commit -m "Open the walkable plaza page" -m "🤖 Built with SMT <smt@agora.
 | Accessibility panel: rooms with Go to, people, live status | 7 |
 
 Deferred to Plan C: other people over Signaling, entering rooms, the host topic and decor modes, calls, private-space encryption, the Stoa navigation link, and the `/meet` redirect.
+
+## Notes for Plan C (from the final review)
+
+- **Keyboard messages.** The spec (section 2) has keyboard movement publish only `walk` on key press and `stop` on release, at most 4 messages per second. The engine currently emits a `move` for every tile while a key is held.
+  - Add `walk`/`stop` events, or flag keyboard moves.
+  - Let `setOthers` accept walks described by direction.
+- **Draw cost.** Cyberpunk's neon glow makes many blurred draws per frame. Cache the static tile layer in an offscreen canvas per theme, bounds and zoom before crowds arrive.
+- **Facing.** A blocked turn emits no event, but presence carries `dir`. Emit a facing change so peers see it.
+- **Decorating mid-walk.** `setDecor` during a walk does not re-route. Re-route when the host's decorations block the current path.
+- **Clicks outside bounds.** Clicks outside the bounds still pathfind. Gate them when bounds switch to lot interiors.
+- **Smaller items:**
+  - A canvas `role`/`aria-roledescription` for screen readers.
+  - Touch handling so a swipe on the map doesn't walk.
+  - Live listeners for reduced motion and device pixel ratio.
+  - Removing old theme tokens in `applyUi` before custom themes.
