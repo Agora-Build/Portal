@@ -210,3 +210,33 @@ test("simultaneous entries never exceed capacity and produce one host", async (t
   assert.equal(room.occupancy, 6);
   assert.ok(room.occupants.some((occupant) => occupant.id === room.hostId));
 });
+
+test("hidden private spaces answer every operation exactly like a missing one", async (t) => {
+  const { spaces, person } = await setup(t);
+  const [owner, stranger] = [await person("Owner"), await person("Stranger")];
+  const space = await spaces.create(owner.token, { title: "Board room", visibility: "private" });
+  const ghost = "00000000-0000-4000-8000-000000000000";
+  const calls = (id) => [
+    () => spaces.get(stranger.token, id), () => spaces.enter(stranger.token, id), () => spaces.invite(stranger.token, id, {}),
+    () => spaces.update(stranger.token, id, { title: "x y z" }), () => spaces.destroy(stranger.token, id),
+    () => spaces.addMember(stranger.token, id, owner.id), () => spaces.removeMember(stranger.token, id, owner.id),
+    () => spaces.leave(stranger.token, id), () => spaces.heartbeat(stranger.token, id), () => spaces.topic(stranger.token, id, { topic: "Topic here" }),
+    () => spaces.setHost(stranger.token, id, { actorId: owner.id }), () => spaces.decorate(stranger.token, id, []),
+    () => spaces.removePerson(stranger.token, id, { actorId: owner.id }), () => spaces.rtcToken(stranger.token, id, {})
+  ];
+  for (const call of calls(space.id)) await assert.rejects(call(), missing);
+  for (const call of calls(ghost)) await assert.rejects(call(), missing);
+});
+
+test("making a space private removes people who may no longer enter", async (t) => {
+  const { spaces, person } = await setup(t);
+  const [owner, stranger] = [await person("Owner"), await person("Stranger")];
+  const space = await spaces.create(owner.token, { title: "Open studio", access: "open" });
+  const before = await spaces.enter(owner.token, space.id);
+  await spaces.enter(stranger.token, space.id);
+  await spaces.update(owner.token, space.id, { visibility: "private", access: "members" });
+  await assert.rejects(spaces.heartbeat(stranger.token, space.id), missing, "an evicted stranger sees the space as hidden, never as 410");
+  const own = await spaces.heartbeat(owner.token, space.id);
+  assert.notEqual(own.channel, before.channel);
+  assert.equal((await spaces.signalingToken(stranger.token)).channels.some((channel) => channel.spaceId === space.id), false);
+});

@@ -94,13 +94,17 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
     },
     async update(token, id, input) {
       const actor = signedIn(await actorFor(token));
-      return mutate((state) => {
+      return mutate((state, events) => {
         const space = findVisible(state, id, actor);
         if (system(space)) throw new AppError(403, "The map sets the plaza and its rooms.");
         if (!can(actor, "edit", space)) throw new AppError(403, "Only the owner can change this space.");
         const fields = spaceInput(input || {}, space);
         if (fields.visibility !== space.visibility) space.channelEpoch += 1;
         Object.assign(space, fields, { updatedAt: new Date(now()).toISOString() });
+        for (const lease of leasesFor(state, space.id, now())) {
+          const holder = { id: lease.actorId, ids: lease.ids, hasProfile: lease.ids.some((entry) => entry.startsWith("member:")), admin: false };
+          if (!can(holder, "enter", space)) events.push(...leaveLease(state, space, lease.actorId, now()));
+        }
         return view(state, space, actor);
       });
     },
@@ -141,11 +145,11 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
     },
     async leave(token, id) {
       const actor = signedIn(await actorFor(token));
-      return mutate((state, events) => { events.push(...leaveLease(state, find(state, id), actor.id, now())); return { left: true }; });
+      return mutate((state, events) => { events.push(...leaveLease(state, findVisible(state, id, actor), actor.id, now())); return { left: true }; });
     },
     async heartbeat(token, id) {
       const actor = signedIn(await actorFor(token));
-      return mutate((state) => { const space = find(state, id); heartbeatLease(state, space, actor.id, now()); return access(space); });
+      return mutate((state) => { const space = findVisible(state, id, actor); if (present(state, space, actor) && !can(actor, "enter", space)) throw new AppError(410, "You are no longer in this space."); heartbeatLease(state, space, actor.id, now()); return access(space); });
     },
     async topic(token, id, input = {}) {
       const actor = signedIn(await actorFor(token));
@@ -153,7 +157,7 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
       if (topic.length < 2 || topic.length > 80) throw new AppError(422, "Add a topic of 2 to 80 characters.");
       const tags = normalizeTags(input.tags);
       return mutate((state) => {
-        const space = find(state, id);
+        const space = findVisible(state, id, actor);
         requirePresent(state, space, actor);
         if (space.id === PLAZA_ID || !can(actor, "host", space, { present: true })) throw new AppError(403, "Only the host can set the topic.");
         Object.assign(space, { topic, tags });
@@ -163,7 +167,7 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
     async setHost(token, id, input = {}) {
       const actor = signedIn(await actorFor(token));
       return mutate((state, events) => {
-        const space = find(state, id);
+        const space = findVisible(state, id, actor);
         requirePresent(state, space, actor);
         if (space.id === PLAZA_ID || !can(actor, "host", space, { present: true })) throw new AppError(403, "Only the host or owner can hand over hosting.");
         const target = leaseOf(state, space.id, input.actorId, now());
@@ -176,7 +180,7 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
     async decorate(token, id, items) {
       const actor = signedIn(await actorFor(token));
       return mutate((state) => {
-        const space = find(state, id);
+        const space = findVisible(state, id, actor);
         requirePresent(state, space, actor);
         if (space.id === PLAZA_ID || !can(actor, "decorate", space, { present: true })) throw new AppError(403, "Only the host can decorate.");
         space.decor = validateDecor(items, worlds[space.worldId].map, space);
@@ -187,7 +191,7 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
     async removePerson(token, id, input = {}) {
       const actor = signedIn(await actorFor(token));
       return mutate((state, events) => {
-        const space = find(state, id);
+        const space = findVisible(state, id, actor);
         requirePresent(state, space, actor);
         if (!can(actor, "moderate", space, { present: true })) throw new AppError(403, "Only the host can remove someone.");
         const target = leaseOf(state, space.id, input.actorId, now());
@@ -251,7 +255,7 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
       const actor = signedIn(await actorFor(token));
       await ready();
       const state = await store.snapshot();
-      const space = find(state, id);
+      const space = findVisible(state, id, actor);
       if (space.id === PLAZA_ID) throw new AppError(422, "Calls happen inside rooms.");
       if (!present(state, space, actor)) throw new AppError(403, "Step into this space before joining its call.");
       return calls.issueSpace(space, actor, input);
