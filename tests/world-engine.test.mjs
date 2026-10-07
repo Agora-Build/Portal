@@ -10,12 +10,12 @@ const plaza = parseMap(JSON.parse(await readFile(new URL("../worlds/plaza/map.js
 const [agora, minimal] = loadThemes(root);
 const key = (name) => ({ key: name, preventDefault() {} });
 
-function setup({ reducedMotion = false } = {}) {
+function setup({ reducedMotion = false, theme = agora } = {}) {
   let time = 1000;
   const frames = [], timers = [], drawn = [], themes = [], handlers = {}, events = { move: [], arrive: [] };
   const canvas = { clientWidth: 640, clientHeight: 480, addEventListener: (type, listener) => { handlers[type] = listener; }, removeEventListener: (type) => { delete handlers[type]; }, getBoundingClientRect: () => ({ left: 0, top: 0 }) };
   const renderer = { resize() {}, setTheme: (theme) => themes.push(theme), draw: (frame) => drawn.push(frame) };
-  const engine = createEngine({ canvas, map: plaza, theme: agora, start: plaza.spawns[0], reducedMotion, renderer, now: () => time, raf: (callback) => frames.push(callback), later: (callback) => { timers.push(callback); return timers.length; }, cancel() {}, ratio: () => 1 });
+  const engine = createEngine({ canvas, map: plaza, theme, start: plaza.spawns[0], reducedMotion, renderer, now: () => time, raf: (callback) => frames.push(callback), later: (callback) => { timers.push(callback); return timers.length; }, cancel() {}, ratio: () => 1 });
   engine.on("move", (value) => events.move.push(value));
   engine.on("arrive", (value) => events.arrive.push(value));
   // Runs only the frames already requested, so a walking avatar cannot loop forever inside one flush.
@@ -150,4 +150,57 @@ test("bounds keep the camera and the frame inside the plaza", () => {
   engine.setBounds(null);
   flush();
   assert.equal(drawn.at(-1).bounds, null);
+});
+
+test("a theme that draws water flat does not keep an idle loop running", () => {
+  assert.ok(plaza.roles.includes("water"), "the plaza has water");
+  assert.equal(setup({ theme: minimal }).timers.length, 0, "Minimal is still when idle");
+  assert.equal(setup().timers.length, 1, "animated water keeps ambient redraws");
+});
+test("releasing a key always releases the hold, even with modifiers", () => {
+  const { handlers, events, flush, advance } = setup();
+  handlers.keydown(key("ArrowUp"));
+  handlers.keyup({ key: "ArrowUp", metaKey: true });
+  advance(201); flush();
+  assert.equal(events.move.length, 1);
+});
+test("self identity decides the avatar id", () => {
+  const { engine, drawn, flush } = setup();
+  engine.setSelf({ id: "account:x", name: "Ada" }); flush();
+  assert.equal(drawn.at(-1).avatars[0].id, "account:x");
+  engine.setSelf({ name: "Ada" }); flush();
+  assert.equal(drawn.at(-1).avatars[0].id, "account:x", "an omitted id keeps the current one");
+});
+test("bad peer walks are ignored and never throw while drawing", () => {
+  const { engine, drawn, flush } = setup();
+  engine.setOthers([
+    { id: "empty", name: "E", walk: { path: [], startedAt: 0 } },
+    { id: "none", name: "N" },
+    null,
+    { id: "wall", name: "W", walk: { path: [{ x: 0, y: 0 }], startedAt: 0 } },
+    { id: "time", name: "T", walk: { path: [{ x: 22, y: 17 }], startedAt: "x" } },
+    { id: "frac", name: "F", walk: { path: [{ x: 22.5, y: 17 }], startedAt: 0 } },
+    { id: "ok", name: "Bo", walk: { path: [{ x: 22, y: 17 }], startedAt: 0 } }
+  ]);
+  assert.doesNotThrow(() => flush());
+  assert.deepEqual(drawn.at(-1).avatars.map((avatar) => avatar.name), ["You", "Bo"]);
+});
+test("unknown engine events throw a clear error", () => {
+  const { engine } = setup();
+  assert.throws(() => engine.on("__proto__", () => {}), /Unknown engine event: __proto__/);
+  assert.throws(() => engine.on("nope", () => {}), /Unknown engine event: nope/);
+});
+test("walking to the tile you stand on does nothing", () => {
+  const { engine, events } = setup();
+  assert.equal(engine.walkTo({ x: 21, y: 17 }), false);
+  assert.equal(events.move.length, 0);
+});
+test("an arrival not yet announced is announced before the next walk starts", () => {
+  const { engine, events, advance } = setup();
+  engine.walkTo({ x: 21, y: 12 });
+  advance(10000);
+  assert.equal(events.arrive.length, 0);
+  assert.equal(engine.walkTo({ x: 23, y: 17 }), true);
+  assert.deepEqual(events.arrive, [{ x: 21, y: 12 }]);
+  assert.equal(events.move.length, 2);
 });

@@ -89,3 +89,26 @@ test("tiles outside the bounds are not drawn", () => {
   assert.ok(bounded.length > 0 && bounded.length < all.length);
   assert.ok(!bounded.some(([, , y]) => y >= 20 * 32));
 });
+
+// Fill colors of the whole-tile rectangles drawn at tile (x, y).
+const originRects = (calls, x, y) => { let style = null; const out = []; for (const [name, a, b, c, d] of calls) { if (name === "set:fillStyle") style = a; else if (name === "fillRect" && a === x * 32 && b === y * 32 && c === 32 && d === 32) out.push(style); } return out; };
+const tileView = (x, y) => ({ motion: false, camera: { x: x * 32, y: y * 32, zoom: 1 } });
+test("a tile that fills itself is not drawn over its ground", () => {
+  const index = plaza.roles.findIndex((role, i) => role === "wall" && plaza.ground[i] && plaza.ground[i] !== "wall");
+  assert.ok(index >= 0);
+  const x = index % plaza.width, y = Math.floor(index / plaza.width);
+  const painted = originRects(render(agora, tileView(x, y)).calls, x, y);
+  assert.deepEqual(painted, [agora.roles.wall.colors[0]], "only the wall is painted: " + painted);
+});
+test("ground still shows under shapes that do not fill the tile", () => {
+  const index = plaza.roles.findIndex((role, i) => role && !["flat", "tiles", "path", "grass", "water", "wall", "neon"].includes(agora.roles[role].pattern) && plaza.ground[i] && plaza.ground[i] !== role);
+  assert.ok(index >= 0, "the plaza has a column, door, or similar over ground");
+  const x = index % plaza.width, y = Math.floor(index / plaza.width);
+  assert.ok(originRects(render(agora, tileView(x, y)).calls, x, y).includes(agora.roles[plaza.ground[index]].colors[0]));
+});
+test("unknown decoration kinds are skipped and fonts have a fallback", () => {
+  const { calls } = render(agora, { motion: false, decor: [{ kind: "__proto__", x: 3, y: 3 }, { kind: "constructor", x: 4, y: 3 }, { kind: "toString", x: 5, y: 3 }], avatars: [{ id: "a", name: "Ada", x: 3, y: 3 }] });
+  const fonts = calls.filter(([name]) => name === "set:font").map(([, value]) => value);
+  assert.ok(fonts.length > 0 && fonts.every((font) => font.endsWith(", sans-serif")), fonts.join("|"));
+  assert.ok(fonts.some((font) => font.includes("\"IBM Plex Sans\"")));
+});

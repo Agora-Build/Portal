@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { follow, screenToTile, tileCenter, zoomFor } from "../world/camera.js";
 import { KEYS, STEP, WALK_SPEED, direction, positionAt } from "../world/motion.js";
 
-test("zoom shows about twelve tiles across the shorter side, within limits", () => {
+test("zoom shows about eighteen tiles across the shorter side, within limits", () => {
   assert.equal(zoomFor({ width: 1152, height: 576 }, 32), 1);
   assert.equal(zoomFor({ width: 100, height: 100 }, 32), 0.6);
   assert.equal(zoomFor({ width: 4000, height: 4000 }, 32), 2);

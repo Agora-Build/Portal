@@ -1,4 +1,4 @@
-import { findPath, walkable } from "./map.js";
+import { findPath, validPath, walkable } from "./map.js";
 import { BLOCKING_DECOR } from "./kinds.js";
 import { follow, screenToTile, zoomFor } from "./camera.js";
 import { KEYS, STEP, WALK_SPEED, positionAt } from "./motion.js";
@@ -14,7 +14,8 @@ export function createEngine({ canvas, map, theme, start, reducedMotion = false,
   const emit = (type, value) => { for (const listener of listeners[type]) listener(value); };
   const here = (time = now()) => positionAt(self.walk, time);
   const blocked = () => new Set(decor.filter((item) => BLOCKING_DECOR.has(item.kind)).map((item) => item.x + "," + item.y));
-  const ambient = () => !reducedMotion && (current.effects.some((effect) => effect !== "neon-glow") || map.roles.includes("water"));
+  const ambient = () => !reducedMotion && (current.effects.some((effect) => effect !== "neon-glow") || (map.roles.includes("water") && current.roles.water?.pattern === "water"));
+  const sound = (other) => Boolean(other) && Boolean(other.walk) && Number.isFinite(other.walk.startedAt) && Array.isArray(other.walk.path) && other.walk.path.every((step) => step && Number.isInteger(step.x) && Number.isInteger(step.y)) && validPath(map, other.walk.path);
   const schedule = () => { if (!destroyed && !pending) { pending = true; raf(frame); } };
 
   function frame() {
@@ -35,7 +36,9 @@ export function createEngine({ canvas, map, theme, start, reducedMotion = false,
   function walkTo(target) {
     const time = now(), position = here(time), walk = self.walk;
     let route;
+    if (position.done && !self.arrived) { self.arrived = true; emit("arrive", { x: position.x, y: position.y }); }
     if (position.done) {
+      if (target.x === position.x && target.y === position.y) return false;
       const path = findPath(map, { x: Math.round(position.x), y: Math.round(position.y) }, target, blocked());
       if (!path) return false;
       route = { path, startedAt: time };
@@ -74,7 +77,7 @@ export function createEngine({ canvas, map, theme, start, reducedMotion = false,
     held = dir;
     step(dir);
   };
-  const onKeyUp = (event) => { if (!event.ctrlKey && !event.metaKey && !event.altKey && KEYS[event.key] === held) held = null; };
+  const onKeyUp = (event) => { if (KEYS[event.key] === held) held = null; };
   const onBlur = () => { held = null; };
   const inputs = [["pointerup", onPointer], ["keydown", onKeyDown], ["keyup", onKeyUp], ["blur", onBlur]];
   for (const [type, listener] of inputs) canvas.addEventListener(type, listener);
@@ -82,13 +85,13 @@ export function createEngine({ canvas, map, theme, start, reducedMotion = false,
   const engine = {
     walkTo,
     position() { const position = here(); return { x: Math.round(position.x), y: Math.round(position.y) }; },
-    on(type, listener) { listeners[type].push(listener); return () => { listeners[type] = listeners[type].filter((item) => item !== listener); }; },
-    setSelf({ name }) { self.name = name; schedule(); },
+    on(type, listener) { if (!Object.hasOwn(listeners, type)) throw new Error("Unknown engine event: " + type); listeners[type].push(listener); return () => { listeners[type] = listeners[type].filter((item) => item !== listener); }; },
+    setSelf({ id, name }) { if (id) self.id = id; self.name = name; schedule(); },
     setTheme(next) { current = next; renderer.setTheme(next); schedule(); },
     setBounds(rect) { bounds = rect || null; schedule(); },
     setLabels(list) { labels = list; schedule(); },
     setDecor(list) { decor = list; schedule(); },
-    setOthers(list) { others = list; schedule(); },
+    setOthers(list) { others = list.filter(sound); schedule(); },
     resize() { viewport = { width: canvas.clientWidth || 1, height: canvas.clientHeight || 1 }; renderer.resize(viewport.width, viewport.height, ratio()); schedule(); },
     destroy() { destroyed = true; for (const [type, listener] of inputs) canvas.removeEventListener(type, listener); if (timer !== null) cancel(timer); timer = null; }
   };

@@ -90,6 +90,8 @@ function drawEffects(ctx, theme, width, height, time) {
   }
 }
 
+export const fontStack = (name) => { const family = name || "IBM Plex Sans"; return (/\s/.test(family) ? "\"" + family + "\"" : family) + ", sans-serif"; };
+const FILLS = new Set(["flat", "tiles", "path", "grass", "water", "wall", "neon"]);
 export function createCanvasRenderer(canvas, { map, theme }) {
   const ctx = canvas.getContext("2d"), s = map.tileSize;
   let current = theme, viewport = { width: 1, height: 1, ratio: 1 };
@@ -101,8 +103,8 @@ export function createCanvasRenderer(canvas, { map, theme }) {
     if (glow) ctx.shadowBlur = 0;
   }
   function decorItem(item) {
+    if (!Object.hasOwn(DECOR_DRAW, item.kind) || !Object.hasOwn(current.decor, item.kind)) return;
     const entry = current.decor[item.kind];
-    if (!entry) return;
     ctx.save(); ctx.translate((item.x + 0.5) * s, (item.y + 0.5) * s); ctx.rotate(((item.rotation || 0) * Math.PI) / 180); ctx.translate(-s / 2, -s / 2);
     DECOR_DRAW[item.kind](ctx, 0, 0, s, entry.variants?.[item.variant || 0] || entry.colors);
     ctx.restore();
@@ -111,7 +113,7 @@ export function createCanvasRenderer(canvas, { map, theme }) {
     resize(width, height, ratio = 1) { viewport = { width, height, ratio }; canvas.width = Math.round(width * ratio); canvas.height = Math.round(height * ratio); },
     setTheme(next) { current = next; },
     draw({ camera, time = 0, avatars = [], decor = [], labels = [], bounds = null, motion = true }) {
-      const { width, height, ratio } = viewport, font = current.ui?.font || "IBM Plex Sans", t = motion ? time : 0;
+      const { width, height, ratio } = viewport, font = fontStack(current.ui?.font), t = motion ? time : 0;
       ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
       box(ctx, current.ui?.["--paper"] || "#111111", 0, 0, width, height);
       ctx.save(); ctx.scale(camera.zoom, camera.zoom); ctx.translate(-camera.x, -camera.y);
@@ -120,7 +122,7 @@ export function createCanvasRenderer(canvas, { map, theme }) {
       const x1 = Math.min(area.x + area.width - 1, Math.floor((camera.x + width / camera.zoom) / s)), y1 = Math.min(area.y + area.height - 1, Math.floor((camera.y + height / camera.zoom) / s));
       for (let y = y0; y <= y1; y += 1) for (let x = x0; x <= x1; x += 1) {
         const index = y * map.width + x, role = map.roles[index], ground = map.ground[index];
-        if (ground && ground !== role) tile(ground, x, y, t);
+        if (ground && ground !== role && !(role && FILLS.has(current.roles[role].pattern))) tile(ground, x, y, t);
         if (role) tile(role, x, y, t);
       }
       for (const item of map.interactables) decorItem(item);
