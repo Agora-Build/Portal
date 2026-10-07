@@ -549,7 +549,9 @@ dialog h2 { font-size: 30px; line-height: 1.25; font-weight: 500; letter-spacing
 .stoa { color: var(--ink); background: var(--paper); padding: 18px; border-radius: 5px; }
 .stoa-heading { display: flex; justify-content: space-between; align-items: end; gap: 20px; flex-wrap: wrap; margin-bottom: 18px; }
 .stoa-heading h1 { margin: 6px 0 0; font-size: clamp(30px, 4vw, 46px); font-weight: 500; letter-spacing: -1.5px; }
-.stoa-heading [aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.stoa .button-secondary { border-color: var(--line); color: var(--ink); }
+.stoa .button-secondary:hover:not(:disabled) { background: var(--surface); border-color: var(--line); color: var(--ink); }
+.stoa [aria-pressed="true"], .stoa [aria-pressed="true"]:hover:not(:disabled) { background: var(--ink); color: var(--paper); }
 .stoa-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 18px; }
 .stoa-stage { background: var(--paper); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
 #stoa-canvas { display: block; width: 100%; height: min(72vh, 720px); min-height: 420px; touch-action: none; cursor: pointer; }

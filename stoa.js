@@ -8,6 +8,8 @@ const status = document.querySelector("#stoa-status");
 const roomList = document.querySelector("#stoa-rooms");
 const peopleList = document.querySelector("#stoa-people");
 const minimalToggle = document.querySelector("#stoa-minimal");
+let remembered = null;
+const stored = { get: () => { try { return localStorage.getItem("stoa-minimal"); } catch { return remembered; } }, set: (value) => { remembered = value; try { localStorage.setItem("stoa-minimal", value); } catch { /* storage unavailable; keep it for this visit */ } } };
 const say = (message) => { status.textContent = message; };
 const node = (tag, text, className) => { const element = document.createElement(tag); element.textContent = text; if (className) element.className = className; return element; };
 
@@ -23,14 +25,16 @@ try {
   const byId = Object.fromEntries(themes.map((theme) => [theme.id, theme]));
   const preview = byId[new URLSearchParams(location.search).get("theme")];
   const chosen = preview || byId.agora;
-  let minimal = localStorage.getItem("stoa-minimal") === "true";
+  let minimal = stored.get() === "true";
   const active = () => minimal ? byId.minimal : chosen;
   const engine = createEngine({ canvas, map, theme: active(), start: map.spawns[0], reducedMotion: matchMedia("(prefers-reduced-motion: reduce)").matches });
+  const plaza = map.zones.find((zone) => zone.name === "plaza");
+  if (plaza) engine.setBounds({ x: Math.max(0, plaza.x - 1), y: Math.max(0, plaza.y - 1), width: Math.min(map.width, plaza.x + plaza.width + 1) - Math.max(0, plaza.x - 1), height: Math.min(map.height, plaza.y + plaza.height + 1) - Math.max(0, plaza.y - 1) });
   applyUi(active());
   minimalToggle.setAttribute("aria-pressed", String(minimal));
   minimalToggle.addEventListener("click", () => {
     minimal = !minimal;
-    localStorage.setItem("stoa-minimal", String(minimal));
+    stored.set(String(minimal));
     minimalToggle.setAttribute("aria-pressed", String(minimal));
     applyUi(active());
     engine.setTheme(active());
@@ -45,7 +49,9 @@ try {
     const go = node("button", "Go to", "button button-secondary button-small");
     go.type = "button";
     go.setAttribute("aria-label", "Walk to " + lot.title);
-    go.addEventListener("click", () => { if (engine.walkTo(lot.door)) say("Walking to " + lot.title + "."); canvas.focus(); });
+    go.addEventListener("click", () => { if (engine.walkTo(lot.door)) say("Walking to " + lot.title + ".");
+      else { const at = engine.position(); say(at.x === lot.door.x && at.y === lot.door.y ? "You're already at the door of " + lot.title + "." : lot.title + " can't be reached right now."); }
+      canvas.focus(); });
     entry.append(node("strong", lot.title), node("span", (room.topic || "Open") + " · " + room.occupancy + " of " + room.capacity + " here"), go);
     roomList.append(entry);
   }
@@ -56,7 +62,7 @@ try {
   const name = state.profile?.name || state.account?.name || "You";
   engine.setSelf({ name });
   peopleList.replaceChildren(node("li", name + " (you)"));
-  say(preview ? "Previewing the " + preview.name + " theme. Only you see it." : "You're on the plaza. Walk to a room to see who's there.");
+  say(minimal ? "Minimal view is on." : preview ? "Previewing the " + preview.name + " theme. Only you see it." : "You're on the plaza. Walk to a room to see who's there.");
 } catch (error) {
   say(error.message || "The plaza could not open. Please try again.");
 }

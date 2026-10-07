@@ -4,7 +4,7 @@ import { follow, screenToTile, tileCenter, zoomFor } from "../world/camera.js";
 import { KEYS, STEP, WALK_SPEED, direction, positionAt } from "../world/motion.js";
 
 test("zoom shows about twelve tiles across the shorter side, within limits", () => {
-  assert.equal(zoomFor({ width: 768, height: 384 }, 32), 1);
+  assert.equal(zoomFor({ width: 1152, height: 576 }, 32), 1);
   assert.equal(zoomFor({ width: 100, height: 100 }, 32), 0.6);
   assert.equal(zoomFor({ width: 4000, height: 4000 }, 32), 2);
 });
@@ -14,6 +14,8 @@ test("the camera follows the target, stops at the world's edges, and centers sma
   assert.deepEqual(follow({ x: 10, y: 10 }, viewport, world, 1), { x: 0, y: 0, zoom: 1 });
   assert.deepEqual(follow({ x: 1400, y: 1080 }, viewport, world, 1), { x: 768, y: 608, zoom: 1 });
   assert.deepEqual(follow({ x: 50, y: 50 }, viewport, { width: 320, height: 240 }, 1), { x: -160, y: -120, zoom: 1 });
+  assert.deepEqual(follow({ x: 700, y: 500 }, viewport, { x: 100, y: 50, width: 600, height: 500 }, 1), { x: 80, y: 70, zoom: 1 });
+  assert.deepEqual(follow({ x: 50, y: 50 }, viewport, { x: 100, y: 50, width: 320, height: 240 }, 1), { x: -60, y: -70, zoom: 1 });
   assert.deepEqual(follow({ x: 700, y: 500 }, viewport, world, 2), { x: 540, y: 380, zoom: 2 });
 });
 test("screen points map to tiles through the camera", () => {

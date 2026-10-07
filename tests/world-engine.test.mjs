@@ -137,3 +137,17 @@ test("modified keys and secondary buttons are ignored, and listeners can be remo
   engine.walkTo({ x: 23, y: 17 });
   assert.equal(seen.length, 1);
 });
+
+test("bounds keep the camera and the frame inside the plaza", () => {
+  const { engine, drawn, flush } = setup();
+  const rect = { x: 0, y: 0, width: 44, height: 20 };
+  engine.setBounds(rect);
+  engine.walkTo({ x: 21, y: 17 });
+  flush();
+  const frame = drawn.at(-1);
+  assert.deepEqual(frame.bounds, rect);
+  assert.ok(frame.camera.y + 480 / frame.camera.zoom <= 20 * 32 + 1e-9);
+  engine.setBounds(null);
+  flush();
+  assert.equal(drawn.at(-1).bounds, null);
+});

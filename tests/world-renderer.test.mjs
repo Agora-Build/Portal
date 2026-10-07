@@ -81,3 +81,11 @@ test("dim themes are tinted by their lighting; bright themes are not", () => {
   renderer.draw({ camera: whole, motion: false });
   assert.deepEqual(calls, tinted, "setTheme switches the look completely");
 });
+
+test("tiles outside the bounds are not drawn", () => {
+  const rects = (frame) => render(minimal, { motion: false, ...frame }, [1408, 1088]).calls.filter(([name]) => name === "fillRect");
+  const all = rects({}), bounded = rects({ bounds: { x: 0, y: 0, width: 44, height: 20 } });
+  assert.ok(all.some(([, , y]) => y >= 20 * 32), "the whole map draws interiors");
+  assert.ok(bounded.length > 0 && bounded.length < all.length);
+  assert.ok(!bounded.some(([, , y]) => y >= 20 * 32));
+});

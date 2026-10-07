@@ -10,7 +10,7 @@ export function createEngine({ canvas, map, theme, start, reducedMotion = false,
   const listeners = { arrive: [], move: [] };
   const self = { id: "self", name: "You", walk: { path: [start], startedAt: now(), dir: "down" }, arrived: true };
   let current = theme, others = [], decor = [], labels = [], held = null, pending = false, timer = null, destroyed = false;
-  let camera = { x: 0, y: 0, zoom: 1 }, viewport = { width: 1, height: 1 };
+  let bounds = null, camera = { x: 0, y: 0, zoom: 1 }, viewport = { width: 1, height: 1 };
   const emit = (type, value) => { for (const listener of listeners[type]) listener(value); };
   const here = (time = now()) => positionAt(self.walk, time);
   const blocked = () => new Set(decor.filter((item) => BLOCKING_DECOR.has(item.kind)).map((item) => item.x + "," + item.y));
@@ -21,12 +21,13 @@ export function createEngine({ canvas, map, theme, start, reducedMotion = false,
     pending = false;
     if (destroyed) return;
     const time = now(), s = map.tileSize;
+    const area = bounds || { x: 0, y: 0, width: map.width, height: map.height };
     const reached = here(time);
     if (reached.done && !self.arrived) { self.arrived = true; emit("arrive", { x: reached.x, y: reached.y }); if (held) step(held); }
     const shown = here(time);
-    camera = follow({ x: (shown.x + 0.5) * s, y: (shown.y + 0.5) * s }, viewport, { width: map.width * s, height: map.height * s }, zoomFor(viewport, s));
+    camera = follow({ x: (shown.x + 0.5) * s, y: (shown.y + 0.5) * s }, viewport, { x: area.x * s, y: area.y * s, width: area.width * s, height: area.height * s }, zoomFor(viewport, s));
     const crowd = others.map((other) => ({ id: other.id, name: other.name, ...positionAt(other.walk, time) }));
-    renderer.draw({ camera, time, avatars: [{ id: self.id, name: self.name, self: true, ...shown }, ...crowd], decor, labels, motion: !reducedMotion });
+    renderer.draw({ camera, time, avatars: [{ id: self.id, name: self.name, self: true, ...shown }, ...crowd], decor, labels, bounds, motion: !reducedMotion });
     if (!shown.done || crowd.some((other) => !other.done)) schedule();
     else if (ambient() && timer === null) timer = later(() => { timer = null; schedule(); }, 66);
   }
@@ -84,6 +85,7 @@ export function createEngine({ canvas, map, theme, start, reducedMotion = false,
     on(type, listener) { listeners[type].push(listener); return () => { listeners[type] = listeners[type].filter((item) => item !== listener); }; },
     setSelf({ name }) { self.name = name; schedule(); },
     setTheme(next) { current = next; renderer.setTheme(next); schedule(); },
+    setBounds(rect) { bounds = rect || null; schedule(); },
     setLabels(list) { labels = list; schedule(); },
     setDecor(list) { decor = list; schedule(); },
     setOthers(list) { others = list; schedule(); },

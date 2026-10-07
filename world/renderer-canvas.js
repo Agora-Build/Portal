@@ -110,13 +110,14 @@ export function createCanvasRenderer(canvas, { map, theme }) {
   return {
     resize(width, height, ratio = 1) { viewport = { width, height, ratio }; canvas.width = Math.round(width * ratio); canvas.height = Math.round(height * ratio); },
     setTheme(next) { current = next; },
-    draw({ camera, time = 0, avatars = [], decor = [], labels = [], motion = true }) {
+    draw({ camera, time = 0, avatars = [], decor = [], labels = [], bounds = null, motion = true }) {
       const { width, height, ratio } = viewport, font = current.ui?.font || "IBM Plex Sans", t = motion ? time : 0;
       ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
       box(ctx, current.ui?.["--paper"] || "#111111", 0, 0, width, height);
       ctx.save(); ctx.scale(camera.zoom, camera.zoom); ctx.translate(-camera.x, -camera.y);
-      const x0 = Math.max(0, Math.floor(camera.x / s)), y0 = Math.max(0, Math.floor(camera.y / s));
-      const x1 = Math.min(map.width - 1, Math.floor((camera.x + width / camera.zoom) / s)), y1 = Math.min(map.height - 1, Math.floor((camera.y + height / camera.zoom) / s));
+      const area = bounds || { x: 0, y: 0, width: map.width, height: map.height };
+      const x0 = Math.max(area.x, Math.floor(camera.x / s)), y0 = Math.max(area.y, Math.floor(camera.y / s));
+      const x1 = Math.min(area.x + area.width - 1, Math.floor((camera.x + width / camera.zoom) / s)), y1 = Math.min(area.y + area.height - 1, Math.floor((camera.y + height / camera.zoom) / s));
       for (let y = y0; y <= y1; y += 1) for (let x = x0; x <= x1; x += 1) {
         const index = y * map.width + x, role = map.roles[index], ground = map.ground[index];
         if (ground && ground !== role) tile(ground, x, y, t);
