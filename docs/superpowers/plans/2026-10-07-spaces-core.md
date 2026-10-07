@@ -2204,3 +2204,28 @@ git commit -m "Serve the spaces API and Stoa pages" -m "🤖 Built with SMT <smt
 | Hooks for Chat sync (events) and discovery (tags, `?q=`, noticeboards on the map) | 3, 5, 10 |
 
 Deferred to later plans: `/meet/<id>` redirect and the meetings page retirement, client-side encryption and receiver rules (C), themes and the renderer (B), Chat (D), and noticeboard results and profile cards (E).
+
+## Notes for Later Plans (from the final review)
+
+- **Plan C (client):**
+  - Treat 404 and 410 from `heartbeat` as "you have left".
+  - Call `/api/signaling/token` after `enter`, because the enter response carries channel names and keys but no token.
+  - Update a space with `PUT /api/spaces/<id>`; the spec says PATCH, so align the spec.
+  - Add a 308 redirect from `/stoa` to `/stoa/`.
+  - Key the spaces rate limits by actor rather than IP so heartbeats from a shared NAT don't exhaust them.
+  - Decide whether owners and admins may remove people without being present.
+- **Plan D (Chat):**
+  - `spaces.onEvents` runs after commit and cannot veto a change, but the spec wants member-list changes kept only if Chat succeeds. Add a pre-commit hook or a compensating transaction for create, delete, add-member, remove-member and invitation acceptance.
+  - Rule on invitation acceptance inside `enter`, which must never block.
+  - Events carry only `actorId`; add `ids` so Chat usernames can be derived from member IDs.
+  - Add a `created` event.
+  - Ignore plaza `entered`/`left` events.
+- **Plan E (discovery):**
+  - Occupants expose only `{ id, name }`. Add the member ID for profile cards and DMs.
+  - Make `publicSpace` an allowlist before adding new fields.
+- **`/meet` redirect (Plan C):**
+  - Room migration runs once per process. Re-sync rooms or freeze room creation before redirecting `/meet/<id>`.
+  - Migrated rooms count toward the 3-space Basic limit.
+- **Scale:**
+  - Leases live in the single state document, so every heartbeat rewrites it.
+  - Move leases out of the aggregate, or batch heartbeats, before real plaza load.
