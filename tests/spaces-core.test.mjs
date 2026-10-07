@@ -244,3 +244,49 @@ test("lot decorations stay inside the lot's interior and keep its doors clear", 
   rejects([{ id: "p", kind: "plant", x: 17, y: 31 }], plazaMap, lotSpace, "Keep doors and entrances clear.");
   rejects([{ id: "p", kind: "plant", x: 17, y: 32 }], plazaMap, lotSpace, "Keep doors and entrances clear.");
 });
+
+import tokenTypes from "agora-token/src/AccessToken2.js";
+import { channelName, createSignaling, signalingConfig, signalingUser, spaceKey } from "../scripts/spaces/signaling.mjs";
+
+const signalingEnv = { AGORA_APP_ID: "a".repeat(32), AGORA_APP_CERTIFICATE: "b".repeat(32), SPACE_CHANNEL_SECRET: "s".repeat(32) };
+const parse = (token) => { const parsed = new tokenTypes.AccessToken2(); assert.equal(parsed.from_string(token), true); assert.equal(parsed.verifySignature("b".repeat(32)), true); return parsed; };
+
+test("Signaling needs Agora credentials and a long channel secret", () => {
+  const config = signalingConfig(signalingEnv);
+  assert.deepEqual([config.ready, config.ttl, config.permissions], [true, 900, false]);
+  assert.equal(signalingConfig({ ...signalingEnv, SPACE_CHANNEL_SECRET: "short" }).ready, false);
+  assert.equal(signalingConfig({}).ready, false);
+  assert.equal(signalingConfig({ ...signalingEnv, AGORA_RTM_PERMISSIONS: "true" }).permissions, true);
+  assert.throws(() => createSignaling(signalingConfig({})).issue("a-x", []), { status: 503 });
+});
+test("listed channels are public names; unlisted and private names and keys need the secret and change with the epoch", () => {
+  const secret = "s".repeat(32);
+  assert.equal(channelName(secret, { id: "plaza", type: "stoa", visibility: "listed" }), "ab-stoa-plaza");
+  assert.equal(channelName(secret, { id: "lot-ai-agents", slug: "ai-agents", type: "stoa", visibility: "listed" }), "ab-stoa-ai-agents");
+  assert.equal(spaceKey(secret, { id: "plaza", type: "stoa", visibility: "listed" }), null);
+  const hidden = { id: "8f9c4d02-0d56-4c79-9a39-111111111111", type: "stoa", visibility: "private", channelEpoch: 0 };
+  const name = channelName(secret, hidden);
+  assert.match(name, /^ab-stoa-[a-f0-9]{24}$/);
+  assert.equal(name.includes(hidden.id), false);
+  assert.notEqual(channelName(secret, { ...hidden, channelEpoch: 1 }), name);
+  assert.notEqual(channelName("t".repeat(32), hidden), name);
+  const key = spaceKey(secret, hidden);
+  assert.equal(Buffer.from(key, "base64").length, 32);
+  assert.notEqual(spaceKey(secret, { ...hidden, channelEpoch: 1 }), key);
+});
+test("Signaling user IDs come from the account, the profile, or a random guest ID", () => {
+  assert.equal(signalingUser({ id: "account:72a639ba-3a45-4afe-936b-111111111111" }), "a-72a639ba-3a45-4afe-936b-111111111111");
+  assert.equal(signalingUser({ id: "member:72a639ba-3a45-4afe-936b-111111111111" }), "m-72a639ba-3a45-4afe-936b-111111111111");
+  assert.match(signalingUser(null), /^g-[a-f0-9]{16}$/);
+  assert.notEqual(signalingUser(null), signalingUser(null));
+});
+test("Signaling tokens are signed for the user and add channel permissions only when enabled", () => {
+  const login = createSignaling(signalingConfig(signalingEnv), { now: () => 1700000000000 }).issue("a-x", [{ name: "ab-stoa-plaza", write: true }]);
+  assert.deepEqual([login.appId, login.userId, login.expiresAt], ["a".repeat(32), "a-x", new Date(1700000000000 + 900000).toISOString()]);
+  const parsed = parse(login.token);
+  assert.equal(parsed.expire, 900);
+  assert.equal(parsed.getServices(tokenTypes.kRtmServiceType)[0].__user_id.toString(), "a-x");
+  const scoped = createSignaling(signalingConfig({ ...signalingEnv, AGORA_RTM_PERMISSIONS: "true" })).issue("g-1", [{ name: "ab-stoa-plaza", write: false }, { name: "ab-stoa-ai-agents", write: true }]);
+  const service = parse(scoped.token).getServices(tokenTypes.kRtm2ServiceType)[0];
+  assert.deepEqual(service.__permissions.details, { 0: { 0: ["ab-stoa-plaza", "ab-stoa-ai-agents"], 1: ["ab-stoa-ai-agents"] } });
+});
