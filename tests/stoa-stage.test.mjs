@@ -461,3 +461,16 @@ test("a rekey from the host makes the lease check in now; from anyone else it is
   handlers.message(hostUser, JSON.stringify({ t: "rekey" }));
   assert.equal(lease.beats, 1);
 });
+test("remove wording follows the room kind, and a refresh from the owner is heard", async () => {
+  const env = await inLot();
+  assert.match(env.stage.removeNotice({ name: "Bo" }), /Remove Bo from this room\? .*until the room empties\./);
+  const api = async (path) => path === "/api/spaces/plaza/enter" ? access("plaza", "plaza-1") : path.endsWith("/enter") ? { ...access("space-1", "space-ch"), space: { ...space("space-1"), ownerId: hostActor }, hostId: "account:someone" } : { space: space("space-1") };
+  const { stage, calls } = setup({ api });
+  await stage.openSpace("space-1");
+  assert.match(stage.removeNotice({ name: "Bo" }), /from this space\? .*unless the owner allows them back\./);
+  calls.handlers["space-ch"].presence({ type: "snapshot", people: [present(hostUser, "Owner")] });
+  const before = calls.showRoom.length;
+  calls.handlers["space-ch"].message(hostUser, JSON.stringify({ t: "refresh" }));
+  await tick(); await tick();
+  assert.ok(calls.showRoom.length > before, "owner refresh triggers a room fetch");
+});

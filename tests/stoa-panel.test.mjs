@@ -85,3 +85,8 @@ test("the people key changes with manage and host", () => {
   assert.notEqual(peopleKey(list, "Me", { manage: true }), peopleKey(list, "Me", { manage: false }));
   assert.notEqual(peopleKey(list, "Me", { hostId: "account:a" }), peopleKey(list, "Me", { hostId: null }));
 });
+test("the space owner is never offered Remove", () => {
+  const doc = fakeDocument(), panel = createPanel(doc);
+  panel.setPeople([{ id: "account:o", name: "Owner" }], "Me", { manage: true, hostId: "account:me", ownerId: "account:o", selfId: "account:me" });
+  assert.deepEqual(doc.querySelector("#stoa-people").children[1].children.filter((child) => child.tagName === "button").map((button) => button.textContent), ["Make host"]);
+});

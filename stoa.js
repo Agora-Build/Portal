@@ -95,7 +95,7 @@ panel.on({
   topic: (topic, tags) => stage?.setTopic(topic, tags),
   leave: () => stage?.leaveRoom(),
   makeHost: (person) => stage?.makeHost(person),
-  remove: (person) => { if (confirm("Remove " + person.name + " from this room? They can't come back until the room empties or the owner allows them back.")) stage?.removePerson(person); },
+  remove: (person) => { if (stage && confirm(stage.removeNotice(person))) stage.removePerson(person); },
   decorate: () => {
     if (!stage?.canManage()) { panel.say("Only the host can decorate."); return; }
     stage.setEditing(true);

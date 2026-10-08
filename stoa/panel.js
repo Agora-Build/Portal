@@ -1,5 +1,5 @@
 // People are rebuilt only when who is here, a name, the host, or your host tools change, so a busy plaza doesn't churn the page.
-export const peopleKey = (list, selfName, { manage = false, hostId = null } = {}) => [selfName, manage ? "manage" : "", hostId || ""].join("\u0001") + "\n" + list.map((person) => person.id + "\u0000" + person.name).sort().join("\n");
+export const peopleKey = (list, selfName, { manage = false, hostId = null, ownerId = null } = {}) => [selfName, manage ? "manage" : "", hostId || "", ownerId || ""].join("\u0001") + "\n" + list.map((person) => person.id + "\u0000" + person.name).sort().join("\n");
 
 // The Stoa side panel: everything the canvas offers, as plain controls for keyboard and screen reader users.
 export function createPanel(doc = document) {
@@ -46,7 +46,7 @@ export function createPanel(doc = document) {
       if (now.length !== wanted.length || wanted.some((entry, index) => entry !== now[index])) rooms.replaceChildren(...wanted);
     },
     setPeople(list, selfName, options = {}) {
-      const { manage = false, hostId = null, selfId = null } = options;
+      const { manage = false, hostId = null, selfId = null, ownerId = null } = options;
       const key = peopleKey(list, selfName, options);
       if (key === shownPeople) return;
       shownPeople = key;
@@ -56,7 +56,7 @@ export function createPanel(doc = document) {
         const item = row(person.name, person.id === hostId);
         if (manage) {
           if (person.id !== hostId) item.append(tool("Make host", "Make " + person.name + " the host", () => handlers.makeHost(person)));
-          item.append(tool("Remove", "Remove " + person.name + " from this room", () => handlers.remove(person)));
+          if (person.id !== ownerId) item.append(tool("Remove", "Remove " + person.name + " from this room", () => handlers.remove(person)));
         }
         return item;
       }));

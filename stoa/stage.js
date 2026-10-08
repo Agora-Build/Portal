@@ -27,7 +27,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
       const list = [...seen.values()];
       everyone = list;
       engine.setOthers(list);
-      panel.setPeople(list, self.name, { manage: canManage(), hostId: here?.kind === "lot" || here?.kind === "space" ? here.access?.hostId || null : null, selfId: self.id });
+      panel.setPeople(list, self.name, { manage: canManage(), hostId: here?.kind === "lot" || here?.kind === "space" ? here.access?.hostId || null : null, ownerId: here?.kind === "lot" || here?.kind === "space" ? here.space?.ownerId || null : null, selfId: mine(here?.access?.hostId) ? here.access.hostId : self.id });
       onPeople(list);
     });
   };
@@ -54,7 +54,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     showPeople();
     if (live && next.access?.channel) {
       try {
-        const place = await openPlace({ live, map, engine, self, quiet: Boolean(next.watch), channel: { name: next.access.channel, key: next.access.key || null, spaceId: next.space.id }, onPeople: showPeople, onSay: (entry) => { if (entry.failed) panel.say("That message didn't send."); else panel.addMessage(entry); }, onRefresh: (from) => { if (here === next && from && from === next.access?.hostId) refreshRoom(); }, onRekey: (from) => { if (here === next && from && (from === next.access?.hostId || from === next.space?.ownerId)) lease?.beatNow(); }, onDecor: (from) => { if (here === next && from && (from === next.access?.hostId || from === next.space?.ownerId)) refreshRoom(); } });
+        const place = await openPlace({ live, map, engine, self, quiet: Boolean(next.watch), channel: { name: next.access.channel, key: next.access.key || null, spaceId: next.space.id }, onPeople: showPeople, onSay: (entry) => { if (entry.failed) panel.say("That message didn't send."); else panel.addMessage(entry); }, onRefresh: (from) => { if (here === next && from && (from === next.access?.hostId || from === next.space?.ownerId)) refreshRoom(); }, onRekey: (from) => { if (here === next && from && (from === next.access?.hostId || from === next.space?.ownerId)) lease?.beatNow(); }, onDecor: (from) => { if (here === next && from && (from === next.access?.hostId || from === next.space?.ownerId)) refreshRoom(); } });
         if (here !== next) { await place.close().catch(() => {}); return; }
         places = [place];
         place.setBlocked(next.access.blocked || []);
@@ -223,12 +223,14 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     try {
       const access = await api("/api/spaces/" + encodeURIComponent(at.space.id) + "/remove", { method: "POST", body: JSON.stringify({ actorId: person.id }) });
       if (here !== at) return;
-      await Promise.all(places.map((place) => place.rekey()));
+      await Promise.all(places.map((place) => place.rekey().catch(() => false)));
       panel.say(person.name + " was removed from this room.");
       onAccess(access, at);
       await chain;
     } catch (error) { if (here === at) panel.say(error.message); }
   }
+
+  const removeNotice = (person) => here?.kind === "lot" ? "Remove " + person.name + " from this room? They can't come back until the room empties." : "Remove " + person.name + " from this space? They can't come back unless the owner allows them back.";
 
   return {
     toPlaza: (start, welcome) => transition(() => toPlazaTask(start, welcome)),
@@ -238,6 +240,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     setTopic,
     makeHost,
     removePerson,
+    removeNotice,
     people: () => everyone,
     canManage,
     decor: () => currentDecor,
