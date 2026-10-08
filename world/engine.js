@@ -8,7 +8,7 @@ import { createCanvasRenderer } from "./renderer-canvas.js";
 // Times are wall-clock (Date.now) because walk start times are published, so peers share the clock.
 // One person's movement, input, camera, and drawing. Other people arrive through setOthers.
 // Events: "move" { path, startedAt } for pointer walks; "walk" { from, dir, startedAt } and "stop" { at } for keyboard
-// walks; "face" { dir } when a key only turns you; "arrive" { x, y } when a walk ends.
+// walks; "face" { dir, at } when a key only turns you; "arrive" { x, y } when a walk ends.
 export function createEngine({ canvas, map, theme, start, reducedMotion = false, renderer = createCanvasRenderer(canvas, { map, theme }), now = () => Date.now(), raf = (callback) => requestAnimationFrame(callback), later = (callback, delay) => setTimeout(callback, delay), cancel = (handle) => clearTimeout(handle), ratio = () => globalThis.devicePixelRatio || 1 }) {
   const listeners = { arrive: [], move: [], walk: [], stop: [], face: [] };
   const self = { id: "self", name: "You", walk: { path: [start], startedAt: now(), dir: "down" }, arrived: true, keyboard: false, bubble: null };
@@ -33,7 +33,9 @@ export function createEngine({ canvas, map, theme, start, reducedMotion = false,
     if (reached.done && !self.arrived) { self.arrived = true; self.keyboard = false; emit("arrive", { x: reached.x, y: reached.y }); if (held) keyWalk(held); }
     const shown = here(time);
     camera = follow({ x: (shown.x + 0.5) * s, y: (shown.y + 0.5) * s }, viewport, { x: area.x * s, y: area.y * s, width: area.width * s, height: area.height * s }, zoomFor(viewport, s));
-    const crowd = others.map((other) => ({ id: other.id, name: other.name, bubble: speech(other.bubble, time), ...positionAt(other.walk, time) }));
+    // Only people within a screen of the camera centre in each direction are drawn; everyone else is kept for when they come near.
+    const reach = { x: viewport.width / camera.zoom / s, y: viewport.height / camera.zoom / s }, middle = { x: (camera.x + viewport.width / camera.zoom / 2) / s, y: (camera.y + viewport.height / camera.zoom / 2) / s };
+    const crowd = others.map((other) => ({ id: other.id, name: other.name, bubble: speech(other.bubble, time), ...positionAt(other.walk, time) })).filter((other) => Math.abs(other.x + 0.5 - middle.x) <= reach.x && Math.abs(other.y + 0.5 - middle.y) <= reach.y);
     renderer.draw({ camera, time, avatars: [{ id: self.id, name: self.name, self: true, bubble: speech(self.bubble, time), ...shown }, ...crowd], decor, labels, bounds, motion: !reducedMotion });
     const talking = [self.bubble, ...others.map((other) => other.bubble)].filter((bubble) => bubble && bubble.until > time);
     if (!shown.done || crowd.some((other) => !other.done)) schedule();
@@ -74,7 +76,7 @@ export function createEngine({ canvas, map, theme, start, reducedMotion = false,
     const time = now(), position = here(time);
     if (!position.done) return;
     const from = { x: position.x, y: position.y }, path = straightPath(map, from, dir, blocked());
-    if (path.length < 2) { self.walk = { path: [from], startedAt: time, dir }; emit("face", { dir }); schedule(); return; }
+    if (path.length < 2) { self.walk = { path: [from], startedAt: time, dir }; emit("face", { dir, at: { x: from.x, y: from.y } }); schedule(); return; }
     self.walk = { path, startedAt: time, dir };
     self.arrived = false; self.keyboard = true;
     emit("walk", { from, dir, startedAt: time });

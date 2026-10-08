@@ -76,37 +76,64 @@ await sessionReady;
 const self = { id: state.account?.id || state.profile?.id || null, name: state.profile?.name || state.account?.name || "You", signedIn: Boolean(state.account || state.profile) };
 panel.setPeople([], self.name);
 panel.canTalk(self.signedIn);
-let live = null, plazaChannel = null;
+let live = null, stage = null;
+const unavailable = "The Stoa view isn't available, so there's nothing to walk or talk in.";
+// Controls work even without the canvas: Go to explains where the door is, Sign in and Start a space still do their jobs.
+panel.on({
+  go: (target) => {
+    if (!stage) { panel.say(unavailable + " " + target.title + " is at the door tile (" + target.door.x + ", " + target.door.y + ")."); return; }
+    const notice = stage.watchNotice(target);
+    if (notice) panel.say(notice);
+    else if (engine.walkTo(target.door)) panel.say("Walking to " + target.title + ".");
+    else { const at = engine.position(); panel.say(at.x === target.door.x && at.y === target.door.y ? "You're already at the door of " + target.title + "." : target.title + " can't be reached right now."); }
+    canvas.focus();
+  },
+  say: (text) => stage ? stage.say(text) : (panel.say(unavailable), false),
+  topic: (topic, tags) => stage?.setTopic(topic, tags),
+  leave: () => stage?.leaveRoom(),
+  start: async () => { try { const created = await api("/api/spaces", { method: "POST", body: JSON.stringify({ title: self.name + "'s space" }) }); location.assign("/stoa/s/" + created.space.id); } catch (error) { panel.say(error.message); } },
+  signin: () => openSignIn()
+});
+// Signaling loads and connects in the background: the page is already usable, and the stage picks the connection up when it is ready.
+async function connectLive() {
+  let candidate = null, timer = null, abandoned = false, connecting = null;
+  try {
+    connecting = (async () => {
+      const { AgoraRTM } = await loadAgora();
+      candidate = createLive({
+        AgoraRTM,
+        fetchToken: () => api("/api/signaling/token", { method: "POST", body: "{}" }),
+        onStatus: (kind, detail) => {
+          if (kind === "duplicate") panel.say("You opened the Stoa in another tab; live movement continues there.");
+          else if (kind === "link" && detail?.currentState === "FAILED") panel.say("The live connection was lost. Reload the page to reconnect.");
+        }
+      });
+      return (await candidate.connect()).channels?.[0]?.name || null;
+    })();
+    const timeout = new Promise((resolve, reject) => { timer = setTimeout(() => { abandoned = true; reject(Object.assign(new Error("Live movement is taking too long to connect."), { timedOut: true })); }, 10000); });
+    const channel = await Promise.race([connecting, timeout]);
+    clearTimeout(timer);
+    live = candidate;
+    await stage.attachLive(live, channel);
+  } catch (error) {
+    clearTimeout(timer);
+    // A connection that finishes after the timeout is closed again rather than left running unattached.
+    if (abandoned) connecting?.then(() => candidate?.close(), () => {}).catch(() => {});
+    else candidate?.close().catch(() => {});
+    live = null;
+    panel.say(error.status === 503 ? "Live movement isn't connected yet, so you won't see other people. You can still walk and visit rooms." : error.timedOut ? error.message : "Live movement couldn't start (" + (error.message || "unknown error") + ").");
+  }
+}
 if (engine) {
   engine.setSelf({ id: self.id || undefined, name: self.name });
-  try {
-    const { AgoraRTM } = await loadAgora();
-    live = createLive({ AgoraRTM, fetchToken: () => api("/api/signaling/token", { method: "POST", body: "{}" }), onStatus: (kind, detail) => { if (kind === "link" && detail?.currentState === "FAILED") panel.say("The live connection was lost. Reload the page to reconnect."); } });
-    plazaChannel = (await live.connect()).channels?.[0]?.name || null;
-  } catch (error) {
-    live = null;
-    problems.push(error.status === 503 ? "Live movement isn't connected yet, so you won't see other people. You can still walk and visit rooms." : "Live movement couldn't start (" + (error.message || "unknown error") + ").");
-  }
-  const stage = createStage({ api, map, engine, panel, live, self, plaza: spaceId ? null : { bounds: plazaBounds, channel: plazaChannel } });
-  panel.on({
-    go: (target) => {
-      const notice = stage.watchNotice(target);
-      if (notice) panel.say(notice);
-      else if (engine.walkTo(target.door)) panel.say("Walking to " + target.title + ".");
-      else { const at = engine.position(); panel.say(at.x === target.door.x && at.y === target.door.y ? "You're already at the door of " + target.title + "." : target.title + " can't be reached right now."); }
-      canvas.focus();
-    },
-    say: (text) => stage.say(text),
-    topic: (topic, tags) => stage.setTopic(topic, tags),
-    leave: () => stage.leaveRoom(),
-    start: async () => { try { const created = await api("/api/spaces", { method: "POST", body: JSON.stringify({ title: self.name + "'s space" }) }); location.assign("/stoa/s/" + created.space.id); } catch (error) { panel.say(error.message); } },
-    signin: () => openSignIn()
-  });
+  stage = createStage({ api, map, engine, panel, live: null, self, plaza: spaceId ? null : { bounds: plazaBounds, channel: null } });
   engine.on("arrive", (tile) => stage.onArrive(tile));
-  addEventListener("pagehide", () => stage.unload());
-  if (spaceId) await stage.openSpace(spaceId, invite);
-  else {
-    await stage.toPlaza(null, minimal ? "Minimal view is on." : preview ? "Previewing the " + preview.name + " theme. Only you see it." : undefined);
+  // Leaving the page releases the entry lease and, as far as the browser allows, the Signaling login.
+  addEventListener("pagehide", () => { stage.unload(); live?.close().catch(() => {}); });
+  const entering = spaceId ? stage.openSpace(spaceId, invite) : stage.toPlaza(null, minimal ? "Minimal view is on." : preview ? "Previewing the " + preview.name + " theme. Only you see it." : undefined);
+  connectLive();
+  await entering;
+  if (!spaceId) {
     if (lot) panel.say("You're at the door of " + lot.title + ". Step in when you're ready.");
     setInterval(async () => {
       try { const listing = await stage.poll(); summaries = new Map(listing.rooms.map((room) => [room.slug, room])); panel.setRooms(map.lots, summaries); engine.setLabels(labels()); }

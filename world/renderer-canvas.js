@@ -62,13 +62,15 @@ function label(ctx, text, cx, top, font, theme) {
 // A speech bubble above an avatar: up to three wrapped lines, the last ending with an ellipsis when cut.
 function bubble(ctx, text, cx, bottom, font, theme) {
   ctx.font = "500 11px " + font;
+  const fit = (line) => { let cut = line; while (cut.length > 1 && ctx.measureText(cut + "…").width > 160) cut = cut.slice(0, -1); return cut + "…"; };
   const lines = [];
-  for (const word of String(text).split(/\s+/).filter(Boolean)) {
+  for (const piece of String(text).split(/\s+/).filter(Boolean)) {
+    const word = ctx.measureText(piece).width > 160 ? fit(piece) : piece;
     const last = lines.length ? lines[lines.length - 1] + " " + word : null;
     if (last !== null && ctx.measureText(last).width <= 160) lines[lines.length - 1] = last; else lines.push(word);
   }
   const shown = lines.slice(0, 3);
-  if (lines.length > 3) shown[2] = shown[2] + "…";
+  if (lines.length > 3) shown[2] = ctx.measureText(shown[2] + "…").width > 160 ? fit(shown[2]) : shown[2] + "…";
   const width = Math.min(176, Math.max(...shown.map((line) => ctx.measureText(line).width)) + 12), height = shown.length * 14 + 8, left = cx - width / 2, top = bottom - height - 6;
   const surface = theme.ui?.["--surface"] || "#ffffff";
   box(ctx, surface, left, top, width, height);

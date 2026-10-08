@@ -32,15 +32,15 @@ function fakeEngine() {
     say(text) { this.said.push(text); }
   };
 }
-async function opened({ guest = false, who = [], now = () => 1000, later } = {}) {
+async function opened({ quiet = false, guest = false, who = [], now = () => 1000, later } = {}) {
   const live = fakeLive({ guest, who }), engine = fakeEngine(), seen = { people: [], said: [], refreshed: 0 };
-  const place = await openPlace({ live, map: plaza, engine, self: { name: "Me" }, channel: { name: "ab-stoa-plaza", key: null, spaceId: "plaza" }, onPeople: (list) => { seen.people = list; }, onSay: (entry) => seen.said.push(entry), onRefresh: () => { seen.refreshed += 1; }, now, later });
+  const place = await openPlace({ live, map: plaza, engine, self: { name: "Me" }, channel: { name: "ab-stoa-plaza", key: null, spaceId: "plaza" }, onPeople: (list) => { seen.people = list; }, onSay: (entry) => seen.said.push(entry), onRefresh: (from) => { seen.refreshed += 1; seen.refreshedBy = from; }, now, later, quiet });
   return { live, engine, place, seen };
 }
 
 test("opening a place joins its channel, shows who is there, and shares where you stand", async () => {
   const { live, place, seen } = await opened({ who: [{ userId: ada, states: state(22, 17, "Ada") }] });
-  assert.deepEqual(live.joined, [["ab-stoa-plaza", { spaceId: "plaza", key: null }]]);
+  assert.deepEqual(live.joined, [["ab-stoa-plaza", { spaceId: "plaza", key: null, quiet: false }]]);
   assert.deepEqual(seen.people.map((person) => person.name), ["Ada"]);
   assert.deepEqual(live.states, [["ab-stoa-plaza", { x: "21", y: "17", dir: "up", name: "Me" }]]);
   assert.equal(place.channel, "ab-stoa-plaza");
@@ -57,10 +57,10 @@ test("movement is published within the rate limit, keeping the latest pending me
   time = 10000;
   engine.emit("walk", { from: { x: 21, y: 17 }, dir: "up", startedAt: 10000 });
   engine.emit("stop", { at: { x: 21, y: 15 } });
-  engine.emit("face", { dir: "left" });
+  engine.emit("face", { dir: "left", at: { x: 21, y: 15 } });
   engine.emit("arrive", { x: 21, y: 15 });
   await tick();
-  assert.deepEqual(live.published.slice(-4), [{ t: "walk", from: { x: 21, y: 17 }, dir: "up", startedAt: 10000 }, { t: "stop", at: { x: 21, y: 15 } }, { t: "face", dir: "left" }, { t: "stop", at: { x: 21, y: 15 } }]);
+  assert.deepEqual(live.published.slice(-4), [{ t: "walk", from: { x: 21, y: 17 }, dir: "up", startedAt: 10000 }, { t: "stop", at: { x: 21, y: 15 } }, { t: "face", dir: "left", at: { x: 21, y: 15 } }, { t: "stop", at: { x: 21, y: 15 } }]);
   assert.equal(live.states.length, 2, "arriving shares the new resting place");
 });
 test("messages and presence from others reach the people list and the message log", async () => {
@@ -70,6 +70,7 @@ test("messages and presence from others reach the people list and the message lo
   assert.equal(seen.people[0].bubble.text, "Hi all");
   live.handlers.message(ada, JSON.stringify({ t: "refresh" }));
   assert.equal(seen.refreshed, 1);
+  assert.equal(seen.refreshedBy, "account:72a639ba-3a45-4afe-936b-222222222222", "the publisher is passed on so the caller can check they host the room");
   live.handlers.presence({ type: "state", userId: bo, states: state(20, 17, "Bo") });
   assert.deepEqual(seen.people.map((person) => person.name), ["Ada", "Bo"]);
   live.handlers.presence({ type: "leave", userId: ada });
@@ -171,5 +172,26 @@ test("each lot has a walkable plaza tile just outside its door", () => {
     assert.ok(walkable(plaza, tile.x, tile.y), lot.slug);
     assert.equal(Math.abs(tile.x - lot.door.x) + Math.abs(tile.y - lot.door.y), 1, lot.slug);
     assert.ok(tile.y < 20, lot.slug + " is on the plaza, not inside");
+  }
+});
+test("watchers join quietly even when signed in", async () => {
+  const { live } = await opened({ quiet: true });
+  assert.equal(live.joined[0][1].quiet, true);
+  assert.deepEqual(live.states, [], "and share nothing");
+});
+test("a message that fails to publish is reported as failed", async () => {
+  const { live, engine, place, seen } = await opened();
+  live.publish = async () => { throw new Error("offline"); };
+  assert.equal(place.say("hello"), true);
+  await tick();
+  assert.deepEqual(seen.said.map((entry) => [entry.text, entry.self, entry.failed === true]), [["hello", true, false], ["hello", true, true]]);
+});
+test("a 401 ends the lease, but a 429 or a network error keeps it going", async () => {
+  for (const [status, ends] of [[401, true], [429, false], [undefined, false]]) {
+    const losses = []; let beat, stopped = 0;
+    const api = async () => { throw Object.assign(new Error("no"), { status }); };
+    createLease({ api, spaceId: "s", onLost: (e) => losses.push(e.status), repeat: (callback) => { beat = callback; return 1; }, stopRepeat: () => { stopped += 1; }, beacon: () => {} });
+    await beat();
+    assert.deepEqual([losses.length, stopped], ends ? [1, 1] : [0, 0], String(status));
   }
 });

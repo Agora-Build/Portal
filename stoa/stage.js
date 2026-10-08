@@ -7,19 +7,27 @@ const inside = (rect, tile) => tile.x >= rect.x && tile.y >= rect.y && tile.x < 
 export const outsideDoor = (map, lot) => [[0, 1], [0, -1], [1, 0], [-1, 0]].map(([dx, dy]) => ({ x: lot.door.x + dx, y: lot.door.y + dy })).find((tile) => walkable(map, tile.x, tile.y) && !inside(lot.interior, tile)) || lot.door;
 
 // Moves the person between the plaza, lot rooms, and user spaces: entry leases on the server, channels on Signaling.
-export function createStage({ api, map, engine, panel, live, self, plaza, createLease = realLease }) {
-  let places = [], lease = null, here = null, chain = Promise.resolve();
+const REFRESH_GAP = 5000;
+// `live` may be null at first and attached later with attachLive, so the page never waits on the SDK.
+export function createStage({ api, map, engine, panel, live: firstLive, self, plaza, createLease = realLease, schedule = (callback) => typeof requestAnimationFrame === "function" ? requestAnimationFrame(callback) : setTimeout(callback, 16), now = () => Date.now(), later = (callback, delay) => setTimeout(callback, delay) }) {
+  let live = firstLive, places = [], lease = null, here = null, chain = Promise.resolve(), drawing = false;
   // State changes run strictly one at a time, each re-checking its preconditions when it starts.
   const transition = (task) => (chain = chain.then(task, task).catch((error) => panel.say(error.message || "Something went wrong.")));
   const doors = new Map(map.lots.map((lot) => [lot.door.x + "," + lot.door.y, lot]));
   const exits = new Map(map.lots.map((lot) => [lot.entry.x + "," + (lot.entry.y + 1), lot]));
   // Cell-ready: a space may later span several channels; people from all of them are merged by id.
+  // Presence events can arrive in bursts, so the lists are rebuilt at most once per frame.
   const showPeople = () => {
-    const seen = new Map();
-    for (const place of places) for (const person of place.people()) seen.set(person.id, person);
-    const list = [...seen.values()];
-    engine.setOthers(list);
-    panel.setPeople(list, self.name);
+    if (drawing) return;
+    drawing = true;
+    schedule(() => {
+      drawing = false;
+      const seen = new Map();
+      for (const place of places) for (const person of place.people()) seen.set(person.id, person);
+      const list = [...seen.values()];
+      engine.setOthers(list);
+      panel.setPeople(list, self.name);
+    });
   };
   const showRoom = (space, hostId) => panel.showRoom({ kicker: here?.kind === "lot" ? "LOT ROOM" : space.visibility === "private" ? "PRIVATE SPACE" : "UNLISTED SPACE", title: space.title, topic: space.topic, tags: space.tags || [], host: Boolean(self.id) && hostId === self.id, leaveLabel: here?.kind === "lot" ? "Back to the plaza" : "Leave this space" });
 
@@ -35,7 +43,7 @@ export function createStage({ api, map, engine, panel, live, self, plaza, create
     showPeople();
     if (live && next.access?.channel) {
       try {
-        const place = await openPlace({ live, map, engine, self, quiet: Boolean(next.watch), channel: { name: next.access.channel, key: next.access.key || null, spaceId: next.space.id }, onPeople: showPeople, onSay: panel.addMessage, onRefresh: () => { refreshRoom(); } });
+        const place = await openPlace({ live, map, engine, self, quiet: Boolean(next.watch), channel: { name: next.access.channel, key: next.access.key || null, spaceId: next.space.id }, onPeople: showPeople, onSay: (entry) => { if (entry.failed) panel.say("That message didn't send."); else panel.addMessage(entry); }, onRefresh: (from) => { if (here === next && from && from === next.access?.hostId) refreshRoom(); } });
         if (here !== next) { await place.close().catch(() => {}); return; }
         places = [place];
         place.setBlocked(next.access.blocked || []);
@@ -44,10 +52,11 @@ export function createStage({ api, map, engine, panel, live, self, plaza, create
     }
     if (here !== next) return;
     if (next.leased) {
-      const made = createLease({ api, spaceId: next.space.id, onAccess: (access) => { if (lease === made) onAccess(access, next); }, onLost: () => { transition(() => lost(made)); } });
+      const made = createLease({ api, spaceId: next.space.id, onAccess: (access) => { if (lease === made) onAccess(access, next); }, onLost: (error) => { transition(() => lost(made, error)); } });
       lease = made;
     }
-    panel.canTalk(next.leased ? self.signedIn : false);
+    const talk = Boolean(next.leased) && self.signedIn;
+    panel.canTalk(talk, talk || !self.signedIn ? undefined : next.full ? "The plaza is full \u2014 you're watching." : next.kind === "left" ? "You're no longer in this space." : "You're watching.");
   }
 
   function onAccess(access, at) {
@@ -64,14 +73,42 @@ export function createStage({ api, map, engine, panel, live, self, plaza, create
     if (here.kind !== "plaza" && access.hostId !== here.access.hostId) { here.access = { ...here.access, ...access }; refreshRoom(); }
   }
 
-  async function lost(from) {
+  // A lease the server dropped (410) gets one re-entry into the same place; removed or hidden (403, 404) does not.
+  async function reenter(at) {
+    if (at.kind === "lot") {
+      const access = await api("/api/spaces/lot-" + at.lot.slug + "/enter", { method: "POST", body: "{}" });
+      await live?.renew().catch(() => {});
+      await settle({ kind: "lot", space: access.space, lot: at.lot, access, bounds: at.lot.interior, start: null, leased: true });
+      showRoom(access.space, access.hostId);
+    } else {
+      const access = await api("/api/spaces/" + encodeURIComponent(at.space.id) + "/enter", { method: "POST", body: JSON.stringify(at.invite ? { invite: at.invite } : {}) });
+      await live?.renew().catch(() => {});
+      await settle({ kind: "space", space: access.space, access, invite: at.invite, bounds: null, start: null, leased: true });
+      showRoom(access.space, access.hostId);
+    }
+  }
+
+  async function lost(from, error) {
     if (!here || lease !== from) return;
+    const at = here;
+    if (error?.status === 410 && (at.kind === "lot" || at.kind === "space")) {
+      try { await reenter(at); return; } catch { if (here !== at) return; }
+    }
     if (here.kind === "lot") { const lot = here.lot; await toPlazaTask(outsideDoor(map, lot)); panel.say("You're no longer in " + lot.title + "."); }
     else if (here.kind === "space") { await settle({ kind: "left", space: here.space, bounds: here.bounds }); engine.setInteractive(false); panel.say("You're no longer in this space."); }
     else await toPlazaTask(null);
   }
 
-  async function refreshRoom() {
+  // Room refreshes are limited to one request at a time and one every few seconds; a refresh in between becomes one trailing request.
+  let inflight = false, trailing = false, waiting = null, lastRefresh = -Infinity;
+  function refreshRoom() {
+    if (inflight) { trailing = true; return; }
+    const wait = lastRefresh + REFRESH_GAP - now();
+    if (wait > 0) { if (waiting === null) waiting = later(() => { waiting = null; refreshRoom(); }, wait); return; }
+    inflight = true; lastRefresh = now();
+    fetchRoom().finally(() => { inflight = false; if (trailing) { trailing = false; refreshRoom(); } });
+  }
+  async function fetchRoom() {
     const at = here;
     if (!at || at.kind === "plaza" || !at.space) return;
     try {
@@ -184,6 +221,15 @@ export function createStage({ api, map, engine, panel, live, self, plaza, create
       if (here?.kind === "plaza") for (const place of places) place.setBlocked(listing.plaza.blocked || []);
       return listing;
     },
+    // Called when Signaling finishes connecting after the page started: reopens the current place's channel.
+    attachLive: (next, plazaChannel) => transition(async () => {
+      live = next;
+      if (plaza && plazaChannel) plaza.channel = plazaChannel;
+      const at = here;
+      if (!at || at.kind === "left") return;
+      const access = at.kind === "plaza" && !at.leased ? (plaza?.channel ? { channel: plaza.channel, key: null, blocked: [] } : null) : at.access;
+      if (access?.channel) await settle({ ...at, access, start: null });
+    }),
     unload() { lease?.leaveOnUnload(); }
   };
 }

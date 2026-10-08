@@ -13,10 +13,10 @@ const [agora, minimal, cyberpunk] = loadThemes(root);
 const whole = { x: 0, y: 0, zoom: 1 };
 
 // A recording 2D context: every method call and property assignment is logged in order.
-function fakeCanvas() {
+function fakeCanvas(measure = () => 20) {
   const calls = [], values = {};
   const ctx = new Proxy(values, {
-    get: (target, name) => name in target ? target[name] : name === "measureText" ? () => ({ width: 20 }) : (...args) => { calls.push([name, ...args]); },
+    get: (target, name) => name in target ? target[name] : name === "measureText" ? (text) => ({ width: measure(text) }) : (...args) => { calls.push([name, ...args]); },
     set: (target, name, value) => { target[name] = value; calls.push(["set:" + String(name), value]); return true; }
   });
   return { canvas: { width: 0, height: 0, getContext: () => ctx }, calls };
@@ -117,4 +117,12 @@ test("speech bubbles are drawn above avatars that are talking", () => {
   const { calls } = render(agora, { avatars: [{ id: "a", name: "Ada", x: 5, y: 5, dir: "down", bubble: "Hello there" }, { id: "b", name: "Bo", x: 7, y: 5, dir: "down" }], motion: false });
   const texts = calls.filter(([name]) => name === "fillText").map(([, text]) => text);
   assert.equal(texts.filter((text) => text === "Hello there").length, 1);
+});
+test("a single very long word in a bubble is cut to fit with an ellipsis", () => {
+  const { canvas, calls } = fakeCanvas((text) => String(text).length * 7);
+  const renderer = createCanvasRenderer(canvas, { map: plaza, theme: agora });
+  renderer.resize(640, 480, 1);
+  renderer.draw({ camera: whole, avatars: [{ id: "a", name: "Ada", x: 5, y: 5, dir: "down", bubble: "x".repeat(80) + " ok" }], motion: false });
+  const lines = calls.filter(([name]) => name === "fillText").map(([, text]) => text).filter((text) => text.includes("x"));
+  assert.ok(lines.length > 0 && lines.every((text) => text.length * 7 <= 160 && text.endsWith("…")), lines.join("|"));
 });

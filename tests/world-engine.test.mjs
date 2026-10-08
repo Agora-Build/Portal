@@ -10,10 +10,10 @@ const plaza = parseMap(JSON.parse(await readFile(new URL("../worlds/plaza/map.js
 const [agora, minimal] = loadThemes(root);
 const key = (name) => ({ key: name, preventDefault() {} });
 
-function setup({ reducedMotion = false, theme = agora } = {}) {
+function setup({ reducedMotion = false, theme = agora, size = [640, 480] } = {}) {
   let time = 1000;
   const frames = [], timers = [], drawn = [], themes = [], handlers = {}, events = { move: [], arrive: [], walk: [], stop: [], face: [] };
-  const canvas = { clientWidth: 640, clientHeight: 480, addEventListener: (type, listener) => { handlers[type] = listener; }, removeEventListener: (type) => { delete handlers[type]; }, getBoundingClientRect: () => ({ left: 0, top: 0 }) };
+  const canvas = { clientWidth: size[0], clientHeight: size[1], addEventListener: (type, listener) => { handlers[type] = listener; }, removeEventListener: (type) => { delete handlers[type]; }, getBoundingClientRect: () => ({ left: 0, top: 0 }) };
   const renderer = { resize() {}, setTheme: (theme) => themes.push(theme), draw: (frame) => drawn.push(frame) };
   const engine = createEngine({ canvas, map: plaza, theme, start: plaza.spawns[0], reducedMotion, renderer, now: () => time, raf: (callback) => frames.push(callback), later: (callback) => { timers.push(callback); return timers.length; }, cancel() {}, ratio: () => 1 });
   for (const type of Object.keys(events)) engine.on(type, (value) => events[type].push(value));
@@ -198,7 +198,7 @@ test("a key toward a wall only turns you and says so", () => {
   const { engine, handlers, events, flush, advance, drawn } = setup();
   engine.walkTo({ x: 1, y: 18 }); advance(10000); flush();
   handlers.keydown(key("s")); flush();
-  assert.deepEqual(events.face, [{ dir: "down" }]);
+  assert.deepEqual(events.face, [{ dir: "down", at: { x: 1, y: 18 } }]);
   assert.equal(events.walk.length, 0);
   assert.equal(drawn.at(-1).avatars[0].dir, "down");
 });
@@ -251,4 +251,13 @@ test("a decoration in front of a keyboard walk stops it before the decoration", 
   handlers.keydown(key("ArrowUp"));
   engine.setDecor([{ kind: "statue", x: 21, y: 14 }]);
   assert.deepEqual(events.stop, [{ at: { x: 21, y: 15 } }]);
+});
+test("only people within about two screens of the camera are drawn, but everyone is kept", () => {
+  const { engine, drawn, flush, advance } = setup({ size: [320, 240] });
+  const others = [{ id: "bo", name: "Bo", walk: { path: [{ x: 22, y: 17 }], startedAt: 0 } }, { id: "far", name: "Far", walk: { path: [{ x: 42, y: 1 }], startedAt: 0 } }];
+  engine.setOthers(others); flush();
+  assert.deepEqual(drawn.at(-1).avatars.map((avatar) => avatar.id), ["self", "bo"]);
+  assert.equal(engine.walkTo({ x: 42, y: 1 }), true);
+  advance(10000); engine.setOthers(others); flush();
+  assert.equal(drawn.at(-1).avatars.length, 3, "the far person is drawn again once the camera is near");
 });

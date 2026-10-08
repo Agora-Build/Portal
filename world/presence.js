@@ -25,10 +25,13 @@ export function createPresence({ map, self, now = () => Date.now() }) {
       const message = readMessage(text, map);
       if (!message) return null;
       const person = people.get(publisher), time = now();
+      // A path that starts far from where the person is can't be a real walk.
+      const start = message.t === "move" ? message.path[0] : message.t === "walk" ? message.from : null;
+      if (start) { const tile = tileOf(person, time); if (Math.max(Math.abs(start.x - tile.x), Math.abs(start.y - tile.y)) > 2) return null; }
       if (message.t === "move") person.walk = { path: message.path, startedAt: shared(message.startedAt, time) };
       else if (message.t === "walk") person.walk = { path: straightPath(map, message.from, message.dir), startedAt: shared(message.startedAt, time), dir: message.dir };
       else if (message.t === "stop") person.walk = stopAt(person.walk, message.at) || { path: [message.at], startedAt: time, dir: tileOf(person, time).dir };
-      else if (message.t === "face") { const tile = tileOf(person, time); person.walk = { path: [{ x: tile.x, y: tile.y }], startedAt: time, dir: message.dir }; }
+      else if (message.t === "face") person.walk = { path: [message.at], startedAt: time, dir: message.dir };
       else if (message.t === "say") person.bubble = { text: message.text, until: time + BUBBLE_MS };
       return { ...message, from: { id: person.id, name: person.name } };
     },

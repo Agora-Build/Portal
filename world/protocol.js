@@ -21,7 +21,7 @@ export function readMessage(text, map) {
     case "move": return Array.isArray(data.path) && data.path.every(isTile) && validPath(map, data.path) && Number.isFinite(data.startedAt) ? { t: "move", path: data.path.map(copy), startedAt: data.startedAt } : null;
     case "walk": return isTile(data.from) && walkable(map, data.from.x, data.from.y) && DIRS.includes(data.dir) && Number.isFinite(data.startedAt) ? { t: "walk", from: copy(data.from), dir: data.dir, startedAt: data.startedAt } : null;
     case "stop": return isTile(data.at) && walkable(map, data.at.x, data.at.y) ? { t: "stop", at: copy(data.at) } : null;
-    case "face": return DIRS.includes(data.dir) ? { t: "face", dir: data.dir } : null;
+    case "face": return DIRS.includes(data.dir) && isTile(data.at) && walkable(map, data.at.x, data.at.y) ? { t: "face", dir: data.dir, at: copy(data.at) } : null;
     case "say": { const say = typeof data.text === "string" ? data.text.trim() : ""; return say && data.text.length <= TEXT_LIMIT ? { t: "say", text: say } : null; }
     case "refresh": return { t: "refresh" };
     default: return null;

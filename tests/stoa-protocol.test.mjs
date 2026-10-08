@@ -22,7 +22,7 @@ test("only well-formed messages are accepted", () => {
   assert.deepEqual(readMessage(writeMessage({ ...move, extra: "dropped" }), plaza), move);
   assert.deepEqual(readMessage(writeMessage({ t: "walk", from: { x: 21, y: 17 }, dir: "up", startedAt: 5 }), plaza), { t: "walk", from: { x: 21, y: 17 }, dir: "up", startedAt: 5 });
   assert.deepEqual(readMessage(writeMessage({ t: "stop", at: { x: 21, y: 15 } }), plaza), { t: "stop", at: { x: 21, y: 15 } });
-  assert.deepEqual(readMessage(writeMessage({ t: "face", dir: "left" }), plaza), { t: "face", dir: "left" });
+  assert.deepEqual(readMessage(writeMessage({ t: "face", dir: "left", at: { x: 21, y: 17 } }), plaza), { t: "face", dir: "left", at: { x: 21, y: 17 } });
   assert.deepEqual(readMessage(writeMessage({ t: "say", text: "  hello  " }), plaza), { t: "say", text: "hello" });
   assert.deepEqual(readMessage(writeMessage({ t: "refresh" }), plaza), { t: "refresh" });
   for (const bad of [
@@ -33,6 +33,8 @@ test("only well-formed messages are accepted", () => {
     writeMessage({ t: "walk", from: { x: 0, y: 0 }, dir: "up", startedAt: 1 }),
     writeMessage({ t: "walk", from: { x: 21, y: 17 }, dir: "north", startedAt: 1 }),
     writeMessage({ t: "stop", at: { x: 1.5, y: 2 } }),
+    writeMessage({ t: "face", dir: "left" }),
+    writeMessage({ t: "face", dir: "left", at: { x: 0, y: 0 } }),
     writeMessage({ t: "say", text: "   " }),
     writeMessage({ t: "say", text: "x".repeat(501) }),
     "x".repeat(8193)
@@ -129,7 +131,7 @@ test("moves, keyboard walks, stops, turns, and speech follow trusted messages", 
   clock.time = 9000;
   room.message(ada, writeMessage({ t: "stop", at: { x: 6, y: 8 } }));
   assert.deepEqual(room.list()[0].walk.path, [{ x: 6, y: 8 }]);
-  room.message(ada, writeMessage({ t: "face", dir: "left" }));
+  room.message(ada, writeMessage({ t: "face", dir: "left", at: { x: 6, y: 8 } }));
   assert.deepEqual(room.list()[0].walk, { path: [{ x: 6, y: 8 }], startedAt: 9000, dir: "left" });
   room.message(ada, writeMessage({ t: "say", text: "Hello!" }));
   assert.deepEqual(room.list()[0].bubble, { text: "Hello!", until: 9000 + BUBBLE_MS });
@@ -149,4 +151,11 @@ test("state updates rest people, never interrupt a walk, and blocked people disa
   assert.deepEqual(room.list(), []);
   room.state(ada, at(21, 17));
   assert.deepEqual(room.list(), [], "blocked people stay hidden");
+});
+test("a move that starts far from where the person is is dropped", () => {
+  const { room } = people(1000);
+  room.snapshot([{ userId: ada, states: at(21, 17) }]);
+  assert.equal(room.message(ada, writeMessage({ t: "move", path: [{ x: 21, y: 13 }, { x: 21, y: 12 }], startedAt: 1000 })), null);
+  assert.deepEqual(room.list()[0].walk.path, [{ x: 21, y: 17 }]);
+  assert.ok(room.message(ada, writeMessage({ t: "move", path: [{ x: 21, y: 15 }, { x: 21, y: 14 }], startedAt: 1000 })), "two tiles away still counts as the same walk");
 });

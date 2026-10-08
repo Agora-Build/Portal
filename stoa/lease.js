@@ -5,7 +5,7 @@ export function createLease({ api, spaceId, onAccess = () => {}, onLost = () => 
   const stop = () => { stopped = true; if (timer !== null) { stopRepeat(timer); timer = null; } };
   timer = repeat(async () => {
     try { const access = await api(base + "/heartbeat", { method: "POST" }); if (!stopped) onAccess(access); }
-    catch (error) { if (!stopped && [403, 404, 410].includes(error.status)) { stop(); onLost(error); } }
+    catch (error) { if (!stopped && [401, 403, 404, 410].includes(error.status)) { stop(); onLost(error); } }
   }, every);
   return {
     stop,

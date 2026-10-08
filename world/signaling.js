@@ -5,6 +5,7 @@ import { importKey, open, seal } from "./crypto.js";
 export function createLive({ AgoraRTM, fetchToken, onStatus = () => {} }) {
   let client = null, userId = null, queue = Promise.resolve();
   const channels = new Map();
+  const guest = () => String(userId).startsWith("g-");
   // Events are handled one at a time so decryption never reorders presence or messages.
   const enqueue = (kind, task) => { queue = queue.then(task).catch((error) => onStatus(kind, error)); };
   async function statesOf(channel, states) {
@@ -20,7 +21,7 @@ export function createLive({ AgoraRTM, fetchToken, onStatus = () => {} }) {
   async function onPresence(event) {
     const channel = channels.get(event.channelName);
     if (!channel) return;
-    const emit = (change) => channel.handlers.presence(change);
+    const emit = (change) => { if (channels.get(event.channelName) === channel) channel.handlers.presence(change); };
     if (event.eventType === "SNAPSHOT") emit({ type: "snapshot", people: await people(channel, event.snapshot) });
     else if (event.eventType === "REMOTE_JOIN") { if (event.publisher !== userId) emit({ type: "join", userId: event.publisher }); }
     else if (event.eventType === "REMOTE_LEAVE" || event.eventType === "REMOTE_TIMEOUT") { if (event.publisher !== userId) emit({ type: "leave", userId: event.publisher }); }
@@ -43,30 +44,33 @@ export function createLive({ AgoraRTM, fetchToken, onStatus = () => {} }) {
   async function renew() { const access = await fetchToken(); await client.renewToken(access.token); return access; }
   return {
     get userId() { return userId; },
-    get guest() { return String(userId).startsWith("g-"); },
+    get guest() { return guest(); },
     async connect() {
       const access = await fetchToken();
       userId = access.userId;
-      client = new AgoraRTM.RTM(access.appId, userId);
+      client = new AgoraRTM.RTM(access.appId, userId, { presenceTimeout: 30 });
       client.addEventListener("message", (event) => enqueue("message", () => onMessage(event)));
       client.addEventListener("presence", (event) => enqueue("presence", () => onPresence(event)));
       client.addEventListener("tokenPrivilegeWillExpire", () => { renew().catch((error) => onStatus("token", error)); });
-      client.addEventListener("linkState", (event) => onStatus("link", event));
+      client.addEventListener("linkState", (event) => onStatus(event?.reasonCode === "SAME_UID_LOGIN" ? "duplicate" : "link", event));
       await client.login({ token: access.token });
       return access;
     },
     renew,
-    async join(name, { spaceId, key = null }, handlers) {
+    async join(name, { spaceId, key = null, quiet = false }, handlers) {
       channels.set(name, { spaceId, key: key ? await importKey(key) : null, handlers });
-      await client.subscribe(name, { withMessage: true, withPresence: true, beQuiet: String(userId).startsWith("g-") });
+      try { await client.subscribe(name, { withMessage: true, withPresence: true, beQuiet: guest() || Boolean(quiet) }); }
+      catch (error) { channels.delete(name); throw error; }
     },
     async leave(name) { if (!channels.delete(name)) return; await client.unsubscribe(name).catch(() => {}); },
     async publish(name, text) {
+      if (guest()) throw new Error("Guests cannot publish.");
       const channel = channels.get(name);
       if (!channel) throw new Error("Not in channel " + name + ".");
       await client.publish(name, channel.key ? await seal(channel.key, text) : text);
     },
     async setState(name, state) {
+      if (guest()) throw new Error("Guests cannot publish.");
       const channel = channels.get(name);
       if (!channel) return;
       await client.presence.setState(name, "MESSAGE", channel.key ? { s: await seal(channel.key, JSON.stringify(state)) } : state);

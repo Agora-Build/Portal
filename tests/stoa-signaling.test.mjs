@@ -10,8 +10,8 @@ const me = "a-72a639ba-3a45-4afe-936b-111111111111", ada = "a-72a639ba-3a45-4afe
 function fakeAgora() {
   const clients = [];
   class RTM {
-    constructor(appId, userId) {
-      Object.assign(this, { appId, userId, calls: [], handlers: {}, pages: [] });
+    constructor(appId, userId, config) {
+      Object.assign(this, { appId, userId, config, calls: [], handlers: {}, pages: [] });
       const self = this;
       this.presence = {
         async setState(...args) { self.calls.push(["setState", ...args]); },
@@ -21,7 +21,7 @@ function fakeAgora() {
     }
     addEventListener(type, handler) { this.handlers[type] = handler; }
     async login(options) { this.calls.push(["login", options]); }
-    async subscribe(...args) { this.calls.push(["subscribe", ...args]); }
+    async subscribe(...args) { if (this.failSubscribe) throw new Error("subscribe failed"); this.calls.push(["subscribe", ...args]); }
     async unsubscribe(...args) { this.calls.push(["unsubscribe", ...args]); }
     async publish(...args) { this.calls.push(["publish", ...args]); }
     async renewToken(token) { this.calls.push(["renewToken", token]); }
@@ -29,10 +29,10 @@ function fakeAgora() {
   }
   return { AgoraRTM: { RTM }, clients };
 }
-async function connected(userId = me) {
+async function connected(userId = me, onStatus) {
   const { AgoraRTM, clients } = fakeAgora();
   let issued = 0;
-  const live = createLive({ AgoraRTM, fetchToken: async () => ({ appId: "a".repeat(32), userId, token: "token-" + (++issued), channels: [] }) });
+  const live = createLive({ AgoraRTM, onStatus, fetchToken: async () => ({ appId: "a".repeat(32), userId, token: "token-" + (++issued), channels: [] }) });
   await live.connect();
   return { live, client: clients[0] };
 }
@@ -124,4 +124,46 @@ test("expiring tokens are renewed; leaving and closing stop delivery", async () 
   assert.deepEqual(client.calls.filter(([name]) => name === "unsubscribe"), [["unsubscribe", "ab-stoa-plaza"]]);
   await live.close();
   assert.deepEqual(client.calls.at(-1), ["logout"]);
+});
+test("the client times people out after 30 seconds so ghosts clear quickly", async () => {
+  const { client } = await connected();
+  assert.deepEqual(client.config, { presenceTimeout: 30 });
+});
+test("guests cannot publish or set state, and quiet joins subscribe quietly", async () => {
+  const guest = await connected("g-0123456789abcdef");
+  await guest.live.join("ab-stoa-plaza", { spaceId: "plaza" }, recorder().handlers);
+  await assert.rejects(guest.live.publish("ab-stoa-plaza", "x"), /Guests cannot publish/);
+  await assert.rejects(guest.live.setState("ab-stoa-plaza", { x: "1" }), /Guests cannot publish/);
+  assert.equal(guest.client.calls.filter(([name]) => name === "publish" || name === "setState").length, 0);
+  const member = await connected();
+  await member.live.join("ab-stoa-plaza", { spaceId: "plaza", quiet: true }, recorder().handlers);
+  assert.equal(member.client.calls.at(-1)[2].beQuiet, true);
+});
+test("a failed subscribe forgets the channel and rethrows", async () => {
+  const { live, client } = await connected();
+  client.failSubscribe = true;
+  const plaza = recorder();
+  await assert.rejects(live.join("ab-stoa-plaza", { spaceId: "plaza" }, plaza.handlers), /subscribe failed/);
+  client.handlers.message({ channelName: "ab-stoa-plaza", publisher: ada, message: "late" });
+  await settle();
+  assert.deepEqual(plaza.seen.messages, []);
+  await assert.rejects(live.publish("ab-stoa-plaza", "x"), /Not in channel/);
+});
+test("presence still being decrypted when a channel is left is not delivered", async () => {
+  const keyText = randomBytes(32).toString("base64"), key = await importKey(keyText);
+  const { live, client } = await connected();
+  const hidden = recorder();
+  await live.join("ab-stoa-secret", { spaceId: "s1", key: keyText }, hidden.handlers);
+  client.handlers.presence({ channelName: "ab-stoa-secret", eventType: "REMOTE_STATE_CHANGED", publisher: ada, stateChanged: { s: await seal(key, JSON.stringify({ x: "1", y: "2" })) } });
+  for (let index = 0; index < 3; index += 1) await Promise.resolve();
+  await live.leave("ab-stoa-secret");
+  await settle();
+  assert.deepEqual(hidden.seen.changes, []);
+});
+test("a second login with the same user is reported as its own status", async () => {
+  const seen = [];
+  const { client } = await connected(me, (kind, detail) => seen.push([kind, detail?.reasonCode || detail?.currentState]));
+  client.handlers.linkState({ currentState: "FAILED", reasonCode: "SAME_UID_LOGIN" });
+  client.handlers.linkState({ currentState: "FAILED", reasonCode: "UNKNOWN" });
+  assert.deepEqual(seen, [["duplicate", "SAME_UID_LOGIN"], ["link", "UNKNOWN"]]);
 });
