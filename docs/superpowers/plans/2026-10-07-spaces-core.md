@@ -21,7 +21,7 @@
 - Unlisted and private spaces never appear in `GET /api/spaces`, in guest or plaza Signaling tokens, or in any plaza data.
 - A person who may not see a private space gets the same 404 as for a missing space: `"This space was not found."`
 - Actor identity: `actor.id` is the account ID when an account exists, otherwise the profile (member) ID. `actor.ids` holds both, and ownership and membership match against either.
-- Plaza capacity is 200. Lease length is 60 seconds. Signaling tokens last 900 seconds. A space has at most 60 decorations, and a topic has at most 5 tags.
+- Plaza capacity is 1000. Lease length is 60 seconds. Signaling tokens last 900 seconds. A space has at most 60 decorations, and a topic has at most 5 tags.
 - Basic plans get 3 user-created spaces and every other plan gets 20 (`entitlements(plan).spaces`).
 - Every commit message ends with the line `🤖 Built with SMT <smt@agora.build>`. Do not add co-author trailers.
 - Run `npm test` before every commit; it must pass completely.
@@ -682,7 +682,7 @@ git commit -m "Add space permissions" -m "🤖 Built with SMT <smt@agora.build>"
 **Interfaces:**
 - Consumes: `AppError` (Task 1), `validCombination` (Task 4), a parsed plaza map (Task 2/3).
 - Produces:
-  - `DECOR_KINDS` (13 kinds), `THEMES = ["agora","minimal","cyberpunk"]`, `PLAZA_ID = "plaza"`, `PLAZA_CAPACITY = 200`, `lotSpaceId(slug) -> "lot-" + slug`
+  - `DECOR_KINDS` (13 kinds), `THEMES = ["agora","minimal","cyberpunk"]`, `PLAZA_ID = "plaza"`, `PLAZA_CAPACITY = 1000`, `lotSpaceId(slug) -> "lot-" + slug`
   - `spaceInput(input, current = {}) -> { title, purpose, visibility, access, capacity, themeId }`. Throws 422.
   - `normalizeTags(value = []) -> string[]`. Throws 422.
   - `newSpace(fields, { id, ownerId, now }) -> Space`
@@ -759,7 +759,7 @@ import { validCombination } from "./permissions.mjs";
 export const DECOR_KINDS = ["plant", "lamp", "rug", "sofa", "chair", "table", "whiteboard", "bookshelf", "screen", "banner", "poster", "statue", "fountain"];
 export const THEMES = ["agora", "minimal", "cyberpunk"];
 export const PLAZA_ID = "plaza";
-export const PLAZA_CAPACITY = 200;
+export const PLAZA_CAPACITY = 1000;
 export const lotSpaceId = (slug) => "lot-" + slug;
 const pick = (input, field, fallback) => input[field] === undefined ? fallback : input[field];
 
@@ -1388,7 +1388,7 @@ test("system spaces and legacy rooms are prepared once", async (t) => {
   const { spaces, store, owner, room } = await setup(t, { before: async (store, person) => { const owner = await person("Owner"); return { owner, room: await store.createRoom(owner.token, { title: "Demo prep", intent: "Plan the demo day together." }) }; } });
   const listing = await spaces.list();
   assert.deepEqual(listing.rooms.map((entry) => entry.slug), ["ai-agents", "voice-ai", "rtc-lab", "founders-table", "open-source", "lounge"]);
-  assert.deepEqual(listing.plaza, { capacity: 200, occupancy: 0, blocked: [] });
+  assert.deepEqual(listing.plaza, { capacity: 1000, occupancy: 0, blocked: [] });
   const migrated = await spaces.get(owner.token, room.id);
   assert.deepEqual([migrated.visibility, migrated.access, migrated.members, migrated.title], ["unlisted", "members", [owner.id], "Demo prep"]);
   await spaces.list();
@@ -2174,7 +2174,7 @@ Run: `npm test`
 Expected: PASS, including the updated production output test.
 
 Run: `npm run build && node dist/scripts/serve.mjs --port 4199 & sleep 2; curl -s -o /dev/null -w "%{http_code}\n" localhost:4199/stoa/; curl -s localhost:4199/api/spaces | head -c 200; kill %1`
-Expected: `200`, then JSON beginning with `{"plaza":{"capacity":200`.
+Expected: `200`, then JSON beginning with `{"plaza":{"capacity":1000`.
 
 - [ ] **Step 5: Commit**
 
@@ -2191,7 +2191,7 @@ git commit -m "Serve the spaces API and Stoa pages" -m "🤖 Built with SMT <smt
 | --- | --- |
 | Space record, visibility and access kept separate, private needs `members` | 4, 5 |
 | `can()` used by REST and tokens | 4, 10 |
-| Plaza and lots from the map, FCFS, topic and tags, plaza capacity 200 and the full-plaza offer | 3, 5, 6, 10 |
+| Plaza and lots from the map, FCFS, topic and tags, plaza capacity 1000 and the full-plaza offer | 3, 5, 6, 10 |
 | Hosts (first in, longest present, owner priority, hand-over), host powers | 6, 10 |
 | Decorating rules and limits | 7, 10 |
 | User spaces, entitlements 3 and 20, invitations (hashed, expiring, limited uses), members | 1, 5, 10 |
