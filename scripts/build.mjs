@@ -15,6 +15,7 @@ await mkdir(new URL("scripts/", output), { recursive: true });
 await Promise.all(["serve.mjs", "store.mjs", "models.mjs", "activity.mjs", "calls.mjs", "auth.mjs", "identity.mjs", "credits.mjs", "ledger.mjs", "billing.mjs", "plans.mjs", "persistence.mjs", "connections.mjs", "platform-admin.mjs"].map((file) => copyFile(new URL("scripts/" + file, root), new URL("scripts/" + file, output))));
 await cp(new URL("scripts/spaces/", root), new URL("scripts/spaces/", output), { recursive: true });
 await cp(new URL("world/", root), new URL("world/", output), { recursive: true });
+await cp(new URL("stoa/", root), new URL("stoa/", output), { recursive: true });
 await cp(new URL("worlds/", root), new URL("worlds/", output), { recursive: true });
 await cp(new URL("themes/", root), new URL("themes/", output), { recursive: true });
 console.log("House app built in dist/. Run with: node dist/scripts/serve.mjs");

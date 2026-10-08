@@ -18,7 +18,7 @@ export function avatar(person, size = "") {
 export async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers: { ...(options.body ? { "Content-Type": "application/json" } : {}), ...options.headers } });
   const data = await response.json();
-  if (!response.ok) { const error = new Error(data.error || "Something went wrong."); error.status = response.status; throw error; }
+  if (!response.ok) { const error = new Error(data.error || "Something went wrong."); error.status = response.status; error.data = data; throw error; }
   return data;
 }
 let toastTimer;

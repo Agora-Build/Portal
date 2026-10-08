@@ -179,3 +179,17 @@ test("the Signaling SDK and its loader are served, and every page links to the S
     assert.match(await (await request(url, "/stoa/")).text(), /<a href="\/stoa\/" class="is-active" aria-current="page">Stoa<\/a>/);
   } finally { await close(instance); }
 });
+
+test("the live Stoa page has its panel controls and serves every live module", async () => {
+  const { instance, url } = await start();
+  try {
+    const html = await (await request(url, "/stoa/")).text();
+    for (const id of ["stoa-here", "stoa-topic-form", "stoa-leave", "stoa-offer", "stoa-start", "stoa-rooms-section", "stoa-messages", "stoa-say", "stoa-signin"]) assert.match(html, new RegExp("id=\"" + id + "\""), id);
+    assert.match(html, /id="stoa-messages" role="log"/);
+    for (const module of ["/stoa/panel.js", "/stoa/stage.js", "/stoa/place.js", "/stoa/lease.js", "/world/protocol.js", "/world/crypto.js", "/world/signaling.js", "/world/presence.js"]) {
+      const response = await request(url, module);
+      assert.equal(response.status, 200, module);
+      assert.match(response.headers.get("content-type"), /text\/javascript/, module);
+    }
+  } finally { await close(instance); }
+});

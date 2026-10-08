@@ -24,10 +24,32 @@
           <div class="stoa-stage"><canvas id="stoa-canvas" tabindex="0" aria-label="Plaza map" aria-describedby="stoa-help"></canvas><p class="stoa-help" id="stoa-help">Click or tap to walk. Select the map to use the arrow keys or WASD.</p></div>
           <aside class="stoa-panel" aria-label="Around you">
             <p class="stoa-status" id="stoa-status" role="status" aria-live="polite">Opening the plaza...</p>
-            <h2 class="stoa-panel-title">Rooms</h2>
-            <ul class="stoa-rooms" id="stoa-rooms"></ul>
+            <section class="stoa-here" id="stoa-here" hidden aria-labelledby="stoa-here-title">
+              <p class="kicker" id="stoa-here-kicker"></p>
+              <h2 id="stoa-here-title"></h2>
+              <p class="stoa-here-topic" id="stoa-here-topic"></p>
+              <form class="stoa-topic-form" id="stoa-topic-form" hidden>
+                <label>Topic<input name="topic" required minlength="2" maxlength="80" autocomplete="off"></label>
+                <label>Tags <span class="optional">up to 5, separated by commas</span><input name="tags" maxlength="160" autocomplete="off"></label>
+                <button class="button button-small" type="submit">Set topic</button>
+              </form>
+              <button class="button button-secondary button-small" type="button" id="stoa-leave">Back to the plaza</button>
+            </section>
+            <section class="stoa-offer" id="stoa-offer" hidden aria-labelledby="stoa-offer-title">
+              <h2 class="stoa-panel-title" id="stoa-offer-title">The plaza is full</h2>
+              <ul class="stoa-offer-list" id="stoa-offer-list"></ul>
+              <button class="button button-small" type="button" id="stoa-start">Start a space</button>
+            </section>
+            <section id="stoa-rooms-section" aria-labelledby="stoa-rooms-title">
+              <h2 class="stoa-panel-title" id="stoa-rooms-title">Rooms</h2>
+              <ul class="stoa-rooms" id="stoa-rooms"></ul>
+            </section>
             <h2 class="stoa-panel-title">Here now</h2>
             <ul class="stoa-people" id="stoa-people"></ul>
+            <h2 class="stoa-panel-title" id="stoa-talk-title">Talk</h2>
+            <ol class="stoa-messages" id="stoa-messages" role="log" aria-labelledby="stoa-talk-title"></ol>
+            <form class="stoa-say" id="stoa-say" hidden><label class="sr-only" for="stoa-say-text">Message</label><input id="stoa-say-text" name="text" maxlength="500" autocomplete="off" placeholder="Say something on the plaza"><button class="button button-small" type="submit">Say</button></form>
+            <p class="stoa-signin" id="stoa-signin" hidden><span>Sign in to walk and talk.</span> <button class="button button-secondary button-small" type="button" id="stoa-signin-button">Sign in</button></p>
           </aside>
         </div>
       </section>

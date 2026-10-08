@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises";
 import { parseMap } from "../world/map.js";
 import { openPlace } from "../stoa/place.js";
 import { createLease } from "../stoa/lease.js";
+import { outsideDoor } from "../stoa/stage.js";
+import { walkable } from "../world/map.js";
 
 const plaza = parseMap(JSON.parse(await readFile(new URL("../worlds/plaza/map.json", import.meta.url), "utf8")));
 const me = "a-72a639ba-3a45-4afe-936b-111111111111", ada = "a-72a639ba-3a45-4afe-936b-222222222222", bo = "m-72a639ba-3a45-4afe-936b-333333333333";
@@ -161,4 +163,13 @@ test("a heartbeat in flight when the lease stops reports nothing", async () => {
   pending[1].reject(Object.assign(new Error("Gone"), { status: 410 }));
   await first; await second;
   assert.deepEqual([accesses, losses], [[], []]);
+});
+
+test("each lot has a walkable plaza tile just outside its door", () => {
+  for (const lot of plaza.lots) {
+    const tile = outsideDoor(plaza, lot);
+    assert.ok(walkable(plaza, tile.x, tile.y), lot.slug);
+    assert.equal(Math.abs(tile.x - lot.door.x) + Math.abs(tile.y - lot.door.y), 1, lot.slug);
+    assert.ok(tile.y < 20, lot.slug + " is on the plaza, not inside");
+  }
 });

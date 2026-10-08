@@ -567,3 +567,17 @@ dialog h2 { font-size: 30px; line-height: 1.25; font-weight: 500; letter-spacing
 .stoa-room button { grid-row: 1 / span 2; grid-column: 2; }
 .stoa-people li { font-size: 14px; padding: 6px 0; }
 @media (max-width: 900px) { .stoa-layout { grid-template-columns: 1fr; } #stoa-canvas { height: 62vh; min-height: 340px; } }
+.stoa-here { padding-bottom: 16px; margin-bottom: 8px; border-bottom: 1px solid var(--line); }
+.stoa-here h2 { margin: 4px 0 6px; font-size: 22px; font-weight: 500; }
+.stoa-here-topic { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+.stoa-topic-form { display: grid; gap: 8px; margin-bottom: 12px; }
+.stoa-topic-form label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+.stoa-topic-form input, .stoa-say input { font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--ink); }
+.stoa-offer { padding: 12px; margin-bottom: 8px; border: 1px solid var(--accent); border-radius: 4px; }
+.stoa-offer-list { margin: 0 0 10px; padding-left: 18px; }
+.stoa-messages { list-style: none; margin: 0 0 10px; padding: 0; max-height: 220px; overflow-y: auto; font-size: 13px; }
+.stoa-messages li { padding: 4px 0; overflow-wrap: anywhere; }
+.stoa-messages strong { font-weight: 600; margin-right: 4px; }
+.stoa-messages .is-self strong { color: var(--accent); }
+.stoa-say { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.stoa-signin { font-size: 13px; color: var(--muted); }
