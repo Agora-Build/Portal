@@ -90,7 +90,9 @@ if (engine) {
   const stage = createStage({ api, map, engine, panel, live, self, plaza: spaceId ? null : { bounds: plazaBounds, channel: plazaChannel } });
   panel.on({
     go: (target) => {
-      if (engine.walkTo(target.door)) panel.say("Walking to " + target.title + ".");
+      const notice = stage.watchNotice(target);
+      if (notice) panel.say(notice);
+      else if (engine.walkTo(target.door)) panel.say("Walking to " + target.title + ".");
       else { const at = engine.position(); panel.say(at.x === target.door.x && at.y === target.door.y ? "You're already at the door of " + target.title + "." : target.title + " can't be reached right now."); }
       canvas.focus();
     },
@@ -104,7 +106,7 @@ if (engine) {
   addEventListener("pagehide", () => stage.unload());
   if (spaceId) await stage.openSpace(spaceId, invite);
   else {
-    await stage.toPlaza(null);
+    await stage.toPlaza(null, minimal ? "Minimal view is on." : preview ? "Previewing the " + preview.name + " theme. Only you see it." : undefined);
     if (lot) panel.say("You're at the door of " + lot.title + ". Step in when you're ready.");
     setInterval(async () => {
       try { const listing = await stage.poll(); summaries = new Map(listing.rooms.map((room) => [room.slug, room])); panel.setRooms(map.lots, summaries); engine.setLabels(labels()); }
@@ -112,5 +114,5 @@ if (engine) {
     }, 10000);
   }
 }
-if (problems.length) panel.say(problems.join(" "));
+if (problems.length) panel.say((engine && !self.signedIn && !spaceId ? ["You're watching the plaza. Sign in to walk and talk."] : []).concat(problems).join(" "));
 else if (!engine) panel.say("The Stoa view is not available.");

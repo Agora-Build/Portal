@@ -3,8 +3,8 @@ import { createLimiter, writeMessage, writeState } from "../world/protocol.js";
 
 // One channel's live layer: who is there, what they say, and your own movement published within the budget.
 // The caller merges people from every open place, so a space can later span several area-of-interest cells.
-export async function openPlace({ live, map, engine, self, channel, onPeople = () => {}, onSay = () => {}, onRefresh = () => {}, now = () => Date.now(), later }) {
-  const guest = live.guest;
+export async function openPlace({ live, map, engine, self, channel, onPeople = () => {}, onSay = () => {}, onRefresh = () => {}, quiet = false, now = () => Date.now(), later }) {
+  const guest = live.guest || quiet;
   const presence = createPresence({ map, self: live.userId, now });
   const moves = createLimiter({ perSecond: 4, burst: 4, now, later }), chats = createLimiter({ perSecond: 1, burst: 3, now, later });
   let open = true;
