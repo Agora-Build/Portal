@@ -21,8 +21,9 @@ import { handleSpaces } from "./spaces/routes.mjs";
 import { loadThemes } from "./spaces/themes.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const sdkFile = createRequire(import.meta.url).resolve("agora-rtc-sdk-ng");
-const publicFiles = new Set(["index.html", "explore.html", "services.html", "radar.html", "meetings.html", "account.html", "account.js", "stoa.html", "stoa.js", "world/map.js", "world/kinds.js", "world/themes.js", "world/camera.js", "world/motion.js", "world/renderer-canvas.js", "world/engine.js", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "services.js", "radar.js", "meetings.js", "call.js", "assets/agora-rtc.js", "assets/favicon.svg", "assets/guohai.jpg"]);
+// Vendored browser SDKs are served from node_modules in development and from dist/assets after a build.
+const vendor = { "assets/agora-rtc.js": createRequire(import.meta.url).resolve("agora-rtc-sdk-ng"), "assets/agora-rtm.js": createRequire(import.meta.url).resolve("agora-rtm-sdk") };
+const publicFiles = new Set(["index.html", "explore.html", "services.html", "radar.html", "meetings.html", "account.html", "account.js", "stoa.html", "stoa.js", "world/map.js", "world/kinds.js", "world/themes.js", "world/camera.js", "world/motion.js", "world/renderer-canvas.js", "world/engine.js", "world/sdk.js", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "services.js", "radar.js", "meetings.js", "call.js", "assets/agora-rtc.js", "assets/agora-rtm.js", "assets/favicon.svg", "assets/guohai.jpg"]);
 const types = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".jpg": "image/jpeg" };
 
 function json(response, status, body, headers = {}) {
@@ -346,7 +347,7 @@ export function createAppServer(directory = root, options = {}) {
       const filename = stoa ? "stoa.html" : meeting ? "meetings.html" : path === "/" ? "index.html" : path.slice(1);
       if (!publicFiles.has(filename)) { response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found"); return; }
       const file = resolve(directory, filename);
-      const content = await readFile(filename === "assets/agora-rtc.js" && !existsSync(file) ? sdkFile : file);
+      const content = await readFile(Object.hasOwn(vendor, filename) && !existsSync(file) ? vendor[filename] : file);
       response.writeHead(200, { "Content-Type": types[extname(filename)], "X-Content-Type-Options": "nosniff" });
       response.end(request.method === "HEAD" ? undefined : content);
     } catch (error) {

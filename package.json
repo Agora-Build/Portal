@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "agora-rtc-sdk-ng": "4.24.8",
+    "agora-rtm-sdk": "2.3.0",
     "agora-token": "2.0.6",
     "jose": "6.2.12",
     "openid-client": "6.8.8",

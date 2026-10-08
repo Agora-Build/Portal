@@ -161,3 +161,21 @@ test("the plaza page loads its engine modules and every linked file", async () =
     }
   } finally { await close(instance); }
 });
+
+test("the Signaling SDK and its loader are served, and every page links to the Stoa", async () => {
+  const { instance, url } = await start();
+  try {
+    const sdk = await request(url, "/assets/agora-rtm.js");
+    assert.equal(sdk.status, 200);
+    assert.match(sdk.headers.get("content-type"), /text\/javascript/);
+    assert.match(await sdk.text(), /AgoraRTM/);
+    const loader = await request(url, "/world/sdk.js");
+    assert.equal(loader.status, 200);
+    for (const page of ["/", "/explore.html", "/services.html", "/radar.html", "/meetings.html", "/account.html", "/stoa/"]) {
+      const html = await (await request(url, page)).text();
+      assert.match(html, /<a href="\/stoa\/"[^>]*>Stoa<\/a>/, page);
+      assert.doesNotMatch(html, />Rooms<\/a>/, page);
+    }
+    assert.match(await (await request(url, "/stoa/")).text(), /<a href="\/stoa\/" class="is-active" aria-current="page">Stoa<\/a>/);
+  } finally { await close(instance); }
+});
