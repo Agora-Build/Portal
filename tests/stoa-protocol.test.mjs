@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { parseMap } from "../world/map.js";
 import { MESSAGE_LIMIT, SKEW_LIMIT, STRAIGHT_LIMIT, TEXT_LIMIT, actorFromUser, createLimiter, readMessage, readState, shared, stopAt, straightPath, trusted, writeMessage, writeState } from "../world/protocol.js";
+import { importKey, open, seal } from "../world/crypto.js";
 
 const plaza = parseMap(JSON.parse(await readFile(new URL("../worlds/plaza/map.json", import.meta.url), "utf8")));
 const uuid = "72a639ba-3a45-4afe-936b-111111111111";
@@ -79,4 +81,17 @@ test("the limiter allows a burst, drops extra chat, and keeps only the latest pe
   assert.equal(timers[0].delay, 250);
   time = 250; timers[0].callback();
   assert.deepEqual(sent, ["a", "b", "new"]);
+});
+
+test("sealed payloads open only with the same space key", async () => {
+  const keyText = randomBytes(32).toString("base64"), otherText = randomBytes(32).toString("base64");
+  const key = await importKey(keyText), other = await importKey(otherText);
+  const first = await seal(key, "hello plaza"), second = await seal(key, "hello plaza");
+  assert.match(first, /^e1\.[A-Za-z0-9+/=]+$/);
+  assert.notEqual(first, second, "every seal uses a fresh iv");
+  assert.equal(await open(key, first), "hello plaza");
+  assert.equal(await open(other, first), null);
+  assert.equal(await open(key, first.slice(0, -4) + "AAAA"), null);
+  for (const bad of ["hello plaza", "e1.", "e1.!!!", null, 42]) assert.equal(await open(key, bad), null, String(bad));
+  assert.equal(await open(key, await seal(key, "名字 ✓")), "名字 ✓");
 });
