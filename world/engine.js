@@ -35,11 +35,14 @@ export function createEngine({ canvas, map, theme, start, reducedMotion = false,
     camera = follow({ x: (shown.x + 0.5) * s, y: (shown.y + 0.5) * s }, viewport, { x: area.x * s, y: area.y * s, width: area.width * s, height: area.height * s }, zoomFor(viewport, s));
     // Only people within a screen of the camera centre in each direction are drawn; everyone else is kept for when they come near.
     const reach = { x: viewport.width / camera.zoom / s, y: viewport.height / camera.zoom / s }, middle = { x: (camera.x + viewport.width / camera.zoom / 2) / s, y: (camera.y + viewport.height / camera.zoom / 2) / s };
-    const crowd = others.map((other) => ({ id: other.id, name: other.name, bubble: speech(other.bubble, time), ...positionAt(other.walk, time) })).filter((other) => Math.abs(other.x + 0.5 - middle.x) <= reach.x && Math.abs(other.y + 0.5 - middle.y) <= reach.y);
+    const everyone = others.map((other) => ({ id: other.id, name: other.name, bubble: speech(other.bubble, time), ...positionAt(other.walk, time) }));
+    const crowd = everyone.filter((other) => Math.abs(other.x + 0.5 - middle.x) <= reach.x && Math.abs(other.y + 0.5 - middle.y) <= reach.y);
     renderer.draw({ camera, time, avatars: [{ id: self.id, name: self.name, self: true, bubble: speech(self.bubble, time), ...shown }, ...crowd], decor, labels, bounds, motion: !reducedMotion });
     const talking = [self.bubble, ...others.map((other) => other.bubble)].filter((bubble) => bubble && bubble.until > time);
+    // People walking off-screen are not drawn, but a slow check keeps running so they appear as soon as they come into view.
+    const distant = everyone.some((other) => !other.done);
     if (!shown.done || crowd.some((other) => !other.done)) schedule();
-    else if (timer === null && (ambient() || talking.length)) timer = later(() => { timer = null; schedule(); }, ambient() ? 66 : Math.max(50, Math.min(...talking.map((bubble) => bubble.until - time)) + 10));
+    else if (timer === null && (ambient() || distant || talking.length)) timer = later(() => { timer = null; schedule(); }, ambient() ? 66 : distant ? 100 : Math.max(50, Math.min(...talking.map((bubble) => bubble.until - time)) + 10));
   }
 
   function walkTo(target) {

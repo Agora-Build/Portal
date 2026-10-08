@@ -261,3 +261,16 @@ test("only people within about two screens of the camera are drawn, but everyone
   advance(10000); engine.setOthers(others); flush();
   assert.equal(drawn.at(-1).avatars.length, 3, "the far person is drawn again once the camera is near");
 });
+test("someone walking in from off-screen is drawn as they arrive, even with nothing else animating", () => {
+  const { engine, drawn, frames, timers, advance } = setup({ reducedMotion: true, theme: minimal, size: [200, 200] });
+  const path = [];
+  for (let x = 1; x <= 12; x += 1) path.push({ x, y: 9 });
+  engine.setOthers([{ id: "far", name: "Far", walk: { path, startedAt: 1000 } }]);
+  const run = () => { for (const callback of [...frames.splice(0), ...timers.splice(0)]) callback(); };
+  run();
+  assert.equal(drawn.at(-1).avatars.some((avatar) => avatar.id === "far"), false, "far away people are not drawn");
+  for (let step = 0; step < 20; step += 1) { advance(100); run(); }
+  const far = drawn.at(-1).avatars.find((avatar) => avatar.id === "far");
+  assert.ok(far, "the walker is drawn once they come into view");
+  assert.equal(far.x, 11, "and at their real position while still walking");
+});
