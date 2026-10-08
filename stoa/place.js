@@ -26,7 +26,8 @@ export async function openPlace({ live, map, engine, self, channel, onPeople = (
       show();
     }
   });
-  presence.snapshot(await live.who(channel.name));
+  try { presence.snapshot(await live.who(channel.name)); }
+  catch (error) { open = false; await live.leave(channel.name).catch(() => {}); throw error; }
   show();
   const publish = (message) => { if (open) live.publish(channel.name, writeMessage(message)).catch(() => {}); };
   const rest = () => { const at = engine.position(); live.setState(channel.name, writeState({ x: at.x, y: at.y, dir: engine.facing(), name: self.name })).catch(() => {}); };
@@ -35,7 +36,7 @@ export async function openPlace({ live, map, engine, self, channel, onPeople = (
     engine.on("walk", (walk) => moves.send(() => publish({ t: "walk", from: walk.from, dir: walk.dir, startedAt: walk.startedAt }), { latest: true })),
     engine.on("stop", (stop) => moves.send(() => publish({ t: "stop", at: stop.at }), { latest: true })),
     engine.on("face", (face) => moves.send(() => publish({ t: "face", dir: face.dir }), { latest: true })),
-    engine.on("arrive", rest)
+    engine.on("arrive", (at) => { moves.send(() => publish({ t: "stop", at: { x: at.x, y: at.y } }), { latest: true }); rest(); })
   ];
   if (!guest) rest();
   return {

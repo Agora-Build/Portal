@@ -58,7 +58,7 @@ test("movement is published within the rate limit, keeping the latest pending me
   engine.emit("face", { dir: "left" });
   engine.emit("arrive", { x: 21, y: 15 });
   await tick();
-  assert.deepEqual(live.published.slice(-3), [{ t: "walk", from: { x: 21, y: 17 }, dir: "up", startedAt: 10000 }, { t: "stop", at: { x: 21, y: 15 } }, { t: "face", dir: "left" }]);
+  assert.deepEqual(live.published.slice(-4), [{ t: "walk", from: { x: 21, y: 17 }, dir: "up", startedAt: 10000 }, { t: "stop", at: { x: 21, y: 15 } }, { t: "face", dir: "left" }, { t: "stop", at: { x: 21, y: 15 } }]);
   assert.equal(live.states.length, 2, "arriving shares the new resting place");
 });
 test("messages and presence from others reach the people list and the message log", async () => {
@@ -130,4 +130,35 @@ test("the lease heartbeats, reports access, survives passing errors, and ends cl
   assert.deepEqual(calls.at(-1), ["/api/spaces/lot-rtc-lab/leave", "POST"]);
   lease.leaveOnUnload();
   assert.deepEqual(beacons, ["/api/spaces/lot-rtc-lab/leave"]);
+});
+test("arriving always settles peers on your real tile, even when the budget is spent", async () => {
+  const timers = []; let time = 5000;
+  const { live, engine } = await opened({ now: () => time, later: (callback) => { timers.push(callback); return timers.length; } });
+  const route = { path: [{ x: 21, y: 17 }, { x: 21, y: 16 }], startedAt: 1 };
+  for (let index = 0; index < 4; index += 1) engine.emit("move", route);
+  engine.emit("walk", { from: { x: 21, y: 17 }, dir: "up", startedAt: 2 });
+  engine.emit("stop", { at: { x: 21, y: 16 } });
+  engine.emit("face", { dir: "left" });
+  engine.emit("arrive", { x: 21, y: 15 });
+  await tick();
+  assert.equal(live.published.length, 4);
+  time = 5250; timers[0](); await tick();
+  assert.deepEqual(live.published.at(-1), { t: "stop", at: { x: 21, y: 15 } });
+});
+test("a failed snapshot leaves the channel and rejects", async () => {
+  const live = fakeLive(); live.who = async () => { throw new Error("down"); };
+  await assert.rejects(openPlace({ live, map: plaza, engine: fakeEngine(), self: { name: "Me" }, channel: { name: "ab-stoa-plaza", key: null, spaceId: "plaza" } }), /down/);
+  assert.deepEqual(live.left, ["ab-stoa-plaza"]);
+});
+test("a heartbeat in flight when the lease stops reports nothing", async () => {
+  const accesses = [], losses = [], pending = [];
+  let beat;
+  const api = () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
+  const lease = createLease({ api, spaceId: "s", onAccess: (a) => accesses.push(a), onLost: (e) => losses.push(e), repeat: (callback) => { beat = callback; return 1; }, stopRepeat: () => {}, beacon: () => {} });
+  const first = beat(), second = beat();
+  lease.stop();
+  pending[0].resolve({ channel: "c" });
+  pending[1].reject(Object.assign(new Error("Gone"), { status: 410 }));
+  await first; await second;
+  assert.deepEqual([accesses, losses], [[], []]);
 });
