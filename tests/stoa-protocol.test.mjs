@@ -95,3 +95,58 @@ test("sealed payloads open only with the same space key", async () => {
   for (const bad of ["hello plaza", "e1.", "e1.!!!", null, 42]) assert.equal(await open(key, bad), null, String(bad));
   assert.equal(await open(key, await seal(key, "名字 ✓")), "名字 ✓");
 });
+
+import { BUBBLE_MS, createPresence } from "../world/presence.js";
+
+const ada = "a-72a639ba-3a45-4afe-936b-222222222222", bo = "m-72a639ba-3a45-4afe-936b-333333333333", self = "a-72a639ba-3a45-4afe-936b-111111111111";
+const at = (x, y, extra = {}) => ({ x: String(x), y: String(y), dir: "down", name: "Ada", ...extra });
+const people = (time = 0) => { const clock = { time }; return { clock, room: createPresence({ map: plaza, self, now: () => clock.time }) }; };
+
+test("presence lists signed-in people with valid states only", () => {
+  const { room } = people(1000);
+  room.snapshot([{ userId: ada, states: at(21, 17) }, { userId: bo, states: at(22, 17, { name: "Bo" }) }, { userId: self, states: at(20, 17) }, { userId: "g-0123456789abcdef", states: at(19, 17) }, { userId: "a-bad", states: at(18, 17) }, { userId: "a-72a639ba-3a45-4afe-936b-444444444444", states: { x: "0", y: "0" } }]);
+  assert.equal(BUBBLE_MS, 8000);
+  assert.deepEqual(room.list(), [
+    { id: "account:72a639ba-3a45-4afe-936b-222222222222", name: "Ada", walk: { path: [{ x: 21, y: 17 }], startedAt: 1000, dir: "down" }, bubble: null },
+    { id: "member:72a639ba-3a45-4afe-936b-333333333333", name: "Bo", walk: { path: [{ x: 22, y: 17 }], startedAt: 1000, dir: "down" }, bubble: null }
+  ]);
+  room.leave(bo);
+  assert.equal(room.list().length, 1);
+});
+test("moves, keyboard walks, stops, turns, and speech follow trusted messages", () => {
+  const { clock, room } = people(1000);
+  room.snapshot([{ userId: ada, states: at(21, 17) }]);
+  assert.equal(room.message(bo, writeMessage({ t: "say", text: "hi" })), null, "people without presence are ignored");
+  assert.equal(room.message(ada, "nonsense"), null);
+  const moved = room.message(ada, writeMessage({ t: "move", path: [{ x: 21, y: 17 }, { x: 21, y: 16 }], startedAt: 1500 }));
+  assert.deepEqual(moved.from, { id: "account:72a639ba-3a45-4afe-936b-222222222222", name: "Ada" });
+  assert.deepEqual(room.list()[0].walk, { path: [{ x: 21, y: 17 }, { x: 21, y: 16 }], startedAt: 1500 });
+  clock.time = 5000;
+  room.message(ada, writeMessage({ t: "walk", from: { x: 21, y: 16 }, dir: "up", startedAt: 5000 }));
+  assert.deepEqual(room.list()[0].walk.path.map((tile) => tile.y), [16, 15, 14, 13, 12]);
+  room.message(ada, writeMessage({ t: "stop", at: { x: 21, y: 14 } }));
+  assert.deepEqual(room.list()[0].walk.path.map((tile) => tile.y), [16, 15, 14]);
+  clock.time = 9000;
+  room.message(ada, writeMessage({ t: "stop", at: { x: 6, y: 8 } }));
+  assert.deepEqual(room.list()[0].walk.path, [{ x: 6, y: 8 }]);
+  room.message(ada, writeMessage({ t: "face", dir: "left" }));
+  assert.deepEqual(room.list()[0].walk, { path: [{ x: 6, y: 8 }], startedAt: 9000, dir: "left" });
+  room.message(ada, writeMessage({ t: "say", text: "Hello!" }));
+  assert.deepEqual(room.list()[0].bubble, { text: "Hello!", until: 9000 + BUBBLE_MS });
+  room.message(ada, writeMessage({ t: "move", path: [{ x: 6, y: 8 }, { x: 7, y: 8 }], startedAt: 1 }));
+  assert.equal(room.list()[0].walk.startedAt, 9000, "a far-off clock falls back to the local one");
+});
+test("state updates rest people, never interrupt a walk, and blocked people disappear", () => {
+  const { clock, room } = people(1000);
+  room.snapshot([{ userId: ada, states: at(21, 17) }]);
+  room.state(ada, at(22, 17));
+  assert.deepEqual(room.list()[0].walk.path, [{ x: 22, y: 17 }]);
+  room.message(ada, writeMessage({ t: "move", path: [{ x: 22, y: 17 }, { x: 22, y: 16 }], startedAt: 1000 }));
+  room.state(ada, at(22, 16, { name: "Ada L." }));
+  assert.deepEqual([room.list()[0].walk.path.length, room.list()[0].name], [2, "Ada L."]);
+  clock.time = 2000;
+  room.setBlocked(["account:72a639ba-3a45-4afe-936b-222222222222"]);
+  assert.deepEqual(room.list(), []);
+  room.state(ada, at(21, 17));
+  assert.deepEqual(room.list(), [], "blocked people stay hidden");
+});
