@@ -110,7 +110,7 @@ export function createRtcClient({ AgoraRTC, fetchCredentials, onChange = () => {
       if (closed) return;
       joined = true;
       for (const [kind, wanted] of [["audio", withAudio], ["video", withVideo]]) {
-        if (wanted && !closed) { try { await enable(kind); } catch (error) { onError(mediaError(error)); } }
+        if (wanted && !closed) { try { await enable(kind); } catch (error) { if (!closed) onError(mediaError(error)); } }
       }
     }),
     toggle: (kind) => operate(async () => {
@@ -129,7 +129,9 @@ export function createRtcClient({ AgoraRTC, fetchCredentials, onChange = () => {
       if (closed) { for (const track of tracks) track.close(); return false; }
       const second = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
       screen = { client: second, tracks };
-      second.on("connection-state-change", (next, previous) => { if (next === "DISCONNECTED" && previous !== "DISCONNECTING" && !closed && screen?.client === second) stopScreen().then(changed); });
+      // Only a live share reacts to a disconnect; a failed join is reported by the catch below.
+      let live = false;
+      second.on("connection-state-change", (next, previous) => { if (live && next === "DISCONNECTED" && previous !== "DISCONNECTING" && !closed && screen?.client === second) stopScreen().then(changed); });
       tracks[0].on("track-ended", () => { if (!closed && screen?.client === second) stopScreen().then(changed); });
       try {
         await renew();
@@ -137,6 +139,7 @@ export function createRtcClient({ AgoraRTC, fetchCredentials, onChange = () => {
         watchToken(second);
         await second.join(credentials.appId, credentials.channel, credentials.screenToken, credentials.screenUid);
         if (closed || screen?.client !== second) return false;
+        live = true;
         await second.publish(tracks);
       } catch (error) {
         // Already stopped elsewhere (the browser ended it, or the call closed): nothing to report.

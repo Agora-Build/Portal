@@ -178,3 +178,12 @@ test("actions before joining resolve false", async () => {
   assert.equal(await rtc.toggle("audio"), false);
   assert.equal(await rtc.share(), false);
 });
+test("a screen client that disconnects while failing to join is reported once", async () => {
+  const sdk = fakeAgora(), create = sdk.createClient;
+  sdk.createClient = () => { const client = create(); if (sdk.clients.length === 2) client.join = async () => { client.emit("connection-state-change", "DISCONNECTED", "CONNECTING"); throw new Error("join failed"); }; return client; };
+  const { rtc, errors } = make({ sdk });
+  await rtc.join({});
+  assert.equal(await rtc.share(), false);
+  assert.equal(errors.length, 1);
+  assert.equal(rtc.snapshot().screen, false);
+});
