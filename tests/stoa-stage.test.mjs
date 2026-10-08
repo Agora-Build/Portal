@@ -11,7 +11,7 @@ const deferred = () => { const d = {}; d.promise = new Promise((resolve, reject)
 const space = (id, title = id) => ({ id, title, topic: null, tags: [], visibility: "public" });
 
 function setup({ api, signedIn = true } = {}) {
-  const calls = { interactive: null, published: [], states: [], canTalk: [], showRoom: [], offer: 0, joined: [], left: [] };
+  const calls = { teleports: [], bounds: [], interactive: null, published: [], states: [], canTalk: [], showRoom: [], offer: 0, joined: [], left: [] };
   const live = {
     userId: "a-me", guest: false, renew: async () => {},
     join: async (name) => { calls.joined.push(name); }, leave: async (name) => { calls.left.push(name); },
@@ -19,7 +19,7 @@ function setup({ api, signedIn = true } = {}) {
   };
   const handlers = {}, pos = { x: lot.door.x, y: lot.door.y };
   const engine = {
-    teleport() {}, setBounds() {}, setOthers() {}, position: () => pos, setInteractive: (value) => { calls.interactive = value; }, facing: () => "down", say() {}, walkTo: () => true,
+    teleport: (tile) => { calls.teleports.push(tile); }, setBounds: (bounds) => { calls.bounds.push(bounds); }, setOthers() {}, position: () => pos, setInteractive: (value) => { calls.interactive = value; }, facing: () => "down", say() {}, walkTo: () => true,
     on(name, handler) { handlers[name] = handler; return () => {}; }
   };
   const panel = {
@@ -147,4 +147,37 @@ test("a lost report from a replaced lease is ignored", async () => {
   assert.equal(leases.length, count);
   assert.equal(leases.filter((entry) => entry.active).length, 1);
   assert.equal(calls.showRoom.length, rooms);
+});
+
+test("arriving on a lot door enters it and arriving on its exit leaves", async () => {
+  const paths = [];
+  const api = async (path) => {
+    paths.push(path);
+    if (path === "/api/spaces/plaza/enter") return access("plaza", "plaza-1");
+    if (path.endsWith("/enter")) return access("lot-" + lot.slug, "lot-ch");
+    return {};
+  };
+  const { stage, calls, leases } = setup({ api });
+  await stage.toPlaza(null);
+  stage.onArrive(lot.door);
+  await tick(); await tick(); await tick();
+  assert.ok(paths.includes("/api/spaces/lot-" + lot.slug + "/enter"));
+  assert.deepEqual(calls.teleports.at(-1), lot.entry);
+  assert.deepEqual(calls.bounds.at(-1), lot.interior);
+  stage.onArrive({ x: lot.entry.x, y: lot.entry.y + 1 });
+  for (let i = 0; i < 6; i += 1) await tick();
+  assert.equal(leases.at(-1).options.spaceId, "plaza");
+  assert.ok(!leases.find((entry) => entry.options.spaceId === "lot-" + lot.slug).active);
+  assert.notDeepEqual(calls.bounds.at(-1), lot.interior);
+  assert.equal(leases.filter((entry) => entry.active).length, 1);
+});
+
+test("a guest arriving on a door is asked to sign in without calling the API", async () => {
+  const paths = [];
+  const { stage, panel } = setup({ signedIn: false, api: async (path) => { paths.push(path); return {}; } });
+  await stage.toPlaza(null);
+  stage.onArrive(lot.door);
+  await tick();
+  assert.equal(panel.said.at(-1), "Sign in to step into " + lot.title + ".");
+  assert.deepEqual(paths, []);
 });

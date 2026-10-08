@@ -136,6 +136,12 @@ export function createStage({ api, map, engine, panel, live, self, plaza, create
     else location.assign("/stoa/");
   }
 
+  const enterLot = (lot) => {
+    if (!self.signedIn) { panel.say("Sign in to step into " + lot.title + "."); return Promise.resolve(); }
+    return transition(() => enterLotTask(lot));
+  };
+  const leaveRoom = () => transition(leaveRoomTask);
+
   async function setTopic(topic, tagsText) {
     const at = here;
     if (!at || at.kind === "plaza") return;
@@ -151,9 +157,9 @@ export function createStage({ api, map, engine, panel, live, self, plaza, create
 
   return {
     toPlaza: (start, welcome) => transition(() => toPlazaTask(start, welcome)),
-    enterLot: (lot) => { if (!self.signedIn) { panel.say("Sign in to step into " + lot.title + "."); return Promise.resolve(); } return transition(() => enterLotTask(lot)); },
+    enterLot,
     openSpace: (id, invite) => transition(() => openSpaceTask(id, invite)),
-    leaveRoom: () => transition(leaveRoomTask),
+    leaveRoom,
     setTopic,
     say(text) {
       if (here?.kind === "left") { panel.say("You're no longer in this space."); return false; }
