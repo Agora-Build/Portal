@@ -104,13 +104,15 @@ export function createCallView({ doc = document, engine, api, self, people = () 
     if (rtc !== client) return;
     if (!client.snapshot().joined) { rtc = null; await client.leave(); reset("You're not in the call. Try joining again."); return; }
     status.textContent = "You're in the call.";
-    buttons.audio.focus();
+    // Focus follows the hidden Join button only if the person hasn't moved on during a slow join.
+    if (!doc.activeElement || doc.activeElement === doc.body || doc.activeElement === buttons.join) buttons.audio.focus();
   }
   async function leave(message, focus = false) {
     const client = rtc, id = spaceId;
     rtc = null; render();
     await client?.leave();
-    if (spaceId !== id) return;
+    // A rejoin or another room while this leave was pending owns the view now.
+    if (spaceId !== id || rtc) return;
     reset(message);
     if (focus) buttons.join.focus();
   }
