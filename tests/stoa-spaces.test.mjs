@@ -10,7 +10,7 @@ test("form values become a valid space request", () => {
 });
 test("spaces are described in plain words, and invite links are absolute", () => {
   assert.equal(describeSpace({ visibility: "private", access: "members", occupancy: 2 }), "Private · members only · 2 here");
-  assert.equal(describeSpace({ visibility: "unlisted", access: "open", occupancy: 0 }), "Unlisted · anyone with the link · 0 here");
+  assert.equal(describeSpace({ visibility: "unlisted", access: "open", occupancy: 0 }), "Unlisted · anyone signed in · 0 here");
   assert.equal(inviteUrl("https://agora.build", "/stoa/s/abc?invite=xyz"), "https://agora.build/stoa/s/abc?invite=xyz");
 });
 test("member ids keep their colon in the path, which the server matches literally", () => {

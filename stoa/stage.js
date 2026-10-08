@@ -237,6 +237,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     enterLot,
     openSpace: (id, invite) => transition(() => openSpaceTask(id, invite)),
     leaveRoom,
+    refresh: refreshRoom,
     setTopic,
     makeHost,
     removePerson,

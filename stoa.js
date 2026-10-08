@@ -33,13 +33,14 @@ const [spaceResult, worldResult, themesResult, spacesResult] = await Promise.all
 ]);
 failure(spaceResult, "This space"); failure(worldResult, "The map"); failure(themesResult, "Themes"); failure(spacesResult, "The room list");
 const space = spaceResult.value?.space || null;
-document.querySelector("#stoa-kicker").textContent = roomSlug ? "THE STOA / ROOM" : space ? (space.visibility === "private" ? "THE STOA / PRIVATE SPACE" : "THE STOA / UNLISTED SPACE") : "THE STOA / PUBLIC PLAZA";
+const kickerFor = (entry) => entry ? (entry.visibility === "private" ? "THE STOA / PRIVATE SPACE" : "THE STOA / UNLISTED SPACE") : "THE STOA / SPACE";
 if (space) { document.querySelector("#stoa-title").textContent = space.title; document.title = space.title + " | Agora Build"; }
 
 let map = null, engine = null, minimal = stored.get() === "true", preview = null, plazaBounds = null, active = () => null, call = null, decor = null, spacesUi = null;
 try { if (worldResult.status === "fulfilled") map = parseMap(worldResult.value); } catch (error) { problems.push("The map is not valid (" + error.message + ")."); }
 let summaries = new Map((spacesResult.value?.rooms || []).map((room) => [room.slug, room]));
 const lot = roomSlug && map ? map.lots.find((entry) => entry.slug === roomSlug) || null : null;
+document.querySelector("#stoa-kicker").textContent = spaceId ? kickerFor(space) : roomSlug ? (lot ? "THE STOA / ROOM" : "THE STOA") : "THE STOA / PUBLIC PLAZA";
 const labels = () => map.lots.map((entry) => ({ x: entry.door.x, y: entry.door.y - 1, text: summaries.get(entry.slug)?.topic || entry.title }));
 if (map && !spaceId) panel.setRooms(map.lots, summaries);
 
@@ -80,7 +81,12 @@ if (map && themesResult.status === "fulfilled" && (!spaceId || space)) {
 await sessionReady;
 const self = { id: state.account?.id || state.profile?.id || null, ids: [state.account?.id, state.profile?.id].filter(Boolean), name: state.profile?.name || state.account?.name || "You", signedIn: Boolean(state.account || state.profile) };
 panel.setSignedIn(self.signedIn);
-spacesUi = createSpacesUi({ api, say: (text) => panel.say(text) });
+spacesUi = createSpacesUi({ api, say: (text) => panel.say(text), onSaved: (saved, themeChanged) => {
+  document.querySelector("#stoa-title").textContent = saved.title; document.title = saved.title + " | Agora Build";
+  document.querySelector("#stoa-kicker").textContent = kickerFor(saved);
+  stage?.refresh();
+  if (themeChanged) panel.say("The new theme shows after you reload.");
+} });
 panel.setPeople([], self.name);
 panel.canTalk(self.signedIn);
 let live = null, stage = null;
@@ -113,6 +119,15 @@ panel.on({
   manage: () => spaceId && spacesUi.openManage(spaceId),
   signin: () => openSignIn()
 });
+// Your own spaces show on the plaza right away (with or without the canvas); ?start= (from the home page) opens the create dialog with that name.
+if (!spaceId && self.signedIn) { if (!engine) panel.showPlaza(); api("/api/spaces/mine").then((mine) => spacesUi.showMine(mine)).catch(() => {}); }
+const params = new URLSearchParams(location.search);
+if (!spaceId && params.has("start")) {
+  const title = params.get("start");
+  params.delete("start");
+  history.replaceState(null, "", location.pathname + (params.size ? "?" + params : "") + location.hash);
+  startSpace({ title });
+}
 // Signaling loads and connects in the background: the page is already usable, and the stage picks the connection up when it is ready.
 async function connectLive() {
   let candidate = null, timer = null, abandoned = false, connecting = null;
@@ -165,12 +180,3 @@ if (engine) {
 }
 if (problems.length) panel.say((engine && !self.signedIn && !spaceId ? ["You're watching the plaza. Sign in to walk and talk."] : []).concat(problems).join(" "));
 else if (!engine) panel.say("The Stoa view is not available.");
-// Your own spaces show on the plaza; ?start= (from the home page) opens the create dialog with that name.
-if (!spaceId && self.signedIn) api("/api/spaces/mine").then((mine) => spacesUi.showMine(mine)).catch(() => {});
-const params = new URLSearchParams(location.search);
-if (!spaceId && params.has("start")) {
-  const title = params.get("start");
-  params.delete("start");
-  history.replaceState(null, "", location.pathname + (params.size ? "?" + params : "") + location.hash);
-  startSpace({ title });
-}

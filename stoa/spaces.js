@@ -1,6 +1,6 @@
 // Your own spaces: the list on the plaza, the create dialog, and the owner's manage dialog (settings, invites, members).
 export const THEME_CHOICES = [["agora", "Agora"], ["minimal", "Minimal"], ["cyberpunk", "Cyberpunk"]];
-const ACCESS_WORDS = { open: "anyone with the link", house: "house members", members: "members only" };
+const ACCESS_WORDS = { open: "anyone signed in", house: "house members", members: "members only" };
 export function spacePayload(values) {
   const visibility = values.visibility === "private" ? "private" : "unlisted";
   const access = visibility === "private" ? "members" : Object.hasOwn(ACCESS_WORDS, values.access) ? values.access : "members";
@@ -11,7 +11,7 @@ export const describeSpace = (space) => [space.visibility === "private" ? "Priva
 export const memberPath = (id) => encodeURIComponent(id).replace(/%3A/gi, ":");
 export const inviteUrl = (origin, path) => new URL(path, origin).href;
 
-export function createSpacesUi({ doc = document, api, say = () => {}, navigate = (path) => location.assign(path), confirm = (text) => window.confirm(text), copy = (text) => navigator.clipboard.writeText(text), origin = location.origin }) {
+export function createSpacesUi({ onSaved = () => {}, doc = document, api, say = () => {}, navigate = (path) => location.assign(path), confirm = (text) => window.confirm(text), copy = (text) => navigator.clipboard.writeText(text), origin = location.origin }) {
   const $ = (selector) => doc.querySelector(selector);
   const node = (tag, text, className) => { const element = doc.createElement(tag); if (text) element.textContent = text; if (className) element.className = className; return element; };
   const createDialog = $("#space-dialog"), createForm = $("#space-form"), manageDialog = $("#manage-dialog"), manageForm = $("#manage-form");
@@ -48,36 +48,44 @@ export function createSpacesUi({ doc = document, api, say = () => {}, navigate =
     $("#manage-title").textContent = "Manage " + space.title;
     people(space.roster || [], "#manage-members", "Remove", async (person) => {
       if (!confirm("Remove " + person.name + " from the members of " + space.title + "?")) return;
+      $("#manage-error").textContent = "";
       try { await api("/api/spaces/" + encodeURIComponent(space.id) + "/members/" + memberPath(person.id), { method: "DELETE" }); await load(space.id); say(person.name + " is no longer a member."); }
       catch (error) { $("#manage-error").textContent = error.message; }
     }, space.ownerId);
     people(space.blockedRoster || [], "#manage-blocked", "Allow back", async (person) => {
+      $("#manage-error").textContent = "";
       try { await api("/api/spaces/" + encodeURIComponent(space.id) + "/members", { method: "POST", body: JSON.stringify({ memberId: person.id }) }); await load(space.id); say(person.name + " can come back."); }
       catch (error) { $("#manage-error").textContent = error.message; }
     });
   }
   manageForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const error = $("#manage-error");
-    error.textContent = "";
-    try { const { space } = await api("/api/spaces/" + encodeURIComponent(managing.id), { method: "PUT", body: JSON.stringify(values(manageForm)) }); managing = { ...managing, ...space }; say("Space settings saved."); }
+    const error = $("#manage-error"), button = manageForm.querySelector("[type=submit]");
+    error.textContent = ""; button.disabled = true;
+    try { const { space } = await api("/api/spaces/" + encodeURIComponent(managing.id), { method: "PUT", body: JSON.stringify(values(manageForm)) }); const themeChanged = space.themeId !== managing.themeId; managing = { ...managing, ...space }; say("Space settings saved."); onSaved(managing, themeChanged); }
     catch (failure) { error.textContent = failure.message; }
+    finally { button.disabled = false; }
   });
-  $("#manage-invite").addEventListener("click", async () => {
+  $("#manage-invite").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    $("#manage-error").textContent = ""; button.disabled = true;
     try {
       const invite = await api("/api/spaces/" + encodeURIComponent(managing.id) + "/invitations", { method: "POST", body: "{}" });
       const field = $("#manage-invite-url");
       field.value = inviteUrl(origin, invite.path);
       field.hidden = false; $("#manage-copy").hidden = false;
-      $("#manage-invite-note").textContent = "Works " + invite.usesLeft + " times until " + new Date(invite.expiresAt).toLocaleString() + ". Anyone with it can join as a member.";
+      $("#manage-invite-note").textContent = (invite.usesLeft === 1 ? "Works once" : "Works " + invite.usesLeft + " times") + " until " + new Date(invite.expiresAt).toLocaleString() + ". Anyone with it can join as a member.";
     } catch (error) { $("#manage-error").textContent = error.message; }
+    finally { button.disabled = false; }
   });
   $("#manage-copy").addEventListener("click", async () => {
+    $("#manage-error").textContent = "";
     try { await copy($("#manage-invite-url").value); say("Invite link copied."); }
     catch { $("#manage-invite-url").select?.(); say("Copy the selected link."); }
   });
   $("#manage-delete").addEventListener("click", async () => {
     if (!managing || !confirm("Delete " + managing.title + " for everyone? This can't be undone.")) return;
+    $("#manage-error").textContent = "";
     try { await api("/api/spaces/" + encodeURIComponent(managing.id), { method: "DELETE" }); navigate("/stoa/"); }
     catch (error) { $("#manage-error").textContent = error.message; }
   });
