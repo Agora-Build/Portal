@@ -565,6 +565,9 @@ dialog h2 { font-size: 30px; line-height: 1.25; font-weight: 500; letter-spacing
 .stoa-room strong { font-weight: 500; }
 .stoa-room span { grid-column: 1; font-size: 12px; color: var(--muted); }
 .stoa-room button { grid-row: 1 / span 2; grid-column: 2; }
+.stoa-person { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.stoa-person > span:first-child { margin-right: auto; }
+.stoa-host-badge { font: 10px var(--mono); letter-spacing: 1px; text-transform: uppercase; color: var(--accent); border: 1px solid currentColor; border-radius: 3px; padding: 1px 5px; }
 .stoa-people li { font-size: 14px; padding: 6px 0; }
 @media (max-width: 900px) { .stoa-layout { grid-template-columns: 1fr; } #stoa-canvas { height: 62vh; min-height: 340px; } }
 .stoa-here { padding-bottom: 16px; margin-bottom: 8px; border-bottom: 1px solid var(--line); }

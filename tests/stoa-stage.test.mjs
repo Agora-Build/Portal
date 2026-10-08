@@ -418,3 +418,46 @@ test("onManage reports when hosting is gained or lost, and the region protects d
   await stage.leaveRoom();
   assert.equal(stage.decorRegion(), null);
 });
+
+test("the host can hand over hosting; the room stops offering host tools", async () => {
+  const posts = [], managed = [];
+  const api = async (path, options) => {
+    if (path === "/api/spaces/plaza/enter") return access("plaza", "plaza-1");
+    if (path.endsWith("/enter")) return access("lot-" + lot.slug, "lot-ch");
+    if (path.endsWith("/host")) { posts.push(JSON.parse(options.body)); return { hostId: "account:72a639ba-3a45-4afe-936b-222222222222" }; }
+    return {};
+  };
+  const { stage, calls } = setup({ api, onManage: (can) => managed.push(can) });
+  await stage.toPlaza(null);
+  await stage.enterLot(lot);
+  assert.equal(stage.canManage(), true);
+  await stage.makeHost({ id: "account:72a639ba-3a45-4afe-936b-222222222222", name: "Ada" });
+  assert.deepEqual(posts, [{ actorId: "account:72a639ba-3a45-4afe-936b-222222222222" }]);
+  assert.equal(calls.showRoom.at(-1).host, false);
+  assert.equal(calls.showRoom.at(-1).decorate, false);
+  assert.equal(stage.canManage(), false);
+  assert.equal(managed.at(-1), false, "the decor editor is told to close");
+  assert.ok(calls.published.includes(JSON.stringify({ t: "refresh" })), "the room is told to refresh");
+});
+test("removing someone tells the room to check access, then reopens on the new channel", async () => {
+  const api = async (path) => {
+    if (path === "/api/spaces/plaza/enter") return access("plaza", "plaza-1");
+    if (path.endsWith("/enter")) return access("space-1", "space-ch");
+    if (path.endsWith("/remove")) return { removed: true, channel: "space-ch-2", key: null, blocked: ["account:bad"], hostId: "a-me" };
+    return {};
+  };
+  const { stage, calls } = setup({ api });
+  await stage.openSpace("space-1");
+  await stage.removePerson({ id: "account:bad", name: "Bad" });
+  assert.ok(calls.published.includes(JSON.stringify({ t: "rekey" })));
+  assert.deepEqual(calls.joined.slice(-1), ["space-ch-2"]);
+  assert.ok(calls.left.includes("space-ch"));
+});
+test("a rekey from the host makes the lease check in now; from anyone else it is ignored", async () => {
+  const { calls, leases } = await inLot();
+  const handlers = calls.handlers["lot-ch"], lease = leases.at(-1);
+  handlers.message(guestUser, JSON.stringify({ t: "rekey" }));
+  assert.equal(lease.beats || 0, 0);
+  handlers.message(hostUser, JSON.stringify({ t: "rekey" }));
+  assert.equal(lease.beats, 1);
+});

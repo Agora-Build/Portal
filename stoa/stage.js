@@ -27,7 +27,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
       const list = [...seen.values()];
       everyone = list;
       engine.setOthers(list);
-      panel.setPeople(list, self.name);
+      panel.setPeople(list, self.name, { manage: canManage(), hostId: here?.kind === "lot" || here?.kind === "space" ? here.access?.hostId || null : null, selfId: self.id });
       onPeople(list);
     });
   };
@@ -36,7 +36,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
   const checkManage = () => { const can = canManage(); if (can !== manageNow) { manageNow = can; onManage(can); } };
   const doorTiles = (rect) => { const tiles = []; for (let y = rect.y; y < rect.y + rect.height; y += 1) for (let x = rect.x; x < rect.x + rect.width; x += 1) if (roleAt(map, x, y) === "door") tiles.push({ x, y }); return tiles; };
   const showDecor = (items) => { currentDecor = items || []; if (!editing) engine.setDecor(currentDecor); };
-  const showRoom = (space, hostId) => { panel.showRoom({ kicker: here?.kind === "lot" ? "LOT ROOM" : space.visibility === "private" ? "PRIVATE SPACE" : "UNLISTED SPACE", title: space.title, topic: space.topic, tags: space.tags || [], host: Boolean(self.id) && (mine(hostId) || mine(space.ownerId)), leaveLabel: here?.kind === "lot" ? "Back to the plaza" : "Leave this space", decorate: canManage() }); checkManage(); };
+  const showRoom = (space, hostId) => { panel.showRoom({ kicker: here?.kind === "lot" ? "LOT ROOM" : space.visibility === "private" ? "PRIVATE SPACE" : "UNLISTED SPACE", title: space.title, topic: space.topic, tags: space.tags || [], host: Boolean(self.id) && (mine(hostId) || mine(space.ownerId)), leaveLabel: here?.kind === "lot" ? "Back to the plaza" : "Leave this space", decorate: canManage() }); checkManage(); showPeople(); };
 
   // Every transition claims `here` before it awaits anything; a superseded one stops as soon as it notices.
   async function settle(next) {
@@ -54,7 +54,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     showPeople();
     if (live && next.access?.channel) {
       try {
-        const place = await openPlace({ live, map, engine, self, quiet: Boolean(next.watch), channel: { name: next.access.channel, key: next.access.key || null, spaceId: next.space.id }, onPeople: showPeople, onSay: (entry) => { if (entry.failed) panel.say("That message didn't send."); else panel.addMessage(entry); }, onRefresh: (from) => { if (here === next && from && from === next.access?.hostId) refreshRoom(); }, onDecor: (from) => { if (here === next && from && (from === next.access?.hostId || from === next.space?.ownerId)) refreshRoom(); } });
+        const place = await openPlace({ live, map, engine, self, quiet: Boolean(next.watch), channel: { name: next.access.channel, key: next.access.key || null, spaceId: next.space.id }, onPeople: showPeople, onSay: (entry) => { if (entry.failed) panel.say("That message didn't send."); else panel.addMessage(entry); }, onRefresh: (from) => { if (here === next && from && from === next.access?.hostId) refreshRoom(); }, onRekey: (from) => { if (here === next && from && (from === next.access?.hostId || from === next.space?.ownerId)) lease?.beatNow(); }, onDecor: (from) => { if (here === next && from && (from === next.access?.hostId || from === next.space?.ownerId)) refreshRoom(); } });
         if (here !== next) { await place.close().catch(() => {}); return; }
         places = [place];
         place.setBlocked(next.access.blocked || []);
@@ -204,12 +204,40 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     } catch (error) { if (here === at) panel.say(error.message); }
   }
 
+  async function makeHost(person) {
+    const at = here;
+    if (!canManage()) return;
+    try {
+      const { hostId } = await api("/api/spaces/" + encodeURIComponent(at.space.id) + "/host", { method: "POST", body: JSON.stringify({ actorId: person.id }) });
+      if (here !== at) return;
+      at.access = { ...at.access, hostId };
+      showRoom(at.space, hostId);
+      for (const place of places) place.refresh();
+      panel.say(person.name + " is the host now.");
+    } catch (error) { if (here === at) panel.say(error.message); }
+  }
+  // Removal blocks the person and, in private and unlisted spaces, moves everyone else to a new channel.
+  async function removePerson(person) {
+    const at = here;
+    if (!canManage()) return;
+    try {
+      const access = await api("/api/spaces/" + encodeURIComponent(at.space.id) + "/remove", { method: "POST", body: JSON.stringify({ actorId: person.id }) });
+      if (here !== at) return;
+      await Promise.all(places.map((place) => place.rekey()));
+      panel.say(person.name + " was removed from this room.");
+      onAccess(access, at);
+      await chain;
+    } catch (error) { if (here === at) panel.say(error.message); }
+  }
+
   return {
     toPlaza: (start, welcome) => transition(() => toPlazaTask(start, welcome)),
     enterLot,
     openSpace: (id, invite) => transition(() => openSpaceTask(id, invite)),
     leaveRoom,
     setTopic,
+    makeHost,
+    removePerson,
     people: () => everyone,
     canManage,
     decor: () => currentDecor,

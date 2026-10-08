@@ -1,5 +1,5 @@
-// People are rebuilt only when who is here (or a name) changes, so a busy plaza doesn't churn the page.
-export const peopleKey = (list, selfName) => selfName + "\n" + list.map((person) => person.id + "\u0000" + person.name).sort().join("\n");
+// People are rebuilt only when who is here, a name, the host, or your host tools change, so a busy plaza doesn't churn the page.
+export const peopleKey = (list, selfName, { manage = false, hostId = null } = {}) => [selfName, manage ? "manage" : "", hostId || ""].join("\u0001") + "\n" + list.map((person) => person.id + "\u0000" + person.name).sort().join("\n");
 
 // The Stoa side panel: everything the canvas offers, as plain controls for keyboard and screen reader users.
 export function createPanel(doc = document) {
@@ -10,7 +10,7 @@ export function createPanel(doc = document) {
   const roomRows = new Map();
   let canDecorate = false, decorating = false;
   const syncDecor = () => { $("#stoa-decor-open").hidden = !canDecorate || decorating; };
-  const handlers = { go() {}, say() { return false; }, topic() {}, leave() {}, start() {}, signin() {}, decorate() {} };
+  const handlers = { go() {}, say() { return false; }, topic() {}, leave() {}, start() {}, signin() {}, decorate() {}, makeHost() {}, remove() {} };
   sayForm.addEventListener("submit", (event) => { event.preventDefault(); if (handlers.say(sayInput.value)) sayInput.value = ""; });
   topicForm.addEventListener("submit", (event) => { event.preventDefault(); handlers.topic(topicForm.elements.topic.value, topicForm.elements.tags.value); });
   $("#stoa-leave").addEventListener("click", () => handlers.leave());
@@ -45,11 +45,21 @@ export function createPanel(doc = document) {
       const now = [...rooms.children];
       if (now.length !== wanted.length || wanted.some((entry, index) => entry !== now[index])) rooms.replaceChildren(...wanted);
     },
-    setPeople(list, selfName) {
-      const key = peopleKey(list, selfName);
+    setPeople(list, selfName, options = {}) {
+      const { manage = false, hostId = null, selfId = null } = options;
+      const key = peopleKey(list, selfName, options);
       if (key === shownPeople) return;
       shownPeople = key;
-      people.replaceChildren(node("li", selfName + " (you)"), ...list.map((person) => node("li", person.name)));
+      const row = (name, isHost) => { const item = node("li", "", "stoa-person"); item.append(node("span", name)); if (isHost) item.append(node("span", "host", "stoa-host-badge")); return item; };
+      const tool = (text, label, action) => { const button = node("button", text, "button button-secondary button-small"); button.type = "button"; button.setAttribute("aria-label", label); button.addEventListener("click", action); return button; };
+      people.replaceChildren(row(selfName + " (you)", Boolean(selfId) && selfId === hostId), ...list.map((person) => {
+        const item = row(person.name, person.id === hostId);
+        if (manage) {
+          if (person.id !== hostId) item.append(tool("Make host", "Make " + person.name + " the host", () => handlers.makeHost(person)));
+          item.append(tool("Remove", "Remove " + person.name + " from this room", () => handlers.remove(person)));
+        }
+        return item;
+      }));
     },
     addMessage({ name, text, self }) {
       const entry = node("li", "", self ? "is-self" : "");

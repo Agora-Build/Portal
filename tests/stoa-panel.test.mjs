@@ -4,7 +4,7 @@ import { createPanel, peopleKey } from "../stoa/panel.js";
 
 // A minimal document: just enough of the element API for the panel to build lists and wire forms.
 class Element {
-  constructor(tag) { Object.assign(this, { tagName: tag, children: [], listeners: {}, attrs: {}, hidden: false, textContent: "", className: "", replaced: 0, elements: { topic: { value: "" }, tags: { value: "" } } }); }
+  constructor(tag) { Object.assign(this, { tagName: tag, children: [], listeners: {}, attrs: {}, hidden: false, textContent: "", className: "", replaced: 0, elements: { topic: { value: "" }, tags: { value: "" } }, classList: { toggle() {}, add() {} }, type: "" }); }
   append(...items) { this.children.push(...items); }
   replaceChildren(...items) { this.children = items; this.replaced += 1; }
   addEventListener(type, listener) { this.listeners[type] = listener; }
@@ -61,4 +61,27 @@ test("the Decorate button shows only for the host and calls the decorate handler
   assert.equal(doc.querySelector("#stoa-decor-open").hidden, false);
   doc.querySelector("#stoa-decor-open").listeners.click();
   assert.equal(opened, 1);
+});
+
+test("hosts get Make host and Remove for everyone else; the host is marked", () => {
+  const doc = fakeDocument(), panel = createPanel(doc), calls = [];
+  panel.on({ makeHost: (person) => calls.push(["host", person.id]), remove: (person) => calls.push(["remove", person.id]) });
+  const list = [{ id: "account:a", name: "Ada" }, { id: "account:b", name: "Bo" }];
+  panel.setPeople(list, "Me", { manage: false, hostId: "account:a", selfId: "account:me" });
+  const people = doc.querySelector("#stoa-people");
+  const text = (item) => [item.textContent, ...item.children.map((child) => child.textContent)].join("|");
+  assert.match(text(people.children[1]), /host/, "Ada is marked as host");
+  assert.equal(people.children[1].children.some((child) => child.tagName === "button"), false, "no tools without manage");
+  panel.setPeople(list, "Me", { manage: true, hostId: "account:me", selfId: "account:me" });
+  assert.match(text(people.children[0]), /host/, "you are marked as host");
+  const buttons = people.children[1].children.filter((child) => child.tagName === "button");
+  assert.deepEqual(buttons.map((button) => button.textContent), ["Make host", "Remove"]);
+  buttons[0].listeners.click(); buttons[1].listeners.click();
+  assert.deepEqual(calls, [["host", "account:a"], ["remove", "account:a"]]);
+  assert.match(buttons[1].attrs["aria-label"], /Remove Ada/);
+});
+test("the people key changes with manage and host", () => {
+  const list = [{ id: "account:a", name: "Ada" }];
+  assert.notEqual(peopleKey(list, "Me", { manage: true }), peopleKey(list, "Me", { manage: false }));
+  assert.notEqual(peopleKey(list, "Me", { hostId: "account:a" }), peopleKey(list, "Me", { hostId: null }));
 });
