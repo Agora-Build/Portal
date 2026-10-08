@@ -59,6 +59,25 @@ function label(ctx, text, cx, top, font, theme) {
   ctx.fillStyle = theme.ui?.["--surface"] || "#ffffff"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(text, cx, top + 7.5);
 }
 
+// A speech bubble above an avatar: up to three wrapped lines, the last ending with an ellipsis when cut.
+function bubble(ctx, text, cx, bottom, font, theme) {
+  ctx.font = "500 11px " + font;
+  const lines = [];
+  for (const word of String(text).split(/\s+/).filter(Boolean)) {
+    const last = lines.length ? lines[lines.length - 1] + " " + word : null;
+    if (last !== null && ctx.measureText(last).width <= 160) lines[lines.length - 1] = last; else lines.push(word);
+  }
+  const shown = lines.slice(0, 3);
+  if (lines.length > 3) shown[2] = shown[2] + "…";
+  const width = Math.min(176, Math.max(...shown.map((line) => ctx.measureText(line).width)) + 12), height = shown.length * 14 + 8, left = cx - width / 2, top = bottom - height - 6;
+  const surface = theme.ui?.["--surface"] || "#ffffff";
+  box(ctx, surface, left, top, width, height);
+  ctx.strokeStyle = theme.ui?.["--line"] || theme.avatar.outline; ctx.lineWidth = 1; ctx.strokeRect(left + 0.5, top + 0.5, width - 1, height - 1);
+  ctx.fillStyle = surface; ctx.beginPath(); ctx.moveTo(cx - 5, top + height); ctx.lineTo(cx + 5, top + height); ctx.lineTo(cx, top + height + 6); ctx.fill();
+  ctx.fillStyle = theme.ui?.["--ink"] || "#272d28"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  shown.forEach((line, index) => ctx.fillText(line, cx, top + 11 + index * 14));
+}
+
 function drawAvatar(ctx, avatar, s, theme, font) {
   const color = theme.avatar.palette[hashText(avatar.id) % theme.avatar.palette.length];
   const cx = (avatar.x + 0.5) * s, cy = (avatar.y + 0.5) * s;
@@ -72,6 +91,7 @@ function drawAvatar(ctx, avatar, s, theme, font) {
   }
   if (avatar.self) { ctx.strokeStyle = theme.ui?.["--accent"] || theme.avatar.outline; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(cx, cy, s * 0.5, 0, Math.PI * 2); ctx.stroke(); }
   label(ctx, avatar.name, cx, cy + s * 0.62, font, theme);
+  if (avatar.bubble) bubble(ctx, avatar.bubble, cx, cy - s * 0.5, font, theme);
 }
 
 function drawEffects(ctx, theme, width, height, time) {

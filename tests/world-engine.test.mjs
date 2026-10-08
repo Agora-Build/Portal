@@ -12,12 +12,11 @@ const key = (name) => ({ key: name, preventDefault() {} });
 
 function setup({ reducedMotion = false, theme = agora } = {}) {
   let time = 1000;
-  const frames = [], timers = [], drawn = [], themes = [], handlers = {}, events = { move: [], arrive: [] };
+  const frames = [], timers = [], drawn = [], themes = [], handlers = {}, events = { move: [], arrive: [], walk: [], stop: [], face: [] };
   const canvas = { clientWidth: 640, clientHeight: 480, addEventListener: (type, listener) => { handlers[type] = listener; }, removeEventListener: (type) => { delete handlers[type]; }, getBoundingClientRect: () => ({ left: 0, top: 0 }) };
   const renderer = { resize() {}, setTheme: (theme) => themes.push(theme), draw: (frame) => drawn.push(frame) };
   const engine = createEngine({ canvas, map: plaza, theme, start: plaza.spawns[0], reducedMotion, renderer, now: () => time, raf: (callback) => frames.push(callback), later: (callback) => { timers.push(callback); return timers.length; }, cancel() {}, ratio: () => 1 });
-  engine.on("move", (value) => events.move.push(value));
-  engine.on("arrive", (value) => events.arrive.push(value));
+  for (const type of Object.keys(events)) engine.on(type, (value) => events[type].push(value));
   // Runs only the frames already requested, so a walking avatar cannot loop forever inside one flush.
   const flush = () => { for (const callback of frames.splice(0)) callback(); };
   flush();
@@ -35,29 +34,6 @@ test("walking to a tile follows a path and arrives", () => {
   assert.deepEqual(engine.position(), { x: 21, y: 12 });
   const [me] = drawn.at(-1).avatars;
   assert.deepEqual([me.self, me.x, me.y, me.name], [true, 21, 12, "You"]);
-});
-test("holding a direction key keeps walking until it is released", () => {
-  const { handlers, events, flush, advance } = setup();
-  handlers.keydown(key("ArrowUp"));
-  assert.deepEqual(events.move.at(-1).path, [{ x: 21, y: 17 }, { x: 21, y: 16 }]);
-  handlers.keydown(key("ArrowUp"));
-  assert.equal(events.move.length, 1, "key repeat does not restart the step");
-  advance(201); flush();
-  assert.deepEqual(events.move.at(-1).path, [{ x: 21, y: 16 }, { x: 21, y: 15 }]);
-  handlers.keyup(key("ArrowUp"));
-  advance(201); flush();
-  assert.equal(events.move.length, 2);
-  handlers.keydown(key("Enter"));
-  assert.equal(events.move.length, 2, "other keys are ignored");
-});
-test("a blocked step only turns the walker", () => {
-  const { engine, handlers, events, flush, advance, drawn } = setup();
-  engine.walkTo({ x: 1, y: 18 }); advance(10000); flush();
-  const moves = events.move.length;
-  handlers.keydown(key("s")); flush();
-  assert.equal(events.move.length, moves);
-  assert.equal(drawn.at(-1).avatars[0].dir, "down");
-  assert.deepEqual(engine.position(), { x: 1, y: 18 });
 });
 test("clicking or tapping walks to the tile under the pointer", () => {
   const { handlers, events, drawn } = setup();
@@ -162,7 +138,7 @@ test("releasing a key always releases the hold, even with modifiers", () => {
   handlers.keydown(key("ArrowUp"));
   handlers.keyup({ key: "ArrowUp", metaKey: true });
   advance(201); flush();
-  assert.equal(events.move.length, 1);
+  assert.deepEqual([events.walk.length, events.stop.length], [1, 1]);
 });
 test("self identity decides the avatar id", () => {
   const { engine, drawn, flush } = setup();
@@ -203,4 +179,76 @@ test("an arrival not yet announced is announced before the next walk starts", ()
   assert.equal(engine.walkTo({ x: 23, y: 17 }), true);
   assert.deepEqual(events.arrive, [{ x: 21, y: 12 }]);
   assert.equal(events.move.length, 2);
+});
+test("a held key publishes one walk and its release publishes one stop", () => {
+  const { engine, handlers, events, flush, advance } = setup();
+  handlers.keydown(key("ArrowUp"));
+  assert.equal(events.move.length, 0);
+  assert.deepEqual(events.walk, [{ from: { x: 21, y: 17 }, dir: "up", startedAt: 1000 }]);
+  handlers.keydown(key("ArrowUp"));
+  assert.equal(events.walk.length, 1, "key repeat does not restart the walk");
+  advance(300); flush();
+  handlers.keyup(key("ArrowUp"));
+  assert.deepEqual(events.stop, [{ at: { x: 21, y: 15 } }]);
+  advance(1000); flush();
+  assert.deepEqual(engine.position(), { x: 21, y: 15 });
+  assert.deepEqual(events.arrive.at(-1), { x: 21, y: 15 });
+});
+test("a key toward a wall only turns you and says so", () => {
+  const { engine, handlers, events, flush, advance, drawn } = setup();
+  engine.walkTo({ x: 1, y: 18 }); advance(10000); flush();
+  handlers.keydown(key("s")); flush();
+  assert.deepEqual(events.face, [{ dir: "down" }]);
+  assert.equal(events.walk.length, 0);
+  assert.equal(drawn.at(-1).avatars[0].dir, "down");
+});
+test("teleporting, turning input off, and clicks outside the bounds", () => {
+  const { engine, handlers, events, flush, drawn } = setup();
+  engine.teleport({ x: 17, y: 31 }, "up");
+  engine.setBounds({ x: 15, y: 21, width: 6, height: 12 });
+  flush();
+  assert.deepEqual([engine.position(), engine.facing(), events.move.length], [{ x: 17, y: 31 }, "up", 0]);
+  const { camera } = drawn.at(-1);
+  const click = (tile) => handlers.pointerup({ button: 0, clientX: (tile.x * 32 + 16 - camera.x) * camera.zoom, clientY: (tile.y * 32 + 16 - camera.y) * camera.zoom });
+  click({ x: 22, y: 25 });
+  assert.equal(events.move.length, 0, "a tile outside the bounds is ignored");
+  click({ x: 16, y: 29 });
+  assert.equal(events.move.length, 1);
+  engine.setInteractive(false);
+  click({ x: 16, y: 28 }); handlers.keydown(key("ArrowUp"));
+  assert.deepEqual([events.move.length, events.walk.length], [1, 0]);
+});
+test("turning input off ends a keyboard walk", () => {
+  const { engine, handlers, events } = setup();
+  handlers.keydown(key("ArrowUp"));
+  engine.setInteractive(false);
+  assert.deepEqual(events.stop, [{ at: { x: 21, y: 17 } }]);
+});
+test("speech bubbles show for a while, then the engine redraws without them", () => {
+  const { engine, drawn, flush, advance, timers } = setup({ theme: minimal });
+  assert.equal(timers.length, 0);
+  engine.say("Hello plaza");
+  engine.setOthers([{ id: "bo", name: "Bo", walk: { path: [{ x: 22, y: 17 }], startedAt: 0 }, bubble: { text: "Hi!", until: 4000 } }]);
+  flush();
+  assert.deepEqual(drawn.at(-1).avatars.map((avatar) => avatar.bubble), ["Hello plaza", "Hi!"]);
+  assert.equal(timers.length, 1, "a timer wakes the engine when the first bubble ends");
+  advance(3001); timers[0](); flush();
+  assert.deepEqual(drawn.at(-1).avatars.map((avatar) => avatar.bubble), ["Hello plaza", null]);
+  advance(5000); timers[1](); flush();
+  assert.deepEqual(drawn.at(-1).avatars.map((avatar) => avatar.bubble), [null, null]);
+});
+test("a decoration placed on your route sends you around it", () => {
+  const { engine, events, flush, advance } = setup();
+  engine.walkTo({ x: 21, y: 12 }); advance(100); flush();
+  engine.setDecor([{ kind: "statue", x: 21, y: 14 }]);
+  assert.equal(events.move.length, 2);
+  const route = events.move.at(-1).path;
+  assert.equal(route.some((step) => step.x === 21 && step.y === 14), false);
+  assert.deepEqual(route.at(-1), { x: 21, y: 12 });
+});
+test("a decoration in front of a keyboard walk stops it before the decoration", () => {
+  const { engine, handlers, events } = setup();
+  handlers.keydown(key("ArrowUp"));
+  engine.setDecor([{ kind: "statue", x: 21, y: 14 }]);
+  assert.deepEqual(events.stop, [{ at: { x: 21, y: 15 } }]);
 });

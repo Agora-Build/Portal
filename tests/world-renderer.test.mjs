@@ -112,3 +112,9 @@ test("unknown decoration kinds are skipped and fonts have a fallback", () => {
   assert.ok(fonts.length > 0 && fonts.every((font) => font.endsWith(", sans-serif")), fonts.join("|"));
   assert.ok(fonts.some((font) => font.includes("\"IBM Plex Sans\"")));
 });
+
+test("speech bubbles are drawn above avatars that are talking", () => {
+  const { calls } = render(agora, { avatars: [{ id: "a", name: "Ada", x: 5, y: 5, dir: "down", bubble: "Hello there" }, { id: "b", name: "Bo", x: 7, y: 5, dir: "down" }], motion: false });
+  const texts = calls.filter(([name]) => name === "fillText").map(([, text]) => text);
+  assert.equal(texts.filter((text) => text === "Hello there").length, 1);
+});
