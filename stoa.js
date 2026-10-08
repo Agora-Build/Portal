@@ -33,7 +33,7 @@ failure(spaceResult, "This space"); failure(worldResult, "The map"); failure(the
 const space = spaceResult.value?.space || null;
 if (space) { document.querySelector("#stoa-title").textContent = space.title; document.title = space.title + " | Agora Build"; }
 
-let map = null, engine = null, minimal = stored.get() === "true", preview = null, plazaBounds = null, active = () => null;
+let map = null, engine = null, minimal = stored.get() === "true", preview = null, plazaBounds = null, active = () => null, call = null;
 try { if (worldResult.status === "fulfilled") map = parseMap(worldResult.value); } catch (error) { problems.push("The map is not valid (" + error.message + ")."); }
 let summaries = new Map((spacesResult.value?.rooms || []).map((room) => [room.slug, room]));
 const lot = roomSlug && map ? map.lots.find((entry) => entry.slug === roomSlug) || null : null;
@@ -78,7 +78,7 @@ await sessionReady;
 const self = { id: state.account?.id || state.profile?.id || null, ids: [state.account?.id, state.profile?.id].filter(Boolean), name: state.profile?.name || state.account?.name || "You", signedIn: Boolean(state.account || state.profile) };
 panel.setPeople([], self.name);
 panel.canTalk(self.signedIn);
-let live = null, stage = null, call = null;
+let live = null, stage = null;
 const unavailable = "The Stoa view isn't available, so there's nothing to walk or talk in.";
 // Controls work even without the canvas: Go to explains where the door is, Sign in and Start a space still do their jobs.
 panel.on({

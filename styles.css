@@ -582,9 +582,9 @@ dialog h2 { font-size: 30px; line-height: 1.25; font-weight: 500; letter-spacing
 .stoa-say { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
 .stoa-signin { font-size: 13px; color: var(--muted); }
 .stoa-view { position: relative; }
-.stoa-video { position: absolute; inset: 0; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 8px; padding: 8px; pointer-events: none; overflow: hidden; }
+.stoa-video { position: absolute; inset: 0; display: flex; flex-wrap: nowrap; align-content: flex-start; gap: 8px; padding: 8px; pointer-events: none; overflow: hidden; }
 .stoa-video[data-layout="grid"] { inset: 0 0 0 auto; width: min(46%, 520px); display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
-.stoa-tile { position: relative; width: 168px; aspect-ratio: 16 / 10; overflow: hidden; border: 1px solid var(--line); border-radius: 4px; background: #202824; pointer-events: auto; }
+.stoa-tile { position: relative; width: 168px; aspect-ratio: 16 / 10; overflow: hidden; border: 1px solid var(--line); border-radius: 4px; background: #202824; pointer-events: none; }
 .stoa-video[data-layout="grid"] .stoa-tile { width: auto; }
 .stoa-tile.is-screen { width: min(100%, 360px); aspect-ratio: 16 / 9; }
 .stoa-tile.is-floating { position: absolute; left: 0; top: 0; width: 96px; }

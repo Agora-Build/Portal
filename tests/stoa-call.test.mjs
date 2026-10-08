@@ -23,3 +23,9 @@ test("over-avatar tiles sit above the matching avatar; screens and people out of
   assert.equal(overAvatar(stranger, frame), null);
   assert.equal(overAvatar(mine, null), null);
 });
+test("another tab of the same person is named as such", () => {
+  const mine = { ...self, ids: [self.id, "member:" + me] };
+  assert.equal(nameFor(me + "_dddddddddddd", { people, self: mine, snapshot }), "Me (another tab)");
+  assert.equal(nameFor(me + "_dddddddddddd_screen", { people, self: mine, snapshot }), "Me (another tab)'s screen");
+  assert.equal(nameFor(snapshot.uid, { people, self: mine, snapshot }), "Me (you)");
+});
