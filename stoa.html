@@ -21,7 +21,7 @@
       <section class="stoa" id="stoa" aria-labelledby="stoa-title">
         <div class="stoa-heading"><div><p class="kicker">THE STOA / PUBLIC PLAZA</p><h1 id="stoa-title">Walk into the plaza.</h1></div><button class="button button-secondary button-small" type="button" id="stoa-minimal" aria-pressed="false">Minimal view</button></div>
         <div class="stoa-layout">
-          <div class="stoa-stage"><canvas id="stoa-canvas" tabindex="0" aria-label="Plaza map" aria-describedby="stoa-help"></canvas><p class="stoa-help" id="stoa-help">Click or tap to walk. Select the map to use the arrow keys or WASD.</p></div>
+          <div class="stoa-stage"><div class="stoa-view"><canvas id="stoa-canvas" tabindex="0" aria-label="Plaza map" aria-describedby="stoa-help"></canvas><div class="stoa-video" id="stoa-video" data-layout="strip" role="region" aria-label="Call video" hidden></div></div><p class="stoa-help" id="stoa-help">Click or tap to walk. Select the map to use the arrow keys or WASD.</p></div>
           <aside class="stoa-panel" aria-label="Around you">
             <p class="stoa-status" id="stoa-status" role="status" aria-live="polite">Opening the plaza...</p>
             <section class="stoa-here" id="stoa-here" hidden aria-labelledby="stoa-here-title">
@@ -33,6 +33,19 @@
                 <label>Tags <span class="optional">up to 5, separated by commas</span><input name="tags" maxlength="160" autocomplete="off"></label>
                 <button class="button button-small" type="submit">Set topic</button>
               </form>
+              <section class="stoa-call" id="stoa-call" hidden aria-labelledby="stoa-call-title">
+                <h3 class="stoa-panel-title" id="stoa-call-title">Call</h3>
+                <p class="stoa-call-status" id="stoa-call-status" role="status" aria-live="polite"></p>
+                <div class="stoa-call-preflight" id="stoa-call-preflight"><label><input type="checkbox" id="stoa-call-mic" checked> Microphone on</label><label><input type="checkbox" id="stoa-call-camera"> Camera on</label></div>
+                <div class="stoa-call-controls">
+                  <button class="button button-small" type="button" id="stoa-call-join">Join call</button>
+                  <button class="button button-secondary button-small" type="button" id="stoa-call-audio" aria-pressed="false" hidden>Turn mic on</button>
+                  <button class="button button-secondary button-small" type="button" id="stoa-call-video" aria-pressed="false" hidden>Turn camera on</button>
+                  <button class="button button-secondary button-small" type="button" id="stoa-call-share" aria-pressed="false" hidden>Share screen</button>
+                  <button class="button button-secondary button-small" type="button" id="stoa-call-resume" hidden>Play call audio</button>
+                  <button class="button button-secondary button-small stoa-call-leave" type="button" id="stoa-call-leave" hidden>Leave call</button>
+                </div>
+              </section>
               <button class="button button-secondary button-small" type="button" id="stoa-leave">Back to the plaza</button>
             </section>
             <section class="stoa-offer" id="stoa-offer" hidden aria-labelledby="stoa-offer-title">

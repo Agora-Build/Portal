@@ -10,7 +10,7 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 const deferred = () => { const d = {}; d.promise = new Promise((resolve, reject) => { d.resolve = resolve; d.reject = reject; }); return d; };
 const space = (id, title = id) => ({ id, title, topic: null, tags: [], visibility: "public" });
 
-function setup({ api, signedIn = true, withLive = true, clock = { time: 0, timers: [] } } = {}) {
+function setup({ api, signedIn = true, withLive = true, clock = { time: 0, timers: [] }, ...options } = {}) {
   const calls = { teleports: [], bounds: [], interactive: null, published: [], states: [], canTalk: [], reasons: [], showRoom: [], offer: 0, joined: [], left: [], others: 0, people: 0, handlers: {}, quiet: {} };
   const frames = [];
   const live = !withLive ? null : {
@@ -29,7 +29,7 @@ function setup({ api, signedIn = true, withLive = true, clock = { time: 0, timer
   };
   const leases = [];
   const createLease = (options) => { const entry = { options, active: true, stop() { entry.active = false; }, async leave() { entry.active = false; }, leaveOnUnload() { entry.active = false; } }; leases.push(entry); return entry; };
-  const stage = createStage({ api, map: plaza, engine, panel, live, self: { id: "a-me", name: "Me", signedIn }, plaza: { bounds: null, channel: "plaza-1" }, createLease, schedule: (callback) => frames.push(callback), now: () => clock.time, later: (callback, delay) => { clock.timers.push({ callback, delay }); return clock.timers.length; } });
+  const stage = createStage({ api, map: plaza, engine, panel, live, self: { id: "a-me", name: "Me", signedIn }, plaza: { bounds: null, channel: "plaza-1" }, createLease, schedule: (callback) => frames.push(callback), now: () => clock.time, later: (callback, delay) => { clock.timers.push({ callback, delay }); return clock.timers.length; }, ...options });
   const flushFrames = () => { for (const callback of frames.splice(0)) callback(); };
   return { stage, calls, panel, leases, handlers, live, flushFrames, clock };
 }
@@ -328,4 +328,26 @@ test("connecting live while watching the plaza joins it quietly", async () => {
   const joined = [], later = { userId: "a-me", guest: false, renew: async () => {}, join: async (name, options) => { joined.push([name, options.quiet]); }, leave: async () => {}, publish: async () => {}, setState: async () => {}, who: async () => [] };
   await stage.attachLive(later, "plaza-1");
   assert.deepEqual(joined, [["plaza-1", true]]);
+});
+
+test("the call follows the room: one callback per room entered or left, not per channel change", async () => {
+  const rooms = [];
+  const api = async (path) => path === "/api/spaces/plaza/enter" ? access("plaza", "plaza-1") : path.endsWith("/enter") ? access("lot-" + lot.slug, "lot-ch") : {};
+  const { stage, leases } = setup({ api, onRoom: (room) => rooms.push(room ? room.id : null) });
+  await stage.toPlaza(null);
+  await stage.enterLot(lot);
+  leases.at(-1).options.onAccess({ channel: "lot-ch-2", key: null, blocked: [], hostId: "a-me" });
+  await tick(); await tick();
+  await stage.leaveRoom();
+  assert.deepEqual(rooms, ["lot-" + lot.slug, null]);
+});
+test("the merged people list is kept and reported each time it is rebuilt", async () => {
+  const lists = [];
+  const api = async (path) => path === "/api/spaces/plaza/enter" ? access("plaza", "plaza-1") : {};
+  const { stage, calls, flushFrames } = setup({ api, onPeople: (list) => lists.push(list.map((person) => person.name)) });
+  await stage.toPlaza(null);
+  calls.handlers["plaza-1"].presence({ type: "snapshot", people: [{ userId: "a-72a639ba-3a45-4afe-936b-222222222222", states: { x: String(lot.door.x), y: String(lot.door.y + 1), dir: "down", name: "Ada" } }] });
+  flushFrames();
+  assert.deepEqual(lists.at(-1), ["Ada"]);
+  assert.deepEqual(stage.people().map((person) => person.name), ["Ada"]);
 });

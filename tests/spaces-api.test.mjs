@@ -184,9 +184,9 @@ test("the live Stoa page has its panel controls and serves every live module", a
   const { instance, url } = await start();
   try {
     const html = await (await request(url, "/stoa/")).text();
-    for (const id of ["stoa-here", "stoa-topic-form", "stoa-leave", "stoa-offer", "stoa-start", "stoa-rooms-section", "stoa-messages", "stoa-say", "stoa-signin"]) assert.match(html, new RegExp("id=\"" + id + "\""), id);
+    for (const id of ["stoa-here", "stoa-topic-form", "stoa-leave", "stoa-offer", "stoa-start", "stoa-rooms-section", "stoa-messages", "stoa-say", "stoa-signin", "stoa-call", "stoa-call-join", "stoa-video"]) assert.match(html, new RegExp("id=\"" + id + "\""), id);
     assert.match(html, /id="stoa-messages" role="log"/);
-    for (const module of ["/stoa/panel.js", "/stoa/stage.js", "/stoa/place.js", "/stoa/lease.js", "/world/protocol.js", "/world/crypto.js", "/world/signaling.js", "/world/presence.js"]) {
+    for (const module of ["/stoa/panel.js", "/stoa/stage.js", "/stoa/place.js", "/stoa/lease.js", "/world/protocol.js", "/world/crypto.js", "/world/signaling.js", "/world/presence.js", "/stoa/call.js", "/world/rtc-client.js"]) {
       const response = await request(url, module);
       assert.equal(response.status, 200, module);
       assert.match(response.headers.get("content-type"), /text\/javascript/, module);

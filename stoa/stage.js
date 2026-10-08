@@ -9,8 +9,8 @@ export const outsideDoor = (map, lot) => [[0, 1], [0, -1], [1, 0], [-1, 0]].map(
 // Moves the person between the plaza, lot rooms, and user spaces: entry leases on the server, channels on Signaling.
 const REFRESH_GAP = 5000;
 // `live` may be null at first and attached later with attachLive, so the page never waits on the SDK.
-export function createStage({ api, map, engine, panel, live: firstLive, self, plaza, createLease = realLease, schedule = (callback) => typeof requestAnimationFrame === "function" ? requestAnimationFrame(callback) : setTimeout(callback, 16), now = () => Date.now(), later = (callback, delay) => setTimeout(callback, delay) }) {
-  let live = firstLive, places = [], lease = null, here = null, chain = Promise.resolve(), drawing = false;
+export function createStage({ api, map, engine, panel, live: firstLive, self, plaza, onRoom = () => {}, onPeople = () => {}, createLease = realLease, schedule = (callback) => typeof requestAnimationFrame === "function" ? requestAnimationFrame(callback) : setTimeout(callback, 16), now = () => Date.now(), later = (callback, delay) => setTimeout(callback, delay) }) {
+  let live = firstLive, places = [], lease = null, here = null, chain = Promise.resolve(), drawing = false, everyone = [], roomId = null;
   // State changes run strictly one at a time, each re-checking its preconditions when it starts.
   const transition = (task) => (chain = chain.then(task, task).catch((error) => panel.say(error.message || "Something went wrong.")));
   const doors = new Map(map.lots.map((lot) => [lot.door.x + "," + lot.door.y, lot]));
@@ -25,8 +25,10 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
       const seen = new Map();
       for (const place of places) for (const person of place.people()) seen.set(person.id, person);
       const list = [...seen.values()];
+      everyone = list;
       engine.setOthers(list);
       panel.setPeople(list, self.name);
+      onPeople(list);
     });
   };
   const showRoom = (space, hostId) => panel.showRoom({ kicker: here?.kind === "lot" ? "LOT ROOM" : space.visibility === "private" ? "PRIVATE SPACE" : "UNLISTED SPACE", title: space.title, topic: space.topic, tags: space.tags || [], host: Boolean(self.id) && hostId === self.id, leaveLabel: here?.kind === "lot" ? "Back to the plaza" : "Leave this space" });
@@ -34,6 +36,9 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
   // Every transition claims `here` before it awaits anything; a superseded one stops as soon as it notices.
   async function settle(next) {
     here = next;
+    // The call and the decor editor belong to a room, so the page hears about room changes, not channel changes.
+    const room = next.leased && (next.kind === "lot" || next.kind === "space") ? next.space : null;
+    if ((room?.id || null) !== roomId) { roomId = room?.id || null; onRoom(room); }
     lease?.stop(); lease = null;
     const old = places; places = [];
     await Promise.all(old.map((place) => place.close().catch(() => {})));
@@ -198,6 +203,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     openSpace: (id, invite) => transition(() => openSpaceTask(id, invite)),
     leaveRoom,
     setTopic,
+    people: () => everyone,
     say(text) {
       if (here?.kind === "left") { panel.say("You're no longer in this space."); return false; }
       if (!places.length) { panel.say(self.signedIn ? "Messages need the live connection." : "Sign in to talk."); return false; }

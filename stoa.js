@@ -4,6 +4,7 @@ import { createEngine } from "./world/engine.js";
 import { createLive } from "./world/signaling.js";
 import { loadAgora } from "./world/sdk.js";
 import { createPanel } from "./stoa/panel.js";
+import { createCallView } from "./stoa/call.js";
 import { createStage, outsideDoor } from "./stoa/stage.js";
 
 const root = document.querySelector("#stoa");
@@ -32,7 +33,7 @@ failure(spaceResult, "This space"); failure(worldResult, "The map"); failure(the
 const space = spaceResult.value?.space || null;
 if (space) { document.querySelector("#stoa-title").textContent = space.title; document.title = space.title + " | Agora Build"; }
 
-let map = null, engine = null, minimal = stored.get() === "true", preview = null, plazaBounds = null;
+let map = null, engine = null, minimal = stored.get() === "true", preview = null, plazaBounds = null, active = () => null;
 try { if (worldResult.status === "fulfilled") map = parseMap(worldResult.value); } catch (error) { problems.push("The map is not valid (" + error.message + ")."); }
 let summaries = new Map((spacesResult.value?.rooms || []).map((room) => [room.slug, room]));
 const lot = roomSlug && map ? map.lots.find((entry) => entry.slug === roomSlug) || null : null;
@@ -45,7 +46,7 @@ if (map && themesResult.status === "fulfilled" && (!spaceId || space)) {
     const wanted = new URLSearchParams(location.search).get("theme");
     preview = wanted !== null && byId.has(wanted) ? byId.get(wanted) : null;
     const chosen = preview || byId.get(space?.themeId) || byId.get("agora");
-    const active = () => minimal ? byId.get("minimal") : chosen;
+    active = () => minimal ? byId.get("minimal") : chosen;
     engine = createEngine({ canvas, map, theme: active(), start: lot ? outsideDoor(map, lot) : map.spawns[0], reducedMotion: matchMedia("(prefers-reduced-motion: reduce)").matches });
     const zone = map.zones.find((entry) => entry.name === "plaza");
     if (zone && !spaceId) {
@@ -62,6 +63,7 @@ if (map && themesResult.status === "fulfilled" && (!spaceId || space)) {
       minimalToggle.setAttribute("aria-pressed", String(minimal));
       applyUi(active());
       engine.setTheme(active());
+      call?.setLayout(active().video);
     });
     new ResizeObserver(() => engine.resize()).observe(canvas);
     // Canvas text uses the web font only once it has loaded, so draw again then.
@@ -73,10 +75,10 @@ if (map && themesResult.status === "fulfilled" && (!spaceId || space)) {
 }
 
 await sessionReady;
-const self = { id: state.account?.id || state.profile?.id || null, name: state.profile?.name || state.account?.name || "You", signedIn: Boolean(state.account || state.profile) };
+const self = { id: state.account?.id || state.profile?.id || null, ids: [state.account?.id, state.profile?.id].filter(Boolean), name: state.profile?.name || state.account?.name || "You", signedIn: Boolean(state.account || state.profile) };
 panel.setPeople([], self.name);
 panel.canTalk(self.signedIn);
-let live = null, stage = null;
+let live = null, stage = null, call = null;
 const unavailable = "The Stoa view isn't available, so there's nothing to walk or talk in.";
 // Controls work even without the canvas: Go to explains where the door is, Sign in and Start a space still do their jobs.
 panel.on({
@@ -126,10 +128,12 @@ async function connectLive() {
 }
 if (engine) {
   engine.setSelf({ id: self.id || undefined, name: self.name });
-  stage = createStage({ api, map, engine, panel, live: null, self, plaza: spaceId ? null : { bounds: plazaBounds, channel: null } });
+  call = createCallView({ engine, api, self, people: () => stage?.people() || [], say: (text) => panel.say(text) });
+  call.setLayout(active().video);
+  stage = createStage({ api, map, engine, panel, live: null, self, plaza: spaceId ? null : { bounds: plazaBounds, channel: null }, onRoom: (room) => room ? call.enter(room.id) : call.exit(), onPeople: () => call.refresh() });
   engine.on("arrive", (tile) => stage.onArrive(tile));
   // Leaving the page releases the entry lease and, as far as the browser allows, the Signaling login.
-  addEventListener("pagehide", () => { stage.unload(); live?.close().catch(() => {}); });
+  addEventListener("pagehide", () => { call.exit(); stage.unload(); live?.close().catch(() => {}); });
   const entering = spaceId ? stage.openSpace(spaceId, invite) : stage.toPlaza(null, minimal ? "Minimal view is on." : preview ? "Previewing the " + preview.name + " theme. Only you see it." : undefined);
   connectLive();
   await entering;
