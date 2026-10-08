@@ -55,7 +55,13 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
   const visible = (state, space, actor, invite) => can(actor, "see", space, { invited: Boolean(invitationFor(space, invite)), present: present(state, space, actor) });
   const findVisible = (state, id, actor, invite) => { const space = find(state, id); if (!visible(state, space, actor, invite)) throw notFound(); return space; };
   const occupants = (state, space) => leasesFor(state, space.id, now()).sort((a, b) => a.enteredAt - b.enteredAt).map((lease) => ({ id: lease.actorId, name: lease.name }));
-  const view = (state, space, actor) => publicSpace(space, { occupants: occupants(state, space), manage: can(actor, "edit", space) });
+  const nameOf = (state, id) => state.people.find((person) => person.id === id)?.name || (state.accounts || []).find((account) => account.id === id)?.name || "Builder";
+  const roster = (state, ids) => ids.map((id) => ({ id, name: nameOf(state, id) }));
+  // Owners manage members by name, so their view carries names for the member and blocked lists.
+  const view = (state, space, actor) => {
+    const manage = can(actor, "edit", space), result = publicSpace(space, { occupants: occupants(state, space), manage });
+    return manage ? { ...result, roster: roster(state, space.members), blockedRoster: roster(state, space.blocked) } : result;
+  };
   const owned = (state, actor) => state.spaces.filter((space) => !system(space) && actor.ids.includes(space.ownerId));
   const offerFor = (state, actor) => ({ spaces: state.spaces.filter((space) => !system(space) && space.members.some((id) => actor.ids.includes(id))).map((space) => ({ id: space.id, title: space.title, visibility: space.visibility, path: "/stoa/s/" + space.id })), canCreate: owned(state, actor).length < entitlements(actor.plan).spaces });
   const access = (space) => ({ channel: channelName(secret, space), key: spaceKey(secret, space), blocked: space.blocked, hostId: space.hostId });
@@ -88,6 +94,14 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
         state.spaces.push(space);
         return view(state, space, actor);
       });
+    },
+    async mine(token) {
+      const actor = signedIn(await actorFor(token));
+      await ready();
+      const state = await store.snapshot();
+      const list = state.spaces.filter((space) => !system(space) && space.members.some((id) => actor.ids.includes(id))).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      const owns = owned(state, actor).length, limit = entitlements(actor.plan).spaces;
+      return { spaces: list.map((space) => ({ id: space.id, title: space.title, purpose: space.purpose, visibility: space.visibility, access: space.access, capacity: space.capacity, themeId: space.themeId, owner: actor.ids.includes(space.ownerId), occupancy: leasesFor(state, space.id, now()).length, path: "/stoa/s/" + space.id })), owned: owns, limit, canCreate: owns < limit };
     },
     async get(token, id, invite) {
       await ready();

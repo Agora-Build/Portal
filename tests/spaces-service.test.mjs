@@ -336,3 +336,29 @@ test("sweep without expired leases never writes", async (t) => {
   await spaces.sweep();
   assert.equal(count, 1);
 });
+test("your spaces lists spaces you own or belong to, newest first, with your allowance", async (t) => {
+  const { spaces, clock, person } = await setup(t);
+  const owner = await person("Owner"), friend = await person("Friend"), stranger = await person("Stranger");
+  const first = await spaces.create(owner.token, { title: "First space" });
+  clock.now += 1000;
+  const second = await spaces.create(owner.token, { title: "Second space", visibility: "private" });
+  await spaces.addMember(owner.token, first.id, friend.id);
+  const mine = await spaces.mine(owner.token);
+  assert.deepEqual(mine.spaces.map((space) => [space.title, space.owner, space.path]), [["Second space", true, "/stoa/s/" + second.id], ["First space", true, "/stoa/s/" + first.id]]);
+  assert.deepEqual([mine.owned, mine.canCreate], [2, mine.limit > 2]);
+  assert.deepEqual((await spaces.mine(friend.token)).spaces.map((space) => [space.title, space.owner, space.occupancy]), [["First space", false, 0]]);
+  assert.deepEqual((await spaces.mine(stranger.token)).spaces, []);
+  await assert.rejects(spaces.mine(null), { status: 401 });
+});
+test("owners see member and blocked names; others see neither", async (t) => {
+  const { spaces, person } = await setup(t);
+  const owner = await person("Owner"), friend = await person("Friend");
+  const space = await spaces.create(owner.token, { title: "Named space" });
+  await spaces.addMember(owner.token, space.id, friend.id);
+  const seen = await spaces.get(owner.token, space.id);
+  assert.deepEqual(seen.roster, [{ id: owner.id, name: "Owner" }, { id: friend.id, name: "Friend" }]);
+  assert.deepEqual(seen.blockedRoster, []);
+  const asFriend = await spaces.get(friend.token, space.id);
+  assert.equal(asFriend.roster, undefined);
+  assert.equal(asFriend.blockedRoster, undefined);
+});

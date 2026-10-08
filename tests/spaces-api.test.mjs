@@ -193,3 +193,13 @@ test("the live Stoa page has its panel controls and serves every live module", a
     }
   } finally { await close(instance); }
 });
+test("your spaces needs sign-in and lists what you own", async () => {
+  const { instance, url } = await start();
+  try {
+    assert.equal((await request(url, "/api/spaces/mine")).status, 401);
+    const ada = await join(url, "Ada");
+    const created = await (await post(url, "/api/spaces", ada, { title: "Ada's lab" })).json();
+    const mine = await (await request(url, "/api/spaces/mine", { cookie: ada })).json();
+    assert.deepEqual(mine.spaces.map((space) => [space.id, space.owner]), [[created.space.id, true]]);
+  } finally { await close(instance); }
+});

@@ -7,6 +7,7 @@ export async function handleSpaces({ path, method, url, token, read: readBody, s
   const read = async () => { const data = await readBody(); return data && typeof data === "object" && !Array.isArray(data) ? data : {}; };
   if (path === "/api/spaces" && method === "GET") return { status: 200, body: await spaces.list({ q: url.searchParams.get("q") || "" }) };
   if (path === "/api/spaces" && method === "POST") { limit("spaces:" + ip, 20, 3600000); return { status: 201, body: { space: await spaces.create(token, await read()) } }; }
+  if (path === "/api/spaces/mine" && method === "GET") return { status: 200, body: await spaces.mine(token) };
   if (path === "/api/signaling/token" && method === "POST") { limit("signaling:" + ip, 30, 60000); return { status: 200, body: await spaces.signalingToken(token) }; }
   if (path === "/api/themes" && method === "GET") return { status: 200, body: { themes } };
   const world = /^\/api\/worlds\/([a-z]+)$/.exec(path);
