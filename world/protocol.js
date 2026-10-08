@@ -24,6 +24,8 @@ export function readMessage(text, map) {
     case "face": return DIRS.includes(data.dir) && isTile(data.at) && walkable(map, data.at.x, data.at.y) ? { t: "face", dir: data.dir, at: copy(data.at) } : null;
     case "say": { const say = typeof data.text === "string" ? data.text.trim() : ""; return say && data.text.length <= TEXT_LIMIT ? { t: "say", text: say } : null; }
     case "refresh": return { t: "refresh" };
+    case "decor": return Number.isInteger(data.version) && data.version > 0 ? { t: "decor", version: data.version } : null;
+    case "rekey": return { t: "rekey" };
     default: return null;
   }
 }

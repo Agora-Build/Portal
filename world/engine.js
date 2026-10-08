@@ -8,11 +8,12 @@ import { createCanvasRenderer } from "./renderer-canvas.js";
 // Times are wall-clock (Date.now) because walk start times are published, so peers share the clock.
 // One person's movement, input, camera, and drawing. Other people arrive through setOthers.
 // Events: "move" { path, startedAt } for pointer walks; "walk" { from, dir, startedAt } and "stop" { at } for keyboard
-// walks; "face" { dir, at } when a key only turns you; "arrive" { x, y } when a walk ends.
+// walks; "face" { dir, at } when a key only turns you; "arrive" { x, y } when a walk ends;
+// "draw" { camera, tileSize, avatars } after each frame.
 export function createEngine({ canvas, map, theme, start, reducedMotion = false, renderer = createCanvasRenderer(canvas, { map, theme }), now = () => Date.now(), raf = (callback) => requestAnimationFrame(callback), later = (callback, delay) => setTimeout(callback, delay), cancel = (handle) => clearTimeout(handle), ratio = () => globalThis.devicePixelRatio || 1 }) {
-  const listeners = { arrive: [], move: [], walk: [], stop: [], face: [] };
+  const listeners = { arrive: [], move: [], walk: [], stop: [], face: [], draw: [] };
   const self = { id: "self", name: "You", walk: { path: [start], startedAt: now(), dir: "down" }, arrived: true, keyboard: false, bubble: null };
-  let current = theme, others = [], decor = [], labels = [], held = null, pending = false, timer = null, destroyed = false, interactive = true;
+  let current = theme, others = [], decor = [], labels = [], held = null, pending = false, timer = null, destroyed = false, interactive = true, picking = null;
   let bounds = null, camera = { x: 0, y: 0, zoom: 1 }, viewport = { width: 1, height: 1 };
   const emit = (type, value) => { for (const listener of listeners[type]) listener(value); };
   const here = (time = now()) => positionAt(self.walk, time);
@@ -37,7 +38,9 @@ export function createEngine({ canvas, map, theme, start, reducedMotion = false,
     const reach = { x: viewport.width / camera.zoom / s, y: viewport.height / camera.zoom / s }, middle = { x: (camera.x + viewport.width / camera.zoom / 2) / s, y: (camera.y + viewport.height / camera.zoom / 2) / s };
     const everyone = others.map((other) => ({ id: other.id, name: other.name, bubble: speech(other.bubble, time), ...positionAt(other.walk, time) }));
     const crowd = everyone.filter((other) => Math.abs(other.x + 0.5 - middle.x) <= reach.x && Math.abs(other.y + 0.5 - middle.y) <= reach.y);
-    renderer.draw({ camera, time, avatars: [{ id: self.id, name: self.name, self: true, bubble: speech(self.bubble, time), ...shown }, ...crowd], decor, labels, bounds, motion: !reducedMotion });
+    const avatars = [{ id: self.id, name: self.name, self: true, bubble: speech(self.bubble, time), ...shown }, ...crowd];
+    renderer.draw({ camera, time, avatars, decor, labels, bounds, motion: !reducedMotion });
+    if (listeners.draw.length) emit("draw", { camera, tileSize: s, avatars: avatars.map((avatar) => ({ id: avatar.id, x: avatar.x, y: avatar.y, self: Boolean(avatar.self) })) });
     const talking = [self.bubble, ...others.map((other) => other.bubble)].filter((bubble) => bubble && bubble.until > time);
     // People walking off-screen are not drawn, but a slow check keeps running so they appear as soon as they come into view.
     const distant = everyone.some((other) => !other.done);
@@ -95,9 +98,10 @@ export function createEngine({ canvas, map, theme, start, reducedMotion = false,
   }
 
   const onPointer = (event) => {
-    if (!interactive || event.button) return;
+    if (event.button || (!interactive && !picking)) return;
     const box = canvas.getBoundingClientRect(), tile = screenToTile(camera, event.clientX - box.left, event.clientY - box.top, map.tileSize);
-    if (inBounds(tile)) walkTo(tile);
+    if (!inBounds(tile)) return;
+    if (picking) picking(tile); else walkTo(tile);
   };
   const onKeyDown = (event) => {
     const dir = KEYS[event.key];
@@ -120,6 +124,7 @@ export function createEngine({ canvas, map, theme, start, reducedMotion = false,
     teleport(tile, dir = "down") { held = null; self.keyboard = false; self.walk = { path: [{ x: tile.x, y: tile.y }], startedAt: now(), dir }; self.arrived = true; schedule(); },
     on(type, listener) { if (!Object.hasOwn(listeners, type)) throw new Error("Unknown engine event: " + type); listeners[type].push(listener); return () => { listeners[type] = listeners[type].filter((item) => item !== listener); }; },
     say(text, ms = 8000) { self.bubble = { text: String(text), until: now() + ms }; schedule(); },
+    setPicking(handler) { picking = typeof handler === "function" ? handler : null; },
     setInteractive(value) { interactive = Boolean(value); if (!interactive) { held = null; keyStop(); } },
     setSelf({ id, name }) { if (id) self.id = id; self.name = name; schedule(); },
     setTheme(next) { current = next; renderer.setTheme(next); schedule(); },

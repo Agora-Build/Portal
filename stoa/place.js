@@ -3,7 +3,7 @@ import { createLimiter, writeMessage, writeState } from "../world/protocol.js";
 
 // One channel's live layer: who is there, what they say, and your own movement published within the budget.
 // The caller merges people from every open place, so a space can later span several area-of-interest cells.
-export async function openPlace({ live, map, engine, self, channel, onPeople = () => {}, onSay = () => {}, onRefresh = () => {}, quiet = false, now = () => Date.now(), later }) {
+export async function openPlace({ live, map, engine, self, channel, onPeople = () => {}, onSay = () => {}, onRefresh = () => {}, onDecor = () => {}, onRekey = () => {}, quiet = false, now = () => Date.now(), later }) {
   const guest = live.guest || quiet;
   const presence = createPresence({ map, self: live.userId, now });
   const moves = createLimiter({ perSecond: 4, burst: 4, now, later }), chats = createLimiter({ perSecond: 1, burst: 3, now, later });
@@ -16,6 +16,8 @@ export async function openPlace({ live, map, engine, self, channel, onPeople = (
       if (!message) return;
       if (message.t === "say") onSay({ name: message.from.name, text: message.text, self: false });
       if (message.t === "refresh") onRefresh(message.from.id);
+      if (message.t === "decor") onDecor(message.from.id, message.version);
+      if (message.t === "rekey") onRekey(message.from.id);
       show();
     },
     presence(change) {
@@ -51,6 +53,8 @@ export async function openPlace({ live, map, engine, self, channel, onPeople = (
       return true;
     },
     refresh() { if (!guest) publish({ t: "refresh" }); },
+    decorChanged(version) { if (!guest) publish({ t: "decor", version }); },
+    rekey() { return guest ? Promise.resolve(false) : publish({ t: "rekey" }); },
     setBlocked(list) { presence.setBlocked(list); show(); },
     async close() { open = false; for (const stop of stops) stop(); await live.leave(channel.name); }
   };

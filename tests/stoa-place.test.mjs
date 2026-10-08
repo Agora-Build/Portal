@@ -195,3 +195,34 @@ test("a 401 ends the lease, but a 429 or a network error keeps it going", async 
     assert.deepEqual([losses.length, stopped], ends ? [1, 1] : [0, 0], String(status));
   }
 });
+
+test("decor and rekey notices reach the caller with who sent them, and can be published", async () => {
+  const live = fakeLive({ who: [{ userId: ada, states: state(22, 17, "Ada") }] }), engine = fakeEngine(), seen = [];
+  const place = await openPlace({ live, map: plaza, engine, self: { name: "Me" }, channel: { name: "room-1", key: null, spaceId: "lot-x" }, onDecor: (from, version) => seen.push(["decor", from, version]), onRekey: (from) => seen.push(["rekey", from]) });
+  live.handlers.message(ada, JSON.stringify({ t: "decor", version: 2 }));
+  live.handlers.message(ada, JSON.stringify({ t: "rekey" }));
+  live.handlers.message(bo, JSON.stringify({ t: "rekey" }));
+  const adaId = "account:72a639ba-3a45-4afe-936b-222222222222";
+  assert.deepEqual(seen, [["decor", adaId, 2], ["rekey", adaId]], "people without presence are ignored");
+  place.decorChanged(5);
+  assert.equal(await place.rekey(), true);
+  assert.deepEqual(live.published.slice(-2), [{ t: "decor", version: 5 }, { t: "rekey" }]);
+});
+test("watchers never publish decor or rekey notices", async () => {
+  const { live, place } = await opened({ quiet: true });
+  place.decorChanged(1);
+  assert.equal(await place.rekey(), false);
+  assert.deepEqual(live.published, []);
+});
+test("a heartbeat can be run at once, and does nothing after the lease stops", async () => {
+  const accesses = [], losses = [];
+  let replies = [{ channel: "c3", key: null, blocked: [], hostId: null }, Object.assign(new Error("Gone"), { status: 410 })];
+  const api = async () => { const reply = replies.shift(); if (reply instanceof Error) throw reply; return reply; };
+  const lease = createLease({ api, spaceId: "lot-x", onAccess: (access) => accesses.push(access.channel), onLost: (error) => losses.push(error.status), repeat: () => 1, stopRepeat() {} });
+  await lease.beatNow();
+  await lease.beatNow();
+  assert.deepEqual([accesses, losses], [["c3"], [410]]);
+  replies = [{ channel: "c4" }];
+  await lease.beatNow();
+  assert.deepEqual(accesses, ["c3"], "a stopped lease does not beat");
+});

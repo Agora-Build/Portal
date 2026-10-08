@@ -3,12 +3,15 @@ export function createLease({ api, spaceId, onAccess = () => {}, onLost = () => 
   const base = "/api/spaces/" + spaceId;
   let timer = null, stopped = false;
   const stop = () => { stopped = true; if (timer !== null) { stopRepeat(timer); timer = null; } };
-  timer = repeat(async () => {
+  const beat = async () => {
     try { const access = await api(base + "/heartbeat", { method: "POST" }); if (!stopped) onAccess(access); }
     catch (error) { if (!stopped && [401, 403, 404, 410].includes(error.status)) { stop(); onLost(error); } }
-  }, every);
+  };
+  timer = repeat(beat, every);
   return {
     stop,
+    // An extra heartbeat right away, for when the host says access has changed.
+    beatNow: () => stopped ? Promise.resolve() : beat(),
     async leave() { stop(); try { await api(base + "/leave", { method: "POST" }); } catch { /* the lease expires on its own */ } },
     leaveOnUnload() { stop(); beacon(base + "/leave"); }
   };

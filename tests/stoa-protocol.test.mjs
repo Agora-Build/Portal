@@ -159,3 +159,9 @@ test("a move that starts far from where the person is is dropped", () => {
   assert.deepEqual(room.list()[0].walk.path, [{ x: 21, y: 17 }]);
   assert.ok(room.message(ada, writeMessage({ t: "move", path: [{ x: 21, y: 15 }, { x: 21, y: 14 }], startedAt: 1000 })), "two tiles away still counts as the same walk");
 });
+
+test("decor and rekey notices are read strictly", () => {
+  assert.deepEqual(readMessage(JSON.stringify({ t: "decor", version: 3 }), plaza), { t: "decor", version: 3 });
+  for (const version of [0, -1, 1.5, "3", undefined, null]) assert.equal(readMessage(JSON.stringify({ t: "decor", version }), plaza), null, String(version));
+  assert.deepEqual(readMessage(JSON.stringify({ t: "rekey", extra: 1 }), plaza), { t: "rekey" });
+});

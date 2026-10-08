@@ -274,3 +274,31 @@ test("someone walking in from off-screen is drawn as they arrive, even with noth
   assert.ok(far, "the walker is drawn once they come into view");
   assert.equal(far.x, 11, "and at their real position while still walking");
 });
+
+test("each drawn frame is reported with the camera and where the drawn people stand", () => {
+  const { engine, flush } = setup();
+  const frames = [];
+  engine.on("draw", (frame) => frames.push(frame));
+  engine.setOthers([{ id: "bo", name: "Bo", walk: { path: [{ x: 22, y: 17 }], startedAt: 0 } }]); flush();
+  const last = frames.at(-1);
+  assert.equal(last.tileSize, 32);
+  assert.ok(last.camera.zoom > 0);
+  assert.deepEqual(last.avatars.map(({ id, x, y, self }) => [id, x, y, self]), [["self", 21, 17, true], ["bo", 22, 17, false]]);
+});
+test("picking hands clicked tiles to the picker instead of walking, even with input off", () => {
+  const { engine, handlers, events, drawn } = setup();
+  const picked = [];
+  engine.setInteractive(false);
+  engine.setPicking((tile) => picked.push(tile));
+  const { camera } = drawn.at(-1);
+  const click = () => handlers.pointerup({ button: 0, clientX: (23 * 32 + 16 - camera.x) * camera.zoom, clientY: (17 * 32 + 16 - camera.y) * camera.zoom });
+  click();
+  assert.deepEqual(picked, [{ x: 23, y: 17 }]);
+  assert.equal(events.move.length, 0);
+  engine.setPicking(null);
+  click();
+  assert.equal(events.move.length, 0, "with picking off, input off still means no walking");
+  engine.setInteractive(true);
+  click();
+  assert.equal(events.move.length, 1);
+});
