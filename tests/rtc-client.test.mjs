@@ -113,7 +113,8 @@ test("leaving while still joining releases everything and never joins", async ()
   await tick();
   const leaving = rtc.leave();
   release(credentials());
-  await leaving; await joining;
+  await leaving;
+  assert.equal(await joining, false);
   assert.equal(sdk.clients.length, 0);
   assert.equal(sdk.tracks.length, 0);
 });
@@ -141,4 +142,39 @@ test("an unexpected disconnect ends the call", async () => {
   for (let index = 0; index < 5; index += 1) await tick();
   assert.deepEqual(ended, ["The call disconnected. Join again when you're ready."]);
   assert.equal(rtc.snapshot().joined, false);
+});
+test("leaving starts leaving the connection before a pending join settles", async () => {
+  const sdk = fakeAgora(), create = sdk.createClient;
+  let finish;
+  sdk.createClient = () => { const client = create(); client.join = () => new Promise((resolve) => { finish = resolve; }); return client; };
+  const { rtc } = make({ sdk });
+  const joining = rtc.join({ audio: true });
+  for (let index = 0; index < 3; index += 1) await tick();
+  const leaving = rtc.leave();
+  assert.equal(rtc.leave(), leaving, "a second leave shares the first");
+  await tick();
+  assert.equal(sdk.clients[0].left, true);
+  finish();
+  await leaving;
+  assert.equal(await joining, false);
+});
+test("the browser ending a share while its client is joining reports no error", async () => {
+  const sdk = fakeAgora(), create = sdk.createClient;
+  let finish;
+  sdk.createClient = () => { const client = create(); if (sdk.clients.length === 2) client.join = () => new Promise((resolve) => { finish = resolve; }); return client; };
+  const { rtc, errors } = make({ sdk });
+  await rtc.join({});
+  const sharing = rtc.share();
+  for (let index = 0; index < 5; index += 1) await tick();
+  sdk.tracks.at(-1).listeners["track-ended"]();
+  await tick();
+  finish();
+  assert.equal(await sharing, false);
+  assert.deepEqual(errors, []);
+  assert.equal(rtc.snapshot().screen, false);
+});
+test("actions before joining resolve false", async () => {
+  const { rtc } = make();
+  assert.equal(await rtc.toggle("audio"), false);
+  assert.equal(await rtc.share(), false);
 });

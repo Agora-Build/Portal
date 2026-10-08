@@ -9,7 +9,7 @@ export function mediaError(error) {
 }
 
 export function createRtcClient({ AgoraRTC, fetchCredentials, onChange = () => {}, onError = () => {}, onEnded = () => {} }) {
-  let client = null, credentials = null, audio = null, video = null, screen = null, joined = false, busy = false, closed = false, renewing = null, audioBlocked = false, work = Promise.resolve();
+  let client = null, credentials = null, audio = null, video = null, screen = null, joined = false, busy = false, closed = false, renewing = null, audioBlocked = false, work = Promise.resolve(), leaving = null;
   const remote = new Map();
   const snapshot = () => ({ joined, busy, closed, uid: credentials?.uid || null, screenUid: credentials?.screenUid || null, audio: Boolean(audio?.enabled), video: Boolean(video?.enabled), screen: Boolean(screen), audioBlocked, peers: [...remote.values()].map((peer) => ({ uid: peer.uid, audio: peer.audio, video: peer.video, screen: isScreen(peer.uid) })) });
   const changed = () => { if (!closed) onChange(snapshot()); };
@@ -18,7 +18,7 @@ export function createRtcClient({ AgoraRTC, fetchCredentials, onChange = () => {
     if (busy || closed) return Promise.resolve(false);
     busy = true; changed();
     work = (async () => {
-      try { await action(); return true; }
+      try { return (await action()) !== false && !closed; }
       catch (error) { if (!closed) onError(mediaError(error)); return false; }
       finally { busy = false; changed(); }
     })();
@@ -82,15 +82,19 @@ export function createRtcClient({ AgoraRTC, fetchCredentials, onChange = () => {
     for (const track of current.tracks) { track.stop(); track.close(); }
     await current.client.leave().catch(() => {});
   }
-  async function leave() {
-    if (closed) return;
+  function leave() {
+    if (leaving) return leaving;
     closed = true;
-    // Devices are released at once, even while a join or publish is still pending.
-    for (const track of [audio, video, ...(screen?.tracks || [])]) track?.close();
-    await work.catch(() => {});
-    await Promise.allSettled([stopScreen(), (async () => { client?.removeAllListeners(); await client?.leave(); })()]);
-    for (const track of [audio, video]) track?.close();
-    audio = null; video = null; joined = false; remote.clear();
+    leaving = (async () => {
+      // Devices are released and the connections start leaving at once, even while a join or publish is still pending.
+      for (const track of [audio, video, ...(screen?.tracks || [])]) track?.close();
+      const early = [client?.leave().catch(() => {}), screen?.client.leave().catch(() => {})];
+      await Promise.allSettled([...early, work.catch(() => {})]);
+      await Promise.allSettled([stopScreen(), (async () => { client?.removeAllListeners(); await client?.leave(); })()]);
+      for (const track of [audio, video]) track?.close();
+      audio = null; video = null; joined = false; remote.clear();
+    })();
+    return leaving;
   }
   return {
     snapshot,
@@ -102,7 +106,7 @@ export function createRtcClient({ AgoraRTC, fetchCredentials, onChange = () => {
       client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
       watch();
       try { await client.join(credentials.appId, credentials.channel, credentials.token, credentials.uid); }
-      catch (error) { client.removeAllListeners(); await client.leave().catch(() => {}); client = null; throw error; }
+      catch (error) { client.removeAllListeners(); await client.leave().catch(() => {}); client = null; credentials = null; throw error; }
       if (closed) return;
       joined = true;
       for (const [kind, wanted] of [["audio", withAudio], ["video", withVideo]]) {
@@ -110,30 +114,37 @@ export function createRtcClient({ AgoraRTC, fetchCredentials, onChange = () => {
       }
     }),
     toggle: (kind) => operate(async () => {
-      if (!joined) return;
+      if (!joined) return false;
       const track = kind === "audio" ? audio : video;
       if (!track) { await enable(kind); return; }
       await track.setEnabled(!track.enabled);
       if (kind === "video" && !track.enabled) track.stop();
     }),
     share: () => operate(async () => {
-      if (!joined) return;
+      if (!joined) return false;
       if (screen) { await stopScreen(); return; }
       // Capture during the click, before any network work, as browsers require.
       const captured = await AgoraRTC.createScreenVideoTrack({ encoderConfig: "1080p_1" }, "auto");
       const tracks = Array.isArray(captured) ? captured : [captured];
-      if (closed) { for (const track of tracks) track.close(); return; }
+      if (closed) { for (const track of tracks) track.close(); return false; }
       const second = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
       screen = { client: second, tracks };
+      second.on("connection-state-change", (next, previous) => { if (next === "DISCONNECTED" && previous !== "DISCONNECTING" && !closed && screen?.client === second) stopScreen().then(changed); });
       tracks[0].on("track-ended", () => { if (!closed && screen?.client === second) stopScreen().then(changed); });
       try {
         await renew();
-        if (closed || screen?.client !== second) return;
+        if (closed || screen?.client !== second) return false;
         watchToken(second);
         await second.join(credentials.appId, credentials.channel, credentials.screenToken, credentials.screenUid);
-        if (closed || screen?.client !== second) return;
+        if (closed || screen?.client !== second) return false;
         await second.publish(tracks);
-      } catch (error) { await stopScreen(); throw error; }
+      } catch (error) {
+        // Already stopped elsewhere (the browser ended it, or the call closed): nothing to report.
+        const stopped = screen?.client !== second;
+        await stopScreen();
+        if (stopped) return false;
+        throw error;
+      }
     }),
     // Plays someone's video into an element; false when there is nothing to show.
     play(uid, element) {
