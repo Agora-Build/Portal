@@ -228,20 +228,27 @@ test("a heartbeat can be run at once, and does nothing after the lease stops", a
   await lease.beatNow();
   assert.deepEqual(accesses, ["c3"], "a stopped lease does not beat");
 });
-test("extra heartbeats run one at a time and at most one every two seconds, unless forced", async () => {
+test("extra heartbeats run one at a time and at most one every two seconds, and a held-back one runs later", async () => {
   let time = 0, calls = 0;
-  const pending = [];
+  const pending = [], timers = [];
   const api = () => { calls += 1; return new Promise((resolve) => pending.push(resolve)); };
-  const lease = createLease({ api, spaceId: "s", repeat: () => 1, stopRepeat() {}, now: () => time });
+  const lease = createLease({ api, spaceId: "s", repeat: () => 1, stopRepeat() {}, now: () => time, later: (callback, delay) => { timers.push({ callback, delay }); return timers.length; }, cancel() {} });
   const first = lease.beatNow();
-  lease.beatNow(); lease.beatNow({ force: true });
-  assert.equal(calls, 1, "one in flight at a time, even when forced");
-  pending.shift()({ channel: "c" }); await first;
-  time += 1999; lease.beatNow();
-  assert.equal(calls, 1, "a second request within two seconds is skipped");
+  lease.beatNow(); lease.beatNow();
+  assert.equal(calls, 1, "one in flight at a time");
+  pending.shift()({ channel: "c" }); await first; await tick();
+  assert.equal(calls, 1, "requests made while one was in flight become one trailing beat, which waits for the gap");
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].delay, 2000);
+  time += 2000; timers.shift().callback();
+  assert.equal(calls, 2, "the trailing beat runs once the gap has passed");
+  pending.shift()({ channel: "c" }); await tick(); await tick();
+  time += 500; lease.beatNow(); lease.beatNow();
+  assert.deepEqual([calls, timers.length], [2, 1], "repeated requests inside the gap share one timer");
   lease.beatNow({ force: true });
-  assert.equal(calls, 2, "a forced one is not held back by the gap");
+  assert.equal(calls, 3, "a forced one is not held back by the gap");
   pending.shift()({ channel: "c" }); await tick();
-  time += 2000; lease.beatNow();
-  assert.equal(calls, 3);
+  lease.stop();
+  assert.equal(await lease.beatNow(), undefined);
+  assert.equal(calls, 3, "nothing runs after stop");
 });
