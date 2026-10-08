@@ -8,7 +8,9 @@ export const outsideDoor = (map, lot) => [[0, 1], [0, -1], [1, 0], [-1, 0]].map(
 
 // Moves the person between the plaza, lot rooms, and user spaces: entry leases on the server, channels on Signaling.
 export function createStage({ api, map, engine, panel, live, self, plaza, createLease = realLease }) {
-  let places = [], lease = null, here = null, busy = false, turn = 0;
+  let places = [], lease = null, here = null, chain = Promise.resolve();
+  // State changes run strictly one at a time, each re-checking its preconditions when it starts.
+  const transition = (task) => (chain = chain.then(task, task).catch((error) => panel.say(error.message || "Something went wrong.")));
   const doors = new Map(map.lots.map((lot) => [lot.door.x + "," + lot.door.y, lot]));
   const exits = new Map(map.lots.map((lot) => [lot.entry.x + "," + (lot.entry.y + 1), lot]));
   // Cell-ready: a space may later span several channels; people from all of them are merged by id.
@@ -42,30 +44,31 @@ export function createStage({ api, map, engine, panel, live, self, plaza, create
     }
     if (here !== next) return;
     if (next.leased) {
-      const made = createLease({ api, spaceId: next.space.id, onAccess: (access) => { if (lease === made) onAccess(access); }, onLost: () => { if (lease === made) lost(); } });
+      const made = createLease({ api, spaceId: next.space.id, onAccess: (access) => { if (lease === made) onAccess(access, next); }, onLost: () => { transition(() => lost(made)); } });
       lease = made;
     }
     panel.canTalk(next.leased ? self.signedIn : false);
   }
 
-  async function onAccess(access) {
-    if (!here?.leased) return;
+  function onAccess(access, at) {
+    if (here !== at) return;
     if (places[0] && access.channel !== places[0].channel) {
-      const next = { ...here, access: { ...here.access, ...access }, start: null };
-      here = next;
-      await live?.renew().catch(() => {});
-      if (here === next) await settle(next);
+      transition(async () => {
+        if (here !== at || !places[0] || places[0].channel === access.channel) return;
+        await live?.renew().catch(() => {});
+        if (here === at) await settle({ ...at, access: { ...at.access, ...access }, start: null });
+      });
       return;
     }
     for (const place of places) place.setBlocked(access.blocked || []);
     if (here.kind !== "plaza" && access.hostId !== here.access.hostId) { here.access = { ...here.access, ...access }; refreshRoom(); }
   }
 
-  async function lost() {
-    if (!here) return;
-    if (here.kind === "lot") { const lot = here.lot; await toPlaza(outsideDoor(map, lot)); panel.say("You're no longer in " + lot.title + "."); }
-    else if (here.kind === "space") { const at = here; await settle({ kind: "left", space: here.space, bounds: here.bounds }); if (here.kind === "left" && here.space === at.space) { engine.setInteractive(false); panel.say("You're no longer in this space."); } }
-    else await toPlaza(null);
+  async function lost(from) {
+    if (!here || lease !== from) return;
+    if (here.kind === "lot") { const lot = here.lot; await toPlazaTask(outsideDoor(map, lot)); panel.say("You're no longer in " + lot.title + "."); }
+    else if (here.kind === "space") { await settle({ kind: "left", space: here.space, bounds: here.bounds }); engine.setInteractive(false); panel.say("You're no longer in this space."); }
+    else await toPlazaTask(null);
   }
 
   async function refreshRoom() {
@@ -77,76 +80,60 @@ export function createStage({ api, map, engine, panel, live, self, plaza, create
     } catch { /* the next heartbeat reports a lost lease */ }
   }
 
-  async function toPlaza(start, welcome) {
-    const mine = ++turn;
+  async function toPlazaTask(start, welcome) {
     panel.showPlaza();
     panel.clearMessages();
     const watch = async (message, full) => {
       await settle({ kind: "plaza", space: { id: "plaza" }, access: plaza.channel ? { channel: plaza.channel, key: null, blocked: [] } : null, bounds: plaza.bounds, start, leased: false, watch: true, full });
       engine.setInteractive(false);
-      if (mine === turn) panel.say(message);
+      panel.say(message);
     };
     if (!self.signedIn) return watch("You're watching the plaza. Sign in to walk and talk.");
     try {
       const access = await api("/api/spaces/plaza/enter", { method: "POST", body: "{}" });
-      if (mine !== turn) { api("/api/spaces/plaza/leave", { method: "POST" }).catch(() => {}); return; }
       panel.hideOffer();
       await settle({ kind: "plaza", space: access.space, access, bounds: plaza.bounds, start, leased: true });
-      if (mine !== turn) return;
       engine.setInteractive(true);
       panel.say(welcome || "You're on the plaza. Walk to a room to see who's there.");
     } catch (error) {
-      if (mine !== turn) return;
       if (error.status === 409 && error.data?.full) { panel.showOffer(error.data.offer); return watch("The plaza is full right now. You can watch, or go to one of your spaces.", true); }
       return watch(error.message);
     }
   }
 
-  async function enterLot(lot) {
-    if (busy) return;
-    if (!self.signedIn) { panel.say("Sign in to step into " + lot.title + "."); return; }
-    busy = true;
-    const mine = ++turn;
+  async function enterLotTask(lot) {
+    if (!here || here.kind !== "plaza" || !here.leased) return;
+    const at = engine.position();
+    if (at.x !== lot.door.x || at.y !== lot.door.y) return;
     try {
       const access = await api("/api/spaces/lot-" + lot.slug + "/enter", { method: "POST", body: "{}" });
-      if (mine !== turn) { api("/api/spaces/lot-" + lot.slug + "/leave", { method: "POST" }).catch(() => {}); return; }
       panel.clearMessages();
       await live?.renew().catch(() => {});
-      if (mine !== turn) return;
       await settle({ kind: "lot", space: access.space, lot, access, bounds: lot.interior, start: lot.entry, leased: true });
-      if (mine !== turn) return;
       showRoom(access.space, access.hostId);
       panel.say(access.firstIn ? "You're the first one in " + lot.title + ", so you're the host. Set a topic so people know what it's about." : "You stepped into " + lot.title + ".");
-    } catch (error) { if (mine === turn) panel.say(error.status === 409 ? lot.title + " is full right now." : error.message); }
-    finally { busy = false; }
+    } catch (error) { panel.say(error.status === 409 ? lot.title + " is full right now." : error.message); }
   }
 
-  async function openSpace(id, invite) {
+  async function openSpaceTask(id, invite) {
     if (!self.signedIn) { engine.setInteractive(false); panel.say("Sign in to step into this space."); return; }
-    const mine = ++turn;
     try {
       const access = await api("/api/spaces/" + encodeURIComponent(id) + "/enter", { method: "POST", body: JSON.stringify(invite ? { invite } : {}) });
-      if (mine !== turn) { api("/api/spaces/" + encodeURIComponent(id) + "/leave", { method: "POST" }).catch(() => {}); return; }
       panel.clearMessages();
       await live?.renew().catch(() => {});
-      if (mine !== turn) return;
       await settle({ kind: "space", space: access.space, access, invite, bounds: null, start: null, leased: true });
-      if (mine !== turn) return;
       engine.setInteractive(true);
       showRoom(access.space, access.hostId);
       panel.say("You're in " + access.space.title + ".");
-    } catch (error) { if (mine === turn) { engine.setInteractive(false); panel.say(error.message); } }
+    } catch (error) { engine.setInteractive(false); panel.say(error.message); }
   }
 
-  async function leaveRoom() {
-    if (!here || here.kind === "plaza" || busy) return;
-    busy = true;
-    try {
-      const { kind, lot } = here;
-      await lease?.leave(); lease = null;
-      if (kind === "lot") { await toPlaza(outsideDoor(map, lot)); panel.say("You're back on the plaza."); }
-      else location.assign("/stoa/");
-    } finally { busy = false; }
+  async function leaveRoomTask() {
+    if (!here || (here.kind !== "lot" && here.kind !== "space")) return;
+    const { kind, lot } = here;
+    await lease?.leave(); lease = null;
+    if (kind === "lot") { await toPlazaTask(outsideDoor(map, lot)); panel.say("You're back on the plaza."); }
+    else location.assign("/stoa/");
   }
 
   async function setTopic(topic, tagsText) {
@@ -163,7 +150,11 @@ export function createStage({ api, map, engine, panel, live, self, plaza, create
   }
 
   return {
-    toPlaza, enterLot, openSpace, leaveRoom, setTopic,
+    toPlaza: (start, welcome) => transition(() => toPlazaTask(start, welcome)),
+    enterLot: (lot) => { if (!self.signedIn) { panel.say("Sign in to step into " + lot.title + "."); return Promise.resolve(); } return transition(() => enterLotTask(lot)); },
+    openSpace: (id, invite) => transition(() => openSpaceTask(id, invite)),
+    leaveRoom: () => transition(leaveRoomTask),
+    setTopic,
     say(text) {
       if (here?.kind === "left") { panel.say("You're no longer in this space."); return false; }
       if (!places.length) { panel.say(self.signedIn ? "Messages need the live connection." : "Sign in to talk."); return false; }
