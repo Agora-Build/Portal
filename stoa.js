@@ -5,6 +5,7 @@ import { createLive } from "./world/signaling.js";
 import { loadAgora } from "./world/sdk.js";
 import { createPanel } from "./stoa/panel.js";
 import { createCallView } from "./stoa/call.js";
+import { createDecorEditor } from "./stoa/decor.js";
 import { createStage, outsideDoor } from "./stoa/stage.js";
 
 const root = document.querySelector("#stoa");
@@ -33,7 +34,7 @@ failure(spaceResult, "This space"); failure(worldResult, "The map"); failure(the
 const space = spaceResult.value?.space || null;
 if (space) { document.querySelector("#stoa-title").textContent = space.title; document.title = space.title + " | Agora Build"; }
 
-let map = null, engine = null, minimal = stored.get() === "true", preview = null, plazaBounds = null, active = () => null, call = null;
+let map = null, engine = null, minimal = stored.get() === "true", preview = null, plazaBounds = null, active = () => null, call = null, decor = null;
 try { if (worldResult.status === "fulfilled") map = parseMap(worldResult.value); } catch (error) { problems.push("The map is not valid (" + error.message + ")."); }
 let summaries = new Map((spacesResult.value?.rooms || []).map((room) => [room.slug, room]));
 const lot = roomSlug && map ? map.lots.find((entry) => entry.slug === roomSlug) || null : null;
@@ -93,6 +94,13 @@ panel.on({
   say: (text) => stage ? stage.say(text) : (panel.say(unavailable), false),
   topic: (topic, tags) => stage?.setTopic(topic, tags),
   leave: () => stage?.leaveRoom(),
+  decorate: () => {
+    if (!stage?.canManage()) { panel.say("Only the host can decorate."); return; }
+    stage.setEditing(true);
+    decor?.open({ items: stage.decor(), area: stage.decorArea() });
+    panel.say("Decor mode is on. Choose a decoration, then click the map or use Place in front of me.");
+    canvas.focus();
+  },
   start: async () => { try { const created = await api("/api/spaces", { method: "POST", body: JSON.stringify({ title: self.name + "'s space" }) }); location.assign("/stoa/s/" + created.space.id); } catch (error) { panel.say(error.message); } },
   signin: () => openSignIn()
 });
@@ -130,7 +138,8 @@ if (engine) {
   engine.setSelf({ id: self.id || undefined, name: self.name });
   call = createCallView({ engine, api, self, people: () => stage?.people() || [], say: (text) => panel.say(text) });
   call.setLayout(active().video);
-  stage = createStage({ api, map, engine, panel, live: null, self, plaza: spaceId ? null : { bounds: plazaBounds, channel: null }, onRoom: (room) => room ? call.enter(room.id) : call.exit(), onPeople: () => call.refresh() });
+  decor = createDecorEditor({ canvas, engine, map, say: (text) => panel.say(text), onSave: (items) => stage.saveDecor(items), onClose: () => stage.setEditing(false) });
+  stage = createStage({ api, map, engine, panel, live: null, self, plaza: spaceId ? null : { bounds: plazaBounds, channel: null }, onRoom: (room) => { decor?.abort(); if (room) call.enter(room.id); else call.exit(); }, onPeople: () => call.refresh() });
   engine.on("arrive", (tile) => stage.onArrive(tile));
   // Leaving the page releases the entry lease and, as far as the browser allows, the Signaling login.
   addEventListener("pagehide", () => { call.exit(); stage.unload(); live?.close().catch(() => {}); });

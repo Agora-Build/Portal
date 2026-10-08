@@ -50,3 +50,15 @@ test("a reason replaces the sign-in prompt for people who are signed in", () => 
   panel.canTalk(true);
   assert.equal(signin.hidden, true);
 });
+
+test("the Decorate button shows only for the host and calls the decorate handler", () => {
+  const doc = fakeDocument(), panel = createPanel(doc);
+  let opened = 0;
+  panel.on({ decorate: () => { opened += 1; } });
+  panel.showRoom({ kicker: "LOT ROOM", title: "AI agents", topic: null, tags: [], host: false, leaveLabel: "Back" });
+  assert.equal(doc.querySelector("#stoa-decor-open").hidden, true);
+  panel.showRoom({ kicker: "LOT ROOM", title: "AI agents", topic: null, tags: [], host: true, leaveLabel: "Back" });
+  assert.equal(doc.querySelector("#stoa-decor-open").hidden, false);
+  doc.querySelector("#stoa-decor-open").listeners.click();
+  assert.equal(opened, 1);
+});

@@ -598,3 +598,12 @@ dialog h2 { font-size: 30px; line-height: 1.25; font-weight: 500; letter-spacing
 .stoa-call-controls [aria-pressed="true"] { background: #e6ebdc; border-color: #98a98a; }
 .stoa-call-leave { color: var(--accent); }
 @media (prefers-reduced-motion: no-preference) { .stoa-tile.is-floating { transition: opacity 0.2s; } }
+
+.stoa-decor { margin: 10px 0 14px; padding: 12px; border: 1px solid var(--line); border-radius: 4px; }
+.stoa-decor-selected { margin: 0 0 8px; font-size: 12px; color: var(--muted); }
+.stoa-palette { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.stoa-palette [aria-pressed="true"] { background: #e6ebdc; border-color: #98a98a; }
+.stoa-decor-list { list-style: none; margin: 8px 0; padding: 0; max-height: 160px; overflow-y: auto; font-size: 12px; }
+.stoa-decor-list button { background: none; border: 0; padding: 3px 0; font: inherit; color: inherit; cursor: pointer; text-align: left; }
+.stoa-decor-list [aria-current="true"] { color: var(--accent); font-weight: 600; }
+.stoa-decor-actions { display: flex; gap: 6px; }

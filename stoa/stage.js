@@ -10,7 +10,7 @@ export const outsideDoor = (map, lot) => [[0, 1], [0, -1], [1, 0], [-1, 0]].map(
 const REFRESH_GAP = 5000;
 // `live` may be null at first and attached later with attachLive, so the page never waits on the SDK.
 export function createStage({ api, map, engine, panel, live: firstLive, self, plaza, onRoom = () => {}, onPeople = () => {}, createLease = realLease, schedule = (callback) => typeof requestAnimationFrame === "function" ? requestAnimationFrame(callback) : setTimeout(callback, 16), now = () => Date.now(), later = (callback, delay) => setTimeout(callback, delay) }) {
-  let live = firstLive, places = [], lease = null, here = null, chain = Promise.resolve(), drawing = false, everyone = [], roomId = null;
+  let live = firstLive, places = [], lease = null, here = null, chain = Promise.resolve(), drawing = false, everyone = [], roomId = null, currentDecor = [], editing = false;
   // State changes run strictly one at a time, each re-checking its preconditions when it starts.
   const transition = (task) => (chain = chain.then(task, task).catch((error) => panel.say(error.message || "Something went wrong.")));
   const doors = new Map(map.lots.map((lot) => [lot.door.x + "," + lot.door.y, lot]));
@@ -31,14 +31,18 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
       onPeople(list);
     });
   };
-  const showRoom = (space, hostId) => panel.showRoom({ kicker: here?.kind === "lot" ? "LOT ROOM" : space.visibility === "private" ? "PRIVATE SPACE" : "UNLISTED SPACE", title: space.title, topic: space.topic, tags: space.tags || [], host: Boolean(self.id) && hostId === self.id, leaveLabel: here?.kind === "lot" ? "Back to the plaza" : "Leave this space" });
+  const mine = (id) => Boolean(id) && (self.ids || [self.id]).includes(id);
+  const canManage = () => Boolean(here && (here.kind === "lot" || here.kind === "space") && here.leased && self.signedIn && (mine(here.access?.hostId) || mine(here.space?.ownerId)));
+  const showDecor = (items) => { currentDecor = items || []; if (!editing) engine.setDecor(currentDecor); };
+  const showRoom = (space, hostId) => panel.showRoom({ kicker: here?.kind === "lot" ? "LOT ROOM" : space.visibility === "private" ? "PRIVATE SPACE" : "UNLISTED SPACE", title: space.title, topic: space.topic, tags: space.tags || [], host: Boolean(self.id) && (mine(hostId) || mine(space.ownerId)), leaveLabel: here?.kind === "lot" ? "Back to the plaza" : "Leave this space" });
 
   // Every transition claims `here` before it awaits anything; a superseded one stops as soon as it notices.
   async function settle(next) {
     here = next;
     // The call and the decor editor belong to a room, so the page hears about room changes, not channel changes.
     const room = next.leased && (next.kind === "lot" || next.kind === "space") ? next.space : null;
-    if ((room?.id || null) !== roomId) { roomId = room?.id || null; onRoom(room); }
+    if ((room?.id || null) !== roomId) { roomId = room?.id || null; editing = false; onRoom(room); }
+    showDecor(next.space?.decor);
     lease?.stop(); lease = null;
     const old = places; places = [];
     await Promise.all(old.map((place) => place.close().catch(() => {})));
@@ -48,7 +52,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     showPeople();
     if (live && next.access?.channel) {
       try {
-        const place = await openPlace({ live, map, engine, self, quiet: Boolean(next.watch), channel: { name: next.access.channel, key: next.access.key || null, spaceId: next.space.id }, onPeople: showPeople, onSay: (entry) => { if (entry.failed) panel.say("That message didn't send."); else panel.addMessage(entry); }, onRefresh: (from) => { if (here === next && from && from === next.access?.hostId) refreshRoom(); } });
+        const place = await openPlace({ live, map, engine, self, quiet: Boolean(next.watch), channel: { name: next.access.channel, key: next.access.key || null, spaceId: next.space.id }, onPeople: showPeople, onSay: (entry) => { if (entry.failed) panel.say("That message didn't send."); else panel.addMessage(entry); }, onRefresh: (from) => { if (here === next && from && from === next.access?.hostId) refreshRoom(); }, onDecor: (from) => { if (here === next && from && (from === next.access?.hostId || from === next.space?.ownerId)) refreshRoom(); } });
         if (here !== next) { await place.close().catch(() => {}); return; }
         places = [place];
         place.setBlocked(next.access.blocked || []);
@@ -118,7 +122,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     if (!at || at.kind === "plaza" || !at.space) return;
     try {
       const { space } = await api("/api/spaces/" + at.space.id + (at.invite ? "?invite=" + encodeURIComponent(at.invite) : ""));
-      if (here === at) showRoom(space, space.hostId);
+      if (here === at) { showRoom(space, space.hostId); showDecor(space.decor); }
     } catch { /* the next heartbeat reports a lost lease */ }
   }
 
@@ -204,6 +208,23 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     leaveRoom,
     setTopic,
     people: () => everyone,
+    canManage,
+    decor: () => currentDecor,
+    decorArea: () => here?.kind === "lot" ? here.lot.interior : here?.kind === "space" ? { x: 0, y: 0, width: map.width, height: map.height } : null,
+    setEditing(value) { editing = Boolean(value); if (!editing) engine.setDecor(currentDecor); },
+    async saveDecor(items) {
+      const at = here;
+      if (!canManage()) { panel.say("Only the host can decorate."); return false; }
+      try {
+        const result = await api("/api/spaces/" + encodeURIComponent(at.space.id) + "/decor", { method: "PUT", body: JSON.stringify({ items }) });
+        if (here !== at) return false;
+        editing = false;
+        showDecor(result.decor);
+        for (const place of places) place.decorChanged(result.version);
+        panel.say("Decorations saved.");
+        return true;
+      } catch (error) { if (here === at) panel.say(error.message); return false; }
+    },
     say(text) {
       if (here?.kind === "left") { panel.say("You're no longer in this space."); return false; }
       if (!places.length) { panel.say(self.signedIn ? "Messages need the live connection." : "Sign in to talk."); return false; }

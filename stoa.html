@@ -33,6 +33,15 @@
                 <label>Tags <span class="optional">up to 5, separated by commas</span><input name="tags" maxlength="160" autocomplete="off"></label>
                 <button class="button button-small" type="submit">Set topic</button>
               </form>
+              <button class="button button-secondary button-small" type="button" id="stoa-decor-open" hidden>Decorate</button>
+              <section class="stoa-decor" id="stoa-decor" hidden aria-labelledby="stoa-decor-title">
+                <h3 class="stoa-panel-title" id="stoa-decor-title">Decorate</h3>
+                <p class="stoa-decor-selected" id="stoa-decor-selected" aria-live="polite"></p>
+                <div class="stoa-palette" id="stoa-palette" role="group" aria-label="Decorations"></div>
+                <button class="button button-secondary button-small" type="button" id="stoa-decor-here">Place in front of me</button>
+                <ul class="stoa-decor-list" id="stoa-decor-list" aria-label="Placed decorations"></ul>
+                <div class="stoa-decor-actions"><button class="button button-small" type="button" id="stoa-decor-save">Save decorations</button><button class="button button-secondary button-small" type="button" id="stoa-decor-cancel">Cancel</button></div>
+              </section>
               <section class="stoa-call" id="stoa-call" hidden aria-labelledby="stoa-call-title">
                 <h3 class="stoa-panel-title" id="stoa-call-title">Call</h3>
                 <p class="stoa-call-status" id="stoa-call-status" role="status" aria-live="polite"></p>

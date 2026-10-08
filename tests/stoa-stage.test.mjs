@@ -11,7 +11,7 @@ const deferred = () => { const d = {}; d.promise = new Promise((resolve, reject)
 const space = (id, title = id) => ({ id, title, topic: null, tags: [], visibility: "public" });
 
 function setup({ api, signedIn = true, withLive = true, clock = { time: 0, timers: [] }, ...options } = {}) {
-  const calls = { teleports: [], bounds: [], interactive: null, published: [], states: [], canTalk: [], reasons: [], showRoom: [], offer: 0, joined: [], left: [], others: 0, people: 0, handlers: {}, quiet: {} };
+  const calls = { decor: [], teleports: [], bounds: [], interactive: null, published: [], states: [], canTalk: [], reasons: [], showRoom: [], offer: 0, joined: [], left: [], others: 0, people: 0, handlers: {}, quiet: {} };
   const frames = [];
   const live = !withLive ? null : {
     userId: "a-me", guest: false, renew: async () => {},
@@ -20,7 +20,7 @@ function setup({ api, signedIn = true, withLive = true, clock = { time: 0, timer
   };
   const handlers = {}, pos = { x: lot.door.x, y: lot.door.y };
   const engine = {
-    teleport: (tile) => { calls.teleports.push(tile); }, setBounds: (bounds) => { calls.bounds.push(bounds); }, setOthers() { calls.others += 1; }, position: () => pos, setInteractive: (value) => { calls.interactive = value; }, facing: () => "down", say() {}, walkTo: () => true,
+    teleport: (tile) => { calls.teleports.push(tile); }, setBounds: (bounds) => { calls.bounds.push(bounds); }, setOthers() { calls.others += 1; }, position: () => pos, setDecor: (list) => { calls.decor.push(list); }, setInteractive: (value) => { calls.interactive = value; }, facing: () => "down", say() {}, walkTo: () => true,
     on(name, handler) { handlers[name] = handler; return () => {}; }
   };
   const panel = {
@@ -28,7 +28,7 @@ function setup({ api, signedIn = true, withLive = true, clock = { time: 0, timer
     canTalk: (value, reason) => { calls.canTalk.push(value); calls.reasons.push(reason); }, showRoom: (room) => calls.showRoom.push(room), showOffer: () => { calls.offer += 1; }
   };
   const leases = [];
-  const createLease = (options) => { const entry = { options, active: true, stop() { entry.active = false; }, async leave() { entry.active = false; }, leaveOnUnload() { entry.active = false; } }; leases.push(entry); return entry; };
+  const createLease = (options) => { const entry = { options, active: true, stop() { entry.active = false; }, async leave() { entry.active = false; }, leaveOnUnload() { entry.active = false; }, beatNow() { entry.beats = (entry.beats || 0) + 1; return Promise.resolve(); } }; leases.push(entry); return entry; };
   const stage = createStage({ api, map: plaza, engine, panel, live, self: { id: "a-me", name: "Me", signedIn }, plaza: { bounds: null, channel: "plaza-1" }, createLease, schedule: (callback) => frames.push(callback), now: () => clock.time, later: (callback, delay) => { clock.timers.push({ callback, delay }); return clock.timers.length; }, ...options });
   const flushFrames = () => { for (const callback of frames.splice(0)) callback(); };
   return { stage, calls, panel, leases, handlers, live, flushFrames, clock };
@@ -350,4 +350,44 @@ test("the merged people list is kept and reported each time it is rebuilt", asyn
   flushFrames();
   assert.deepEqual(lists.at(-1), ["Ada"]);
   assert.deepEqual(stage.people().map((person) => person.name), ["Ada"]);
+});
+
+test("a room's saved decorations are shown on entry and cleared on the plaza", async () => {
+  const items = [{ id: "d1", kind: "plant", x: lot.entry.x + 1, y: lot.entry.y, rotation: 0, variant: 0 }];
+  const api = async (path) => path === "/api/spaces/plaza/enter" ? access("plaza", "plaza-1") : path.endsWith("/enter") ? { ...access("lot-" + lot.slug, "lot-ch"), space: { ...space("lot-" + lot.slug), decor: items } } : {};
+  const { stage, calls } = setup({ api });
+  await stage.toPlaza(null);
+  await stage.enterLot(lot);
+  assert.deepEqual(calls.decor.at(-1), items);
+  assert.deepEqual(stage.decor(), items);
+  await stage.leaveRoom();
+  assert.deepEqual(calls.decor.at(-1), []);
+});
+test("saving decorations stores them, shows them, and tells the room the new version", async () => {
+  const saved = [{ id: "d2", kind: "lamp", x: lot.entry.x, y: lot.entry.y - 1, rotation: 0, variant: 0 }], puts = [];
+  const api = async (path, options) => {
+    if (path === "/api/spaces/plaza/enter") return access("plaza", "plaza-1");
+    if (path.endsWith("/enter")) return access("lot-" + lot.slug, "lot-ch");
+    if (path.endsWith("/decor")) { puts.push(JSON.parse(options.body)); return { decor: saved, version: 4 }; }
+    return {};
+  };
+  const { stage, calls } = setup({ api });
+  await stage.toPlaza(null);
+  await stage.enterLot(lot);
+  assert.equal(stage.canManage(), true, "the first one in hosts the lot");
+  assert.deepEqual(stage.decorArea(), lot.interior);
+  assert.equal(await stage.saveDecor(saved), true);
+  assert.deepEqual(puts, [{ items: saved }]);
+  assert.deepEqual(calls.decor.at(-1), saved);
+  assert.ok(calls.published.includes(JSON.stringify({ t: "decor", version: 4 })));
+});
+test("a decor notice from the host refetches the room; from anyone else it is ignored", async () => {
+  const { gets, calls } = await inLot();
+  const handlers = calls.handlers["lot-ch"];
+  handlers.message(guestUser, JSON.stringify({ t: "decor", version: 2 }));
+  await tick();
+  assert.equal(gets.length, 0);
+  handlers.message(hostUser, JSON.stringify({ t: "decor", version: 2 }));
+  await tick();
+  assert.equal(gets.length, 1);
 });
