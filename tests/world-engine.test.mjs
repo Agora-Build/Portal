@@ -302,3 +302,13 @@ test("picking hands clicked tiles to the picker instead of walking, even with in
   click();
   assert.equal(events.move.length, 1);
 });
+test("redraw draws one more frame, so a new draw listener hears the current view", () => {
+  const { engine, flush, frames } = setup();
+  const heard = [];
+  engine.on("draw", (frame) => heard.push(frame));
+  assert.equal(frames.length, 0, "an idle view requests no frames");
+  engine.redraw();
+  flush();
+  assert.equal(heard.length, 1);
+  assert.equal(heard[0].avatars[0].self, true);
+});

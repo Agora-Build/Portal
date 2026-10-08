@@ -11,7 +11,7 @@ export const describeSpace = (space) => [space.visibility === "private" ? "Priva
 export const memberPath = (id) => encodeURIComponent(id).replace(/%3A/gi, ":");
 export const inviteUrl = (origin, path) => new URL(path, origin).href;
 
-export function createSpacesUi({ onSaved = () => {}, doc = document, api, say = () => {}, navigate = (path) => location.assign(path), confirm = (text) => window.confirm(text), copy = (text) => navigator.clipboard.writeText(text), origin = location.origin }) {
+export function createSpacesUi({ onSaved = () => {}, onMembersChanged = () => {}, doc = document, api, say = () => {}, navigate = (path) => location.assign(path), confirm = (text) => window.confirm(text), copy = (text) => navigator.clipboard.writeText(text), origin = location.origin }) {
   const $ = (selector) => doc.querySelector(selector);
   const node = (tag, text, className) => { const element = doc.createElement(tag); if (text) element.textContent = text; if (className) element.className = className; return element; };
   const createDialog = $("#space-dialog"), createForm = $("#space-form"), manageDialog = $("#manage-dialog"), manageForm = $("#manage-form");
@@ -49,7 +49,7 @@ export function createSpacesUi({ onSaved = () => {}, doc = document, api, say = 
     people(space.roster || [], "#manage-members", "Remove", async (person) => {
       if (!confirm("Remove " + person.name + " from the members of " + space.title + "?")) return;
       $("#manage-error").textContent = "";
-      try { await api("/api/spaces/" + encodeURIComponent(space.id) + "/members/" + memberPath(person.id), { method: "DELETE" }); await load(space.id); say(person.name + " is no longer a member."); }
+      try { await api("/api/spaces/" + encodeURIComponent(space.id) + "/members/" + memberPath(person.id), { method: "DELETE" }); onMembersChanged(space.id); await load(space.id); say(person.name + " is no longer a member."); }
       catch (error) { $("#manage-error").textContent = error.message; }
     }, space.ownerId);
     people(space.blockedRoster || [], "#manage-blocked", "Allow back", async (person) => {

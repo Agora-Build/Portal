@@ -23,6 +23,9 @@ function applyUi(theme) {
   root.style.fontFamily = fontStack(theme.ui.font);
 }
 
+// A page restored from the back/forward cache holds a stale lease and channel, so it loads afresh.
+addEventListener("pageshow", (event) => { if (event.persisted) location.reload(); });
+
 const [, roomSlug, spaceId] = /^\/stoa\/(?:room\/([a-z0-9-]{2,40})|s\/([a-f0-9-]{36}))?$/.exec(location.pathname) || [];
 const invite = new URLSearchParams(location.search).get("invite");
 const problems = [];
@@ -36,11 +39,18 @@ const space = spaceResult.value?.space || null;
 const kickerFor = (entry) => entry ? (entry.visibility === "private" ? "THE STOA / PRIVATE SPACE" : "THE STOA / UNLISTED SPACE") : "THE STOA / SPACE";
 if (space) { document.querySelector("#stoa-title").textContent = space.title; document.title = space.title + " | Agora Build"; }
 
-let map = null, engine = null, minimal = stored.get() === "true", preview = null, plazaBounds = null, active = () => null, call = null, decor = null, spacesUi = null;
+let map = null, engine = null, minimal = stored.get() === "true", preview = null, plazaBounds = null, active = () => null, call = null, decor = null, spacesUi = null, roomNow = null;
 try { if (worldResult.status === "fulfilled") map = parseMap(worldResult.value); } catch (error) { problems.push("The map is not valid (" + error.message + ")."); }
 let summaries = new Map((spacesResult.value?.rooms || []).map((room) => [room.slug, room]));
 const lot = roomSlug && map ? map.lots.find((entry) => entry.slug === roomSlug) || null : null;
-document.querySelector("#stoa-kicker").textContent = spaceId ? kickerFor(space) : roomSlug ? (lot ? "THE STOA / ROOM" : "THE STOA") : "THE STOA / PUBLIC PLAZA";
+// The heading names where you are: the URL's space at first, then whichever room the stage puts you in.
+function heading(room) {
+  const lotHere = room && map?.lots.find((entry) => "lot-" + entry.slug === room.id);
+  const [kicker, title] = lotHere ? ["THE STOA / ROOM", lotHere.title] : room ? [kickerFor(room), room.title] : ["THE STOA / PUBLIC PLAZA", "Walk into the plaza."];
+  document.querySelector("#stoa-kicker").textContent = kicker; document.querySelector("#stoa-title").textContent = title;
+  document.title = (room ? title : "Stoa") + " | Agora Build";
+}
+if (spaceId) document.querySelector("#stoa-kicker").textContent = kickerFor(space);
 const labels = () => map.lots.map((entry) => ({ x: entry.door.x, y: entry.door.y - 1, text: summaries.get(entry.slug)?.topic || entry.title }));
 if (map && !spaceId) panel.setRooms(map.lots, summaries);
 
@@ -86,7 +96,7 @@ spacesUi = createSpacesUi({ api, say: (text) => panel.say(text), onSaved: (saved
   document.querySelector("#stoa-kicker").textContent = kickerFor(saved);
   stage?.refresh();
   if (themeChanged) panel.say("The new theme shows after you reload.");
-} });
+}, onMembersChanged: (id) => { if (roomNow?.id === id) stage?.rekeyRoom(); } });
 panel.setPeople([], self.name);
 panel.canTalk(self.signedIn);
 let live = null, stage = null;
@@ -122,10 +132,10 @@ panel.on({
 // Your own spaces show on the plaza right away (with or without the canvas); ?start= (from the home page) opens the create dialog with that name.
 if (!spaceId && self.signedIn) { if (!engine) panel.showPlaza(); api("/api/spaces/mine").then((mine) => spacesUi.showMine(mine)).catch(() => {}); }
 const params = new URLSearchParams(location.search);
+// Signed out, the parameter stays in the address: sign-in returns to this URL, and the dialog opens then.
 if (!spaceId && params.has("start")) {
   const title = params.get("start");
-  params.delete("start");
-  history.replaceState(null, "", location.pathname + (params.size ? "?" + params : "") + location.hash);
+  if (self.signedIn) { params.delete("start"); history.replaceState(null, "", location.pathname + (params.size ? "?" + params : "") + location.hash); }
   startSpace({ title });
 }
 // Signaling loads and connects in the background: the page is already usable, and the stage picks the connection up when it is ready.
@@ -163,7 +173,7 @@ if (engine) {
   call = createCallView({ engine, api, self, people: () => stage?.people() || [], say: (text) => panel.say(text) });
   call.setLayout(active().video);
   decor = createDecorEditor({ canvas, engine, map, say: (text) => panel.say(text), onSave: (items) => stage.saveDecor(items), onClose: () => { stage.setEditing(false); panel.decorating(false); } });
-  stage = createStage({ api, map, engine, panel, live: null, self, plaza: spaceId ? null : { bounds: plazaBounds, channel: null }, onRoom: (room) => { decor?.abort(); if (room) call.enter(room.id); else call.exit(); }, onPeople: () => call.refresh(), onManage: (can) => { if (!can) decor?.abort(); } });
+  stage = createStage({ api, map, engine, panel, live: null, self, plaza: spaceId ? null : { bounds: plazaBounds, channel: null }, onRoom: (room) => { roomNow = room; decor?.abort(); if (room) call.enter(room.id); else call.exit(); if (room || !spaceId) heading(room); }, onPeople: () => call.refresh(), onManage: (can) => { if (!can) decor?.abort(); } });
   engine.on("arrive", (tile) => stage.onArrive(tile));
   // Leaving the page releases the entry lease and, as far as the browser allows, the Signaling login.
   addEventListener("pagehide", () => { call.exit(); stage.unload(); live?.close().catch(() => {}); });

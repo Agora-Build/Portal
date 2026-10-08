@@ -32,11 +32,15 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     });
   };
   const mine = (id) => Boolean(id) && (self.ids || [self.id]).includes(id);
-  const canManage = () => Boolean(here && (here.kind === "lot" || here.kind === "space") && here.leased && self.signedIn && (mine(here.access?.hostId) || mine(here.space?.ownerId)));
+  // Host tools need a live lease in a lot or space as well as being its host or owner.
+  const inRoom = () => Boolean(here && (here.kind === "lot" || here.kind === "space") && here.leased && self.signedIn);
+  const canManage = () => inRoom() && (mine(here.access?.hostId) || mine(here.space?.ownerId));
+  // Room notices count only from the current place's host or owner.
+  const fromHost = (next, from) => here === next && Boolean(from) && (from === next.access?.hostId || from === next.space?.ownerId);
   const checkManage = () => { const can = canManage(); if (can !== manageNow) { manageNow = can; onManage(can); } };
   const doorTiles = (rect) => { const tiles = []; for (let y = rect.y; y < rect.y + rect.height; y += 1) for (let x = rect.x; x < rect.x + rect.width; x += 1) if (roleAt(map, x, y) === "door") tiles.push({ x, y }); return tiles; };
   const showDecor = (items) => { currentDecor = items || []; if (!editing) engine.setDecor(currentDecor); };
-  const showRoom = (space, hostId) => { panel.showRoom({ kicker: here?.kind === "lot" ? "LOT ROOM" : space.visibility === "private" ? "PRIVATE SPACE" : "UNLISTED SPACE", title: space.title, topic: space.topic, tags: space.tags || [], host: Boolean(self.id) && (mine(hostId) || mine(space.ownerId)), leaveLabel: here?.kind === "lot" ? "Back to the plaza" : "Leave this space", decorate: canManage(), owner: here?.kind === "space" && mine(space.ownerId) }); checkManage(); showPeople(); };
+  const showRoom = (space, hostId) => { panel.showRoom({ kicker: here?.kind === "lot" ? "LOT ROOM" : space.visibility === "private" ? "PRIVATE SPACE" : "UNLISTED SPACE", title: space.title, topic: space.topic, tags: space.tags || [], host: inRoom() && (mine(hostId) || mine(space.ownerId)), leaveLabel: here?.kind === "lot" ? "Back to the plaza" : "Leave this space", decorate: canManage(), owner: here?.kind === "space" && mine(space.ownerId) }); checkManage(); showPeople(); };
 
   // Every transition claims `here` before it awaits anything; a superseded one stops as soon as it notices.
   async function settle(next) {
@@ -54,7 +58,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     showPeople();
     if (live && next.access?.channel) {
       try {
-        const place = await openPlace({ live, map, engine, self, quiet: Boolean(next.watch), channel: { name: next.access.channel, key: next.access.key || null, spaceId: next.space.id }, onPeople: showPeople, onSay: (entry) => { if (entry.failed) panel.say("That message didn't send."); else panel.addMessage(entry); }, onRefresh: (from) => { if (here === next && from && (from === next.access?.hostId || from === next.space?.ownerId)) refreshRoom(); }, onRekey: (from) => { if (here === next && from && (from === next.access?.hostId || from === next.space?.ownerId)) lease?.beatNow(); }, onDecor: (from) => { if (here === next && from && (from === next.access?.hostId || from === next.space?.ownerId)) refreshRoom(); } });
+        const place = await openPlace({ live, map, engine, self, quiet: Boolean(next.watch), channel: { name: next.access.channel, key: next.access.key || null, spaceId: next.space.id }, onPeople: showPeople, onSay: (entry) => { if (entry.failed) panel.say("That message didn't send."); else panel.addMessage(entry); }, onRefresh: (from) => { if (fromHost(next, from)) refreshRoom(); }, onRekey: (from) => { if (fromHost(next, from)) lease?.beatNow(); }, onDecor: (from) => { if (fromHost(next, from)) refreshRoom(); } });
         if (here !== next) { await place.close().catch(() => {}); return; }
         places = [place];
         place.setBlocked(next.access.blocked || []);
@@ -71,8 +75,11 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     panel.canTalk(talk, talk || !self.signedIn ? undefined : next.full ? "The plaza is full \u2014 you're watching." : next.kind === "left" ? "You're no longer in this space." : "You're watching.");
   }
 
+  // Fresh access is always kept, so a later reopen (attachLive) uses the current channel, key, and removals.
   function onAccess(access, at) {
     if (here !== at) return;
+    const hostChanged = access.hostId !== here.access?.hostId;
+    here.access = { ...here.access, ...access };
     if (places[0] && access.channel !== places[0].channel) {
       transition(async () => {
         if (here !== at || !places[0] || places[0].channel === access.channel) return;
@@ -82,7 +89,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
       return;
     }
     for (const place of places) place.setBlocked(access.blocked || []);
-    if (here.kind !== "plaza" && access.hostId !== here.access.hostId) { here.access = { ...here.access, ...access }; checkManage(); refreshRoom(); }
+    if (here.kind !== "plaza" && hostChanged) { checkManage(); refreshRoom(); }
   }
 
   // A lease the server dropped (410) gets one re-entry into the same place; removed or hidden (403, 404) does not.
@@ -230,6 +237,13 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     } catch (error) { if (here === at) panel.say(error.message); }
   }
 
+  // After the owner removes a member from the manage dialog: everyone checks access, and this person picks up the new channel now.
+  async function rekeyRoom() {
+    if (!inRoom()) return;
+    await Promise.all(places.map((place) => place.rekey().catch(() => false)));
+    await lease?.beatNow({ force: true });
+  }
+
   const removeNotice = (person) => here?.kind === "lot" ? "Remove " + person.name + " from this room? They can't come back until the room empties." : "Remove " + person.name + " from this space? They can't come back unless the owner allows them back.";
 
   return {
@@ -241,6 +255,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     setTopic,
     makeHost,
     removePerson,
+    rekeyRoom,
     removeNotice,
     people: () => everyone,
     canManage,
@@ -251,7 +266,6 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
       const area = { x: 0, y: 0, width: map.width, height: map.height };
       return { area, start: map.spawns[0], protect: [...map.spawns, ...doorTiles(area)] };
     },
-    decorArea: () => here?.kind === "lot" ? here.lot.interior : here?.kind === "space" ? { x: 0, y: 0, width: map.width, height: map.height } : null,
     setEditing(value) { editing = Boolean(value); if (!editing) engine.setDecor(currentDecor); },
     async saveDecor(items) {
       const at = here;

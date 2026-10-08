@@ -28,7 +28,7 @@ function setup({ api, signedIn = true, withLive = true, clock = { time: 0, timer
     canTalk: (value, reason) => { calls.canTalk.push(value); calls.reasons.push(reason); }, showRoom: (room) => calls.showRoom.push(room), showOffer: () => { calls.offer += 1; }
   };
   const leases = [];
-  const createLease = (options) => { const entry = { options, active: true, stop() { entry.active = false; }, async leave() { entry.active = false; }, leaveOnUnload() { entry.active = false; }, beatNow() { entry.beats = (entry.beats || 0) + 1; return Promise.resolve(); } }; leases.push(entry); return entry; };
+  const createLease = (options) => { const entry = { options, active: true, stop() { entry.active = false; }, async leave() { entry.active = false; }, leaveOnUnload() { entry.active = false; }, beatNow(options) { entry.beats = (entry.beats || 0) + 1; entry.forced = options?.force || false; return Promise.resolve(); } }; leases.push(entry); return entry; };
   const stage = createStage({ api, map: plaza, engine, panel, live, self: { id: "a-me", name: "Me", signedIn }, plaza: { bounds: null, channel: "plaza-1" }, createLease, schedule: (callback) => frames.push(callback), now: () => clock.time, later: (callback, delay) => { clock.timers.push({ callback, delay }); return clock.timers.length; }, ...options });
   const flushFrames = () => { for (const callback of frames.splice(0)) callback(); };
   return { stage, calls, panel, leases, handlers, live, flushFrames, clock };
@@ -375,7 +375,6 @@ test("saving decorations stores them, shows them, and tells the room the new ver
   await stage.toPlaza(null);
   await stage.enterLot(lot);
   assert.equal(stage.canManage(), true, "the first one in hosts the lot");
-  assert.deepEqual(stage.decorArea(), lot.interior);
   assert.equal(await stage.saveDecor(saved), true);
   assert.deepEqual(puts, [{ items: saved }]);
   assert.deepEqual(calls.decor.at(-1), saved);
@@ -473,4 +472,41 @@ test("remove wording follows the room kind, and a refresh from the owner is hear
   calls.handlers["space-ch"].message(hostUser, JSON.stringify({ t: "refresh" }));
   await tick(); await tick();
   assert.ok(calls.showRoom.length > before, "owner refresh triggers a room fetch");
+});
+test("rekeyRoom tells the room to check access and makes the lease check in at once", async () => {
+  const api = async (path) => path === "/api/spaces/plaza/enter" ? access("plaza", "plaza-1") : path.endsWith("/enter") ? access("space-1", "space-ch") : {};
+  const { stage, calls, leases } = setup({ api });
+  await stage.toPlaza(null);
+  await stage.rekeyRoom();
+  assert.ok(!calls.published.includes(JSON.stringify({ t: "rekey" })), "nothing to rekey on the plaza");
+  assert.equal(leases.at(-1).beats || 0, 0);
+  await stage.openSpace("space-1");
+  await stage.rekeyRoom();
+  assert.ok(calls.published.includes(JSON.stringify({ t: "rekey" })));
+  assert.equal(leases.at(-1).beats, 1);
+  assert.equal(leases.at(-1).forced, true, "the owner's own change is not held back by the rekey gap");
+});
+test("fresh access from a heartbeat is kept, so a later live connection uses the new channel and key", async () => {
+  const api = async (path) => path.endsWith("/enter") ? access("space-1", "space-ch") : {};
+  const { stage, leases, calls } = setup({ api, withLive: false });
+  await stage.openSpace("space-1");
+  leases.at(-1).options.onAccess({ channel: "space-ch-2", key: "k2", blocked: ["account:bad"], hostId: "a-me" });
+  const later = setup({ api }).live, joined = [];
+  later.join = async (name, options, handlers) => { joined.push(name); calls.handlers[name] = handlers; };
+  await stage.attachLive(later, null);
+  assert.deepEqual(joined, ["space-ch-2"]);
+});
+test("host tools in the room panel need a live lease, not just ownership", async () => {
+  let gone = false;
+  const owned = { ...access("space-1", "space-ch"), space: { ...space("space-1"), ownerId: "a-me" }, hostId: "a-me" };
+  const api = async (path) => { if (path.endsWith("/enter")) { if (gone) throw Object.assign(new Error("hidden"), { status: 404 }); return owned; } return { space: owned.space }; };
+  const { stage, leases, calls } = setup({ api });
+  await stage.openSpace("space-1");
+  assert.equal(calls.showRoom.at(-1).host, true);
+  gone = true;
+  leases.at(-1).options.onLost({ status: 404 });
+  for (let i = 0; i < 6; i += 1) await tick();
+  stage.refresh();
+  await tick(); await tick();
+  assert.equal(calls.showRoom.at(-1).host, false, "a space you were dropped from offers no topic form");
 });

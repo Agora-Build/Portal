@@ -11,10 +11,12 @@ export function nameFor(uid, { people, self, snapshot }) {
   const person = people.find((entry) => String(entry.id).split(":")[1] === actorUuid(uid));
   return (person?.name || "Builder") + (isScreen(uid) ? "'s screen" : "");
 }
+// Screen shares lead, then your own camera, then people with video, then the rest, so what matters stays in view when tiles overflow.
+const tileRank = (tile) => tile.screen ? 0 : tile.mine ? 1 : tile.video ? 2 : 3;
 export function tileList(snapshot, { people, self }) {
   if (!snapshot?.joined) return [];
   const own = [{ uid: snapshot.uid, video: snapshot.video, screen: false, mine: true }, ...(snapshot.screen ? [{ uid: snapshot.screenUid, video: true, screen: true, mine: true }] : [])];
-  return [...own, ...snapshot.peers.map((peer) => ({ uid: peer.uid, video: peer.video, screen: peer.screen, mine: false }))].map((tile) => ({ ...tile, name: nameFor(tile.uid, { people, self, snapshot }) }));
+  return [...own, ...snapshot.peers.map((peer) => ({ uid: peer.uid, video: peer.video, screen: peer.screen, mine: false }))].sort((a, b) => tileRank(a) - tileRank(b)).map((tile) => ({ ...tile, name: nameFor(tile.uid, { people, self, snapshot }) }));
 }
 // Where a tile floats in over-avatar layout: just above the person's head, in canvas pixels. Null when they aren't drawn.
 export function overAvatar(tile, frame) {
@@ -30,7 +32,7 @@ export function createCallView({ doc = document, engine, api, self, people = () 
   let busyJoining = false;
   const buttons = { join: $("#stoa-call-join"), audio: $("#stoa-call-audio"), video: $("#stoa-call-video"), share: $("#stoa-call-share"), resume: $("#stoa-call-resume"), leave: $("#stoa-call-leave") };
   const tiles = new Map();
-  let spaceId = null, rtc = null, layout = "strip", frame = null;
+  let spaceId = null, rtc = null, layout = "strip", frame = null, unlisten = null;
 
   function place() {
     for (const view of tiles.values()) {
@@ -55,7 +57,7 @@ export function createCallView({ doc = document, engine, api, self, people = () 
     layer.dataset.layout = layout;
     const wanted = joined ? tileList(now, { people: people(), self }) : [];
     for (const [uid, view] of tiles) if (!wanted.some((tile) => tile.uid === uid)) { view.card.remove(); tiles.delete(uid); }
-    for (const tile of wanted) {
+    for (const [index, tile] of wanted.entries()) {
       let view = tiles.get(tile.uid);
       if (!view) {
         const card = doc.createElement("article"), player = doc.createElement("div"), label = doc.createElement("span");
@@ -65,13 +67,21 @@ export function createCallView({ doc = document, engine, api, self, people = () 
         view = { card, player, label, playing: false, tile };
         tiles.set(tile.uid, view);
       }
-      view.tile = tile;
+      // CSS order keeps tileList's order without moving (and pausing) playing video elements.
+      view.tile = tile; view.card.style.order = String(index);
       if (view.label.textContent !== tile.name) { view.label.textContent = tile.name; view.card.setAttribute("aria-label", tile.name); }
       if (tile.video && !view.playing) view.playing = rtc.play(tile.uid, view.player);
       if (!tile.video) view.playing = false;
       view.card.classList.toggle("has-video", view.playing);
     }
     place();
+    follow();
+  }
+  // The engine builds frame data only while someone listens, so tiles listen only when they float over avatars.
+  function follow() {
+    const wanted = layout === "over-avatar" && tiles.size > 0;
+    if (wanted && !unlisten) { unlisten = engine.on("draw", (next) => { frame = next; place(); }); engine.redraw?.(); }
+    else if (!wanted && unlisten) { unlisten(); unlisten = null; frame = null; }
   }
   function reset(message) {
     for (const view of tiles.values()) view.card.remove();
@@ -123,7 +133,6 @@ export function createCallView({ doc = document, engine, api, self, people = () 
   buttons.share.addEventListener("click", () => rtc?.share());
   buttons.resume.addEventListener("click", () => rtc?.resumeAudio());
   buttons.leave.addEventListener("click", () => leave("You left the call.", true));
-  engine.on("draw", (next) => { frame = next; if (layout === "over-avatar" && tiles.size) place(); });
   return {
     enter(id) {
       if (spaceId === id) return;

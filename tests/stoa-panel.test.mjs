@@ -107,3 +107,13 @@ test("Manage shows only for the owner; your spaces only for signed-in people on 
   panel.showPlaza();
   assert.equal(doc.querySelector("#stoa-mine-section").hidden, false);
 });
+test("a full plaza lists your spaces once: the offer replaces the Your spaces section until you are on the plaza", () => {
+  const doc = fakeDocument(), panel = createPanel(doc), mine = doc.querySelector("#stoa-mine-section"), offer = doc.querySelector("#stoa-offer");
+  panel.setSignedIn(true);
+  panel.showPlaza();
+  assert.equal(mine.hidden, false);
+  panel.showOffer({ spaces: [{ title: "Lab", path: "/stoa/s/1" }], canCreate: true });
+  assert.deepEqual([offer.hidden, mine.hidden, doc.querySelector("#stoa-start").hidden], [false, true, false]);
+  panel.hideOffer();
+  assert.deepEqual([offer.hidden, mine.hidden], [true, false]);
+});

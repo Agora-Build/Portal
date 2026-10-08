@@ -124,6 +124,8 @@ export function createEngine({ canvas, map, theme, start, reducedMotion = false,
     teleport(tile, dir = "down") { held = null; self.keyboard = false; self.walk = { path: [{ x: tile.x, y: tile.y }], startedAt: now(), dir }; self.arrived = true; schedule(); },
     on(type, listener) { if (!Object.hasOwn(listeners, type)) throw new Error("Unknown engine event: " + type); listeners[type].push(listener); return () => { listeners[type] = listeners[type].filter((item) => item !== listener); }; },
     say(text, ms = 8000) { self.bubble = { text: String(text), until: now() + ms }; schedule(); },
+    // Draws a frame soon, for a "draw" listener that has just started listening.
+    redraw() { schedule(); },
     setPicking(handler) { picking = typeof handler === "function" ? handler : null; },
     setInteractive(value) { interactive = Boolean(value); if (!interactive) { held = null; keyStop(); } },
     setSelf({ id, name }) { if (id) self.id = id; self.name = name; schedule(); },

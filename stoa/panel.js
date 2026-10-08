@@ -85,11 +85,12 @@ export function createPanel(doc = document) {
       sayInput.placeholder = "Say something to the room";
     },
     showPlaza() { here.hidden = true; $("#stoa-manage").hidden = true; $("#stoa-mine-section").hidden = !signedIn; canDecorate = false; syncDecor(); topicForm.hidden = true; roomsSection.hidden = false; sayInput.placeholder = "Say something on the plaza"; },
+    // The offer lists your spaces, so the Your spaces section steps aside while it shows.
     showOffer({ spaces = [], canCreate = false } = {}) {
-      offer.hidden = false;
+      offer.hidden = false; $("#stoa-mine-section").hidden = true;
       $("#stoa-offer-list").replaceChildren(...spaces.map((space) => { const item = node("li"), link = node("a", space.title); link.href = space.path; item.append(link); return item; }));
       $("#stoa-start").hidden = !canCreate;
     },
-    hideOffer() { offer.hidden = true; }
+    hideOffer() { offer.hidden = true; $("#stoa-mine-section").hidden = !signedIn || !here.hidden; }
   };
 }
