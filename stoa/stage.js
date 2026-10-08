@@ -125,7 +125,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     if (!at || at.kind === "plaza" || !at.space) return;
     try {
       const { space } = await api("/api/spaces/" + at.space.id + (at.invite ? "?invite=" + encodeURIComponent(at.invite) : ""));
-      if (here === at) { here.space = { ...here.space, ...space }; showRoom(space, space.hostId); showDecor(space.decor); }
+      if (here === at) { here.space = { ...here.space, ...space }; if (here.access) here.access = { ...here.access, hostId: space.hostId }; showRoom(space, space.hostId); showDecor(space.decor); }
     } catch { /* the next heartbeat reports a lost lease */ }
   }
 
