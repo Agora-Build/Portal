@@ -2118,3 +2118,19 @@ Before committing, check `git status` shows only the intended files (no `.data/`
 - Plan D (Agora Chat): team messages and DMs, with the call panel's "chat" control (spec section 3) linking to the room's Chat group.
 - Selection highlight in decor mode needs a renderer hook (an outline at a tile). v1 names the selection in the panel only.
 - Proximity audio (spec section 2) can use `overAvatar`'s matching to decide which streams to subscribe to.
+
+## Live check (2026-10-08, real Agora RTC and Signaling)
+
+Two signed-in headless browsers with fake camera and microphone, against a throwaway server with the project's credentials in its environment only. All passed:
+- Call in a lot room: each person's video appears over the other's avatar in about 0.2 s; Minimal switches to the grid; turning a camera off or on reaches the other side in about 0.24 s.
+- Screen share: the other person sees the screen tile 0.9 s after the click; it goes 0.2 s after stopping.
+- Decorating: a saved plant reaches the other person's view in about 0.2 s. "Place in front of me" refuses entrances and blocked tiles with the right message.
+- Hand over, then remove: the new host gets host tools in about 3.3 s; a removal takes effect in about 0.28 s (room, call, and channel left; re-entry refused; the room's people and tiles drop them).
+- Private space with an invite: created and shared from the dialogs; both inside within 2.2 s; the call shows exactly two tiles on each side.
+- Back button: returns to a fresh, correct page. Headless Chromium never restored from the back/forward cache, so the reload-on-restore path is untested.
+- No uncaught page errors. Logged errors were expected: extra RTC edge sockets closing, the removed person's 410 then 403, and 404s for a private space opened without an invite.
+
+Notes:
+- Handing over hosting (about 3.3 s) is slower than removal because room refreshes are limited to one every 5 s.
+- A private space opened without an invite gets the plain "This space was not found." page, by design: hidden spaces look exactly like missing ones.
+- People entering a room still share its entry tile until someone moves (noted in Plan C1).
