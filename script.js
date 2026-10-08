@@ -47,7 +47,7 @@ const loginStatus = el("p", { class: "login-status", role: "status", text: "Chec
 const guest = el("button", { class: "inline-link login-guest", type: "button", text: "Continue with this browser", onclick: () => { loginDialog.close(); openJoin(afterJoin, true); } });
 const signOut = el("button", { class: "button button-secondary", type: "button", text: "Sign out", onclick: async () => {
   signOut.disabled = true;
-  try { await api("/api/auth/logout", { method: "POST" }); await refreshSession(); loginDialog.close(); notify("You are signed out. Your public profile and rooms remain available."); }
+  try { await api("/api/auth/logout", { method: "POST" }); await refreshSession(); loginDialog.close(); notify("You are signed out. Your public profile and spaces remain available."); }
   catch (error) { notify(error.message); }
   finally { signOut.disabled = false; }
 } });
