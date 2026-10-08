@@ -116,7 +116,7 @@ presence or activity.
 
 ### Plaza and lots
 
-The plaza is a system space with the route `/stoa/` and a capacity of **1000**
+The plaza is a system space with the route `/stoa/` and a capacity of **200**
 people walking at once. Guests who only watch do not count.
 
 **When the plaza is full**, a signed-in person who opens `/stoa/` sees the plaza as a
@@ -130,7 +130,7 @@ watcher and is offered unlisted spaces instead:
 
 The offer stays visible while they watch, and a free place lets them walk in. Lot
 rooms have their own capacities: a person inside a lot room does not count toward the
-plaza's 1000, and someone with a lot room's URL can enter it while the plaza is full.
+plaza's 200, and someone with a lot room's URL can enter it while the plaza is full.
 If the plaza is still full when they leave the room, they get the same offer.
 
 Plaza walking uses an entry lease like any other space (section 2).
@@ -311,7 +311,7 @@ and nothing above depends on it.
   clients work out the steps in between, so holding a key sends no extra messages.
 - Message budget: Signaling allows 60 messages per second per client in a message
   channel. Clients publish movement at most 4 times per second and update presence
-  state only when someone stops. With 1000 people on the plaza, the expected total is
+  state only when someone stops. With 200 people on the plaza, the expected total is
   well under that. Clients draw and animate only avatars within about two screens of
   their own view, and still list everyone in the panel.
 - Large channels: `whoNow` results are read page by page. Clients handle presence
@@ -681,7 +681,7 @@ team conversation between two accounts.
 
 Decided:
 
-- Plaza capacity is 1000 people walking at once. When it is full, people are offered
+- Plaza capacity is 200 people walking at once (lowered from 1000 on 2026-10-08: the 44×34 plaza and a single Signaling channel suit a few hundred people; a larger crowd needs cell channels plus a bigger map or plaza copies, in a later plan). When it is full, people are offered
   unlisted spaces (section 1).
 - A team is everyone who shares a room or group, in listed and unlisted spaces alike
   (section 2, Agora Chat).
