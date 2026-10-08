@@ -39,7 +39,7 @@ test("system spaces and legacy rooms are prepared once", async (t) => {
   const { spaces, store, owner, room } = await setup(t, { before: async (store, person) => { const owner = await person("Owner"); return { owner, room: await store.createRoom(owner.token, { title: "Demo prep", intent: "Plan the demo day together." }) }; } });
   const listing = await spaces.list();
   assert.deepEqual(listing.rooms.map((entry) => entry.slug), ["ai-agents", "voice-ai", "rtc-lab", "founders-table", "open-source", "lounge"]);
-  assert.deepEqual(listing.plaza, { capacity: 1000, occupancy: 0, blocked: [] });
+  assert.deepEqual(listing.plaza, { capacity: 200, occupancy: 0, blocked: [] });
   const migrated = await spaces.get(owner.token, room.id);
   assert.deepEqual([migrated.visibility, migrated.access, migrated.members, migrated.title], ["unlisted", "members", [owner.id], "Demo prep"]);
   await spaces.list();

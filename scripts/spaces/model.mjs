@@ -4,7 +4,7 @@ import { validCombination } from "./permissions.mjs";
 export { DECOR_KINDS } from "../../world/kinds.js";
 export const THEMES = ["agora", "minimal", "cyberpunk"];
 export const PLAZA_ID = "plaza";
-export const PLAZA_CAPACITY = 1000;
+export const PLAZA_CAPACITY = 200;
 export const lotSpaceId = (slug) => "lot-" + slug;
 const pick = (input, field, fallback) => input[field] === undefined ? fallback : input[field];
 
