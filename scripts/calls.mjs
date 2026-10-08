@@ -21,10 +21,6 @@ export function createAgoraCalls(config = agoraConfig(), { now = Date.now } = {}
   }
   return {
     ready: config.ready,
-    issue(room, person, input = {}) {
-      if (!room.participants.includes(person.id)) throw new AppError(403, "Join this room's roster before entering the call.");
-      return credentials("agora-build-" + room.id, person.id.replace(/^member:/, "") + "_", input);
-    },
     issueSpace(space, actor, input = {}) {
       return credentials("agora-build-space-" + space.id, actor.id.replace(/^(account|member):/, "") + "_", input);
     }

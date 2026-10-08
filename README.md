@@ -34,7 +34,7 @@ Without `DATABASE_URL`, state is stored in `/app/.data`. Mount a volume there so
 - `index.html` / `people.js`: people discovery, skills, natural-language search, and public profiles.
 - `activity.js` / `scripts/activity.mjs`: public GitHub events and actual community actions, with timestamps and source links.
 - `explore.html` / `explore.js`: 16 verified GitHub projects, categories, search, and sorting.
-- `meetings.html` / `meetings.js` / `call.js`: shared group rooms, invite links, member rosters, and embedded Agora audio/video calls.
+- `stoa.html` / `stoa.js` / `stoa/` / `world/`: the Stoa — a walkable plaza with first-come rooms and your own spaces, live presence and messages over Agora Signaling, and calls over Agora RTC.
 - `radar.html` / `radar.js`: intent-driven web research with source links and reasons.
 - `services.html` / `services.js`: language-model and text-to-speech playgrounds, plus verified offers.
 - `account.html` / `account.js`: shared identity, credits, membership plans, purchases, and Agora Console connections.
@@ -53,11 +53,11 @@ Shared navigation, dialogs, sign-in, and browser sessions live in `script.js`; s
 
 The homepage polls `/api/activity` every minute while visible. The server reads public Agora-Build GitHub events at most once every two minutes, shares concurrent requests, uses ETags, and backs off on rate limits. The feed includes real pushes, pull requests, issues, and releases from repositories in the project directory. GitHub can delay event delivery; timestamps show when actions happened, not when they were fetched. `data/activity.json` is a dated GitHub snapshot used when live sync is unavailable, with that state labeled explicitly.
 
-Joining the foundry, changing an intent, creating a room, and joining a room roster also produce public activity entries. Repeated roster joins do not create new entries. Profile removal clears the member's activity and references to their deleted rooms. Activity indicates public work and participation in the directory; it does not imply that someone is online or currently on a call.
+Joining the foundry and changing an intent also produce public activity entries. Activity from legacy meeting rooms may remain in the feed. Profile removal clears the member's activity and references to their deleted rooms. Activity indicates public work and participation in the directory; it does not imply that someone is online or currently on a call.
 
 ## Profiles and ownership
 
-Joining requires a name, bio, skills, a public contact link, and a real intent. Profiles and meeting rosters are public. Sign-in creates a private account first; nothing is published until the person supplies their intent and saves a profile. Returning to the same provider identity on another device restores the same profile, room ownership, and private radar.
+Joining requires a name, bio, skills, a public contact link, and a real intent. Profiles are public. Sign-in creates a private account first; nothing is published until the person supplies their intent and saves a profile. Returning to the same provider identity on another device restores the same profile, room ownership, and private radar.
 
 The sign-in dialog supports Google and GitHub OAuth, Sign in with Apple, and a configurable Agora OIDC identity service. Members can explicitly connect another provider to the same account. An existing browser-only profile can connect a login while preserving its ID and rooms; its old browser token is then invalidated. Accounts are never merged by email. Provider subjects and session hashes stay private. Account sessions last 30 days and logout revokes the current session. Removing a public profile also removes its radar and owned rooms, while the private login account remains available to start a new profile.
 
@@ -99,23 +99,25 @@ Shared inference is limited to six calls per minute per client IP and `MODEL_REQ
 
 ## Agora group calls
 
-Create an Agora project with App Certificate authentication enabled. Set `AGORA_APP_ID` and `AGORA_APP_CERTIFICATE` in the server's `.env` and restart. Both must be 32-character hexadecimal values. The certificate stays on the server; authenticated room members receive short-lived, channel-specific AccessToken2 credentials from `POST /api/rooms/:id/call`. `AGORA_TOKEN_TTL_SECONDS` defaults to 3600 and is bounded to 60–3600 seconds. The SDK renews credentials before they expire; renewals require the same browser profile and current room membership.
+Create an Agora project with App Certificate authentication enabled. Set `AGORA_APP_ID` and `AGORA_APP_CERTIFICATE` in the server's `.env` and restart. Both must be 32-character hexadecimal values. The certificate stays on the server; signed-in people receive short-lived, channel-specific AccessToken2 credentials from `POST /api/spaces/<id>/rtc-token`, and only while they are currently in that room. `AGORA_TOKEN_TTL_SECONDS` defaults to 3600 and is bounded to 60–3600 seconds. The SDK renews credentials before they expire; renewals require the same browser profile and current presence in the room.
 
-Every room has a purpose and a permanent shareable URL, `/meet/<room-id>`. Room creation returns that path and opens the room; its card displays the full invite URL and a copy action. A direct link opens that room, preserves the invitation through login, and lets new members complete their real-intent profile before joining. Existing `meetings.html?room=<id>` invitations remain supported.
+Calls happen inside the Stoa's lot rooms and your own spaces. Video layouts follow the theme: over avatars (Agora), a strip (Cyberpunk), or a grid (Minimal). Members choose whether to enable devices, toggle microphone/camera, share a screen, and leave the call. Screen sharing uses a separate Agora publisher so it can run alongside the camera; browser support determines whether screen audio is available. Camera, microphone, and screen tracks close on leave and page exit. Separate tabs get distinct media identities.
 
-Members join audio/video inside Agora.Build, choose whether to enable devices, toggle microphone/camera, share a screen, and leave the call. Screen sharing uses a separate Agora publisher so it can run alongside the camera; browser support determines whether screen audio is available. Camera, microphone, and screen tracks close on leave and page exit. Separate tabs get distinct media identities. The participant count inside a call comes from actual Agora peers; the directory roster refreshes every 15 seconds and is not live call attendance.
+Old `/meet/<id>` links and `/meetings.html?room=<id>` redirect to `/stoa/s/<id>`, where legacy rooms now live as spaces with the same ids. The `/api/rooms` routes answer `410 Gone`.
 
-Use HTTPS for remote callers, or `http://localhost:3002` for local development. Browsers restrict media devices on plain remote HTTP. No Agora credentials are bundled in the site. Without valid configuration, rooms and invites remain available and calls show an unavailable state. Existing room IDs and rosters continue working, and old external call URLs are omitted from API responses. Removing a profile or room blocks new tokens and renewal; an already-issued Agora token remains valid until its short expiration.
+Use HTTPS for remote callers, or `http://localhost:3002` for local development. Browsers restrict media devices on plain remote HTTP. No Agora credentials are bundled in the site. Without valid configuration, rooms stay usable and calls show an unavailable state. Leaving a room or removing a profile blocks new tokens and renewal; an already-issued Agora token remains valid until its short expiration.
 
 ## Stoa spaces
 
 The Stoa is a walkable plaza (`/stoa/`) with first-come rooms (`/stoa/room/<slug>`) and unlisted or private spaces (`/stoa/s/<id>`). Calls use Agora RTC; movement, presence, and live messages use Agora Signaling. Enable Signaling for the Agora project and set `SPACE_CHANNEL_SECRET` to at least 32 random characters. The built-in maps in `worlds/` are generated by `npm run maps`.
 
-Built-in themes live in `themes/` (Agora, Minimal, Cyberpunk) and are validated at startup. Visitors can switch their own view to Minimal; `/stoa/?theme=cyberpunk` previews a theme. Movement works with click or tap and with the arrow keys or WASD; the side panel offers the same actions for keyboard and screen reader users.
+Built-in themes live in `themes/` (Agora, Minimal, Cyberpunk) and are validated at startup. Hosts can hand over hosting, remove people from the room, and decorate it. Signed-in people can start their own spaces (`/stoa/?start=<title>` opens the dialog with a title filled in), invite others with links, manage members, change settings, and delete a space. Free accounts can own up to 3 spaces; premium plans can own up to 20.
+
+Visitors can switch their own view to Minimal; `/stoa/?theme=cyberpunk` previews a theme. Movement works with click or tap and with the arrow keys or WASD; the side panel offers the same actions for keyboard and screen reader users.
 
 ## The physical forge
 
-Demo days, hackathons, and whiteboard sessions are core community activities. The homepage offers a session-planning entry point for each. Create a room with your real intent, include a place and time in the session purpose, and share the invite with collaborators. Use the same workspace to prepare online and reconnect after meeting in person. These are planning tools; the site does not advertise invented events, venues, or attendees.
+Demo days, hackathons, and whiteboard sessions are core community activities. The homepage offers a session-planning entry point for each. Start a space in the Stoa with your real intent, include a place and time in the session purpose, and share the invite with collaborators. Use the same workspace to prepare online and reconnect after meeting in person. These are planning tools; the site does not advertise invented events, venues, or attendees.
 
 ## Community offers
 
@@ -123,4 +125,4 @@ Demo days, hackathons, and whiteboard sessions are core community activities. Th
 
 ## Verification
 
-`npm test` uses the Node test runner with isolated temporary data and mocked providers. It covers public-file restrictions, profiles and ownership, cross-device sign-in, OAuth state/PKCE/JWT verification, Apple's POST callback, safe account linking, session expiry and logout, direct meeting URLs, persistence, search, sourced research, service limits, Agora token signatures/renewal, provider migration, activity caching/deletion, and production output. For UI changes, check all pages on desktop and mobile, keyboard navigation, reduced motion, dialogs, empty states, filters, sourced activity, provider availability, and two browser sessions joining one room. With configured provider registrations, verify live logins and Agora media, token renewal, and device release on leave.
+`npm test` uses the Node test runner with isolated temporary data and mocked providers. It covers public-file restrictions, profiles and ownership, cross-device sign-in, OAuth state/PKCE/JWT verification, Apple's POST callback, safe account linking, session expiry and logout, old meeting-link redirects, persistence, search, sourced research, service limits, Agora token signatures/renewal, provider migration, activity caching/deletion, and production output. For UI changes, check all pages on desktop and mobile, keyboard navigation, reduced motion, dialogs, empty states, filters, sourced activity, provider availability, and two browser sessions entering one room. With configured provider registrations, verify live logins and Agora media, token renewal, and device release on leave.

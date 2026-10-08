@@ -42,11 +42,6 @@
     </form>
   </dialog>
   <dialog id="person-dialog" aria-labelledby="person-title"><div class="dialog-head"><span class="kicker">BUILDER PROFILE</span><button class="close-button" type="button" data-close aria-label="Close builder profile">&times;</button></div><div id="profile-content"></div></dialog>
-  <dialog id="room-dialog" aria-labelledby="room-title">
-    <div class="dialog-head"><span class="kicker">MAKE ROOM FOR A CONVERSATION</span><button class="close-button" type="button" data-close aria-label="Close room form">&times;</button></div>
-    <h2 id="room-title">Meet around a purpose.</h2><p class="dialog-intro">Create a group room, share the invite, and open a video call together.</p>
-    <form id="room-form" class="stack-form"><label>Room name<input name="title" required minlength="2" maxlength="80" placeholder="Voice agents build session"></label><label>What are we meeting for?<textarea name="intent" required minlength="2" maxlength="300" rows="3" placeholder="Debug a problem, plan a demo day, or bring a whiteboard session into the next sprint."></textarea></label><p class="form-note">Room names, purposes, and rosters are public. Audio, video, and screen sharing stay in this workspace, powered by Agora.</p><p id="room-error" class="form-error" role="alert"></p><button type="submit" class="button">Create meeting room <span aria-hidden="true">&#8599;</span></button></form>
-  </dialog>
   <div id="toast" role="status" aria-live="polite"></div>
 </body>
 </html>

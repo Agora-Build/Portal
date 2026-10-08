@@ -65,6 +65,11 @@ test("provider readiness requires a safe public origin and actual provider confi
   assert.equal(authConfig({ SITE_URL: "https://portal.example", AGORA_APP_ID: "a".repeat(32), AGORA_APP_CERTIFICATE: "b".repeat(32) }).providers.agora.ready, false);
   for (const value of ["https://evil.example", "//evil.example", "/\\evil.example", "/auth/google", "/api/profile", "/\ninvalid"]) assert.equal(returnPath(value), "/");
   assert.equal(returnPath("/meet/11111111-1111-1111-1111-111111111111?signin=failed"), "/meet/11111111-1111-1111-1111-111111111111");
+  assert.equal(returnPath("/stoa/"), "/stoa/");
+  assert.equal(returnPath("/stoa/room/ai-agents?x=1"), "/stoa/room/ai-agents?x=1");
+  assert.equal(returnPath("/stoa/s/11111111-1111-1111-1111-111111111111?invite=abc&signin=failed"), "/stoa/s/11111111-1111-1111-1111-111111111111?invite=abc");
+  assert.equal(returnPath("/meetings.html"), "/");
+  assert.equal(returnPath("/stoa/s/not-a-uuid"), "/");
 });
 
 for (const id of ["google", "github", "apple", "agora"]) test(id + " authenticates using a code flow with bound state and verified identity", async () => {
@@ -194,12 +199,12 @@ test("HTTP sign-in sets a browser-bound state cookie, rotates authenticated sess
     assert.equal(replay.headers.get("location"), "/?signin=failed");
     assert.ok(!replay.headers.getSetCookie().some(cookie => cookie.startsWith("house_session=")));
     assert.equal((await fetch(base + "/scripts/auth.mjs")).status, 404);
-    const appleStart = await fetch(base + "/auth/apple?returnTo=/meetings.html", { redirect: "manual" });
+    const appleStart = await fetch(base + "/auth/apple?returnTo=/stoa/", { redirect: "manual" });
     const appleUrl = new URL(appleStart.headers.get("location")); nonce = appleUrl.searchParams.get("nonce");
     const appleCookie = appleStart.headers.get("set-cookie");
     assert.match(appleCookie, /SameSite=None; Secure/);
     const appleResult = await fetch(base + "/auth/apple/callback", { method: "POST", headers: { Cookie: appleCookie.split(";")[0], "Content-Type": "application/x-www-form-urlencoded", Origin: "https://appleid.apple.com" }, body: new URLSearchParams({ code: "test-code", state: appleUrl.searchParams.get("state") }), redirect: "manual" });
-    assert.equal(appleResult.headers.get("location"), "/meetings.html?signin=success");
+    assert.equal(appleResult.headers.get("location"), "/stoa/?signin=success");
     assert.ok(appleResult.headers.getSetCookie().some(cookie => cookie.startsWith("house_session=")));
     assert.equal((await fetch(base + "/api/auth/logout", { method: "POST", headers: { Cookie: sessionCookie.split(";")[0], Origin: "https://untrusted.example" } })).status, 403);
     const logout = await fetch(base + "/api/auth/logout", { method: "POST", headers: { Cookie: sessionCookie.split(";")[0] } });

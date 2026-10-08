@@ -33,7 +33,7 @@ before(async () => { temporary = await mkdtemp(resolve(tmpdir(), "agora-house-te
 after(async () => { await close(server); await rm(temporary, { recursive: true, force: true }); });
 
 test("six pages, internal links, assets, and section anchors load", async () => {
-  for (const page of ["/", "/explore.html", "/services.html", "/radar.html", "/meetings.html", "/account.html"]) {
+  for (const page of ["/", "/explore.html", "/services.html", "/radar.html", "/account.html"]) {
     const response = await request(page);
     assert.equal(response.status, 200);
     assert.match(response.headers.get("content-type"), /text\/html/);
@@ -129,81 +129,20 @@ test("unconfigured model services report their status and do not fake results", 
   assert.equal((await request("/api/services/tts", { method: "POST", data: { text: "Hello" } })).status, 503);
   assert.equal((await request("/api/radar", { method: "POST" })).status, 503);
 });
-test("multiple members join the same meeting without impersonation or duplicate roster entries", async () => {
-  const isolated = await start();
-  try {
-    const a = await join("Room host", isolated.url);
-    const b = await join("Room guest", isolated.url);
-    assert.equal((await request("/api/rooms", { base: isolated.url, method: "POST", data: { title: "Unauthorized", intent: "Test" } })).status, 401);
-    const response = await request("/api/rooms", { base: isolated.url, cookie: a.cookie, method: "POST", data: { title: "Voice workshop", intent: "Compare interruption handling" } });
-    assert.equal(response.status, 201);
-    const { room } = await response.json();
-    assert.equal(room.callProvider, "agora");
-    assert.ok(!("videoUrl" in room));
-    assert.equal(room.path, "/meet/" + room.id);
-    const page = await request(room.path, { base: isolated.url });
-    assert.equal(page.status, 200);
-    assert.match(await page.text(), /src="\/meetings.js"/);
-    assert.equal((await request("/meet/11111111-1111-1111-1111-111111111111", { base: isolated.url })).status, 404);
-    assert.deepEqual(room.participants, [a.person.id]);
-    const path = "/api/rooms/" + room.id + "/join";
-    assert.equal((await request(path, { base: isolated.url, method: "POST" })).status, 401);
-    for (let index = 0; index < 2; index++) await request(path, { base: isolated.url, cookie: b.cookie, method: "POST", data: { memberId: a.person.id } });
-    const rooms = await (await request("/api/rooms", { base: isolated.url })).json();
-    assert.deepEqual(rooms.rooms[0].participants, [a.person.id, b.person.id]);
-    assert.equal(rooms.rooms[0].callProvider, "agora");
-    assert.deepEqual(rooms.calls, { provider: "agora", ready: false });
-    await request("/api/profile", { base: isolated.url, cookie: b.cookie, method: "DELETE" });
-    assert.deepEqual((await (await request("/api/rooms", { base: isolated.url })).json()).rooms[0].participants, [a.person.id]);
-    await request("/api/profile", { base: isolated.url, cookie: a.cookie, method: "DELETE" });
-    assert.equal((await (await request("/api/rooms", { base: isolated.url })).json()).rooms.length, 0);
-  } finally { await close(isolated.instance); }
-});
-test("Agora call tokens require room membership, bind identities to sessions, and renew without exposing the certificate", async () => {
-  const config = agoraConfig({ AGORA_APP_ID: "a".repeat(32), AGORA_APP_CERTIFICATE: "b".repeat(32) });
-  const isolated = await start({ calls: createAgoraCalls(config) });
-  try {
-    const a = await join("Call host", isolated.url);
-    const b = await join("Call guest", isolated.url);
-    const { room } = await (await request("/api/rooms", { base: isolated.url, cookie: a.cookie, method: "POST", data: { title: "Agora workshop", intent: "Work on voice routing" } })).json();
-    const path = "/api/rooms/" + room.id + "/call";
-    assert.equal((await request(path, { base: isolated.url, method: "POST", data: {} })).status, 401);
-    assert.equal((await request(path, { base: isolated.url, cookie: b.cookie, method: "POST", data: {} })).status, 403);
-    assert.equal((await request(path, { base: isolated.url, cookie: a.cookie, method: "POST", data: {}, headers: { Origin: "https://elsewhere.example" } })).status, 403);
-    const response = await request(path, { base: isolated.url, cookie: a.cookie, method: "POST", data: {} });
-    assert.equal(response.status, 200);
-    assert.equal(response.headers.get("cache-control"), "no-store");
-    const host = await response.json();
-    assert.equal(host.provider, "agora");
-    assert.equal(host.channel, "agora-build-" + room.id);
-    assert.match(host.token, /^007/);
-    assert.match(host.screenToken, /^007/);
-    assert.equal(host.screenUid, host.uid + "_screen");
-    assert.ok(!JSON.stringify(host).includes(config.certificate));
-    const renewed = await (await request(path, { base: isolated.url, cookie: a.cookie, method: "POST", data: { uid: host.uid, channel: "unrelated-room", appId: "untrusted" } })).json();
-    assert.equal(renewed.uid, host.uid);
-    assert.equal(renewed.channel, host.channel);
-    assert.equal(renewed.appId, config.appId);
-    await request("/api/rooms/" + room.id + "/join", { base: isolated.url, cookie: b.cookie, method: "POST" });
-    const guest = await (await request(path, { base: isolated.url, cookie: b.cookie, method: "POST", data: {} })).json();
-    assert.equal(guest.channel, host.channel);
-    assert.notEqual(guest.uid, host.uid);
-    assert.equal((await request(path, { base: isolated.url, cookie: b.cookie, method: "POST", data: { uid: host.uid } })).status, 422);
-    const anotherTab = await (await request(path, { base: isolated.url, cookie: a.cookie, method: "POST", data: {} })).json();
-    assert.notEqual(anotherTab.uid, host.uid);
-    await request("/api/profile", { base: isolated.url, cookie: a.cookie, method: "DELETE" });
-    assert.equal((await request(path, { base: isolated.url, cookie: b.cookie, method: "POST", data: { uid: guest.uid } })).status, 404);
-    for (const file of ["/scripts/calls.mjs", "/node_modules/agora-token/index.js"]) assert.equal((await request(file, { base: isolated.url })).status, 404);
-  } finally { await close(isolated.instance); }
-});
-test("unconfigured Agora calls keep rooms usable and reject token issuance with an honest status", async () => {
-  const a = await join("Unconfigured caller");
-  const { room } = await (await request("/api/rooms", { cookie: a.cookie, method: "POST", data: { title: "Future workshop", intent: "Plan a demo day" } })).json();
-  const response = await request("/api/rooms/" + room.id + "/call", { cookie: a.cookie, method: "POST", data: {} });
-  assert.equal(response.status, 503);
-  assert.match((await response.json()).error, /Agora calls are not connected/);
-  assert.equal((await request("/assets/agora-rtc.js")).status, 200);
-  assert.equal((await request("/call.js")).status, 200);
+test("old meeting links and the rooms API point people to the Stoa", async () => {
+  const id = "11111111-1111-1111-1111-111111111111";
+  const meet = await fetch(origin + "/meet/" + id + "?invite=abc", { redirect: "manual" });
+  assert.deepEqual([meet.status, meet.headers.get("location")], [308, "/stoa/s/" + id + "?invite=abc"]);
+  const page = await fetch(origin + "/meetings.html?room=" + id, { redirect: "manual" });
+  assert.deepEqual([page.status, page.headers.get("location")], [308, "/stoa/s/" + id]);
+  const bare = await fetch(origin + "/meetings.html", { redirect: "manual" });
+  assert.deepEqual([bare.status, bare.headers.get("location")], [308, "/stoa/"]);
+  for (const [path, method] of [["/api/rooms", "GET"], ["/api/rooms", "POST"], ["/api/rooms/" + id + "/join", "POST"], ["/api/rooms/" + id + "/call", "POST"]]) {
+    const response = await fetch(origin + path, { method, headers: { "Content-Type": "application/json" }, ...(method === "POST" ? { body: "{}" } : {}) });
+    assert.equal(response.status, 410, method + " " + path);
+    assert.match((await response.json()).error, /Stoa/);
+  }
+  for (const file of ["/meetings.js", "/call.js"]) assert.equal((await fetch(origin + file)).status, 404, file);
 });
 test("existing room IDs and rosters survive the call provider change without publishing old external call links", async () => {
   const storageFile = resolve(temporary, "legacy-rooms.json");
@@ -272,16 +211,15 @@ test("automatic radar scans only opted-in members and respects the scan interval
 test("production output includes six pages, platform backend, seed data, and no private state", async () => {
   await import("../scripts/build.mjs");
   for (const file of ["account.html", "account.js", "scripts/identity.mjs", "scripts/ledger.mjs", "scripts/credits.mjs", "scripts/billing.mjs", "scripts/connections.mjs", "scripts/plans.mjs", "scripts/persistence.mjs", "scripts/platform-admin.mjs"]) assert.deepEqual(await readFile(resolve(root, "dist", file)), await readFile(resolve(root, file)), file);
-  const files = ["index.html", "explore.html", "services.html", "radar.html", "meetings.html", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "services.js", "radar.js", "meetings.js", "call.js", "package.json", "package-lock.json", "assets/favicon.svg", "assets/guohai.jpg", "scripts/serve.mjs", "scripts/store.mjs", "scripts/models.mjs", "scripts/activity.mjs", "scripts/calls.mjs", "scripts/auth.mjs", "stoa.html", "stoa.js", "world/engine.js", "world/sdk.js", "world/map.js", "world/kinds.js", "stoa/stage.js", "world/signaling.js", "worlds/plaza/map.json", "worlds/room/map.json", "scripts/spaces/service.mjs", "scripts/spaces/routes.mjs", "data/people.json", "data/projects.json", "data/offers.json", "data/activity.json", "themes/agora/theme.json", "themes/minimal/theme.json", "themes/cyberpunk/theme.json"];
+  const files = ["index.html", "explore.html", "services.html", "radar.html", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "services.js", "radar.js", "package.json", "package-lock.json", "assets/favicon.svg", "assets/guohai.jpg", "scripts/serve.mjs", "scripts/store.mjs", "scripts/models.mjs", "scripts/activity.mjs", "scripts/calls.mjs", "scripts/auth.mjs", "stoa.html", "stoa.js", "world/engine.js", "world/sdk.js", "world/map.js", "world/kinds.js", "stoa/stage.js", "world/signaling.js", "worlds/plaza/map.json", "worlds/room/map.json", "scripts/spaces/service.mjs", "scripts/spaces/routes.mjs", "data/people.json", "data/projects.json", "data/offers.json", "data/activity.json", "themes/agora/theme.json", "themes/minimal/theme.json", "themes/cyberpunk/theme.json"];
   for (const file of files) assert.deepEqual(await readFile(resolve(root, "dist", file)), await readFile(resolve(root, file)), file);
   for (const file of [".env", ".data/community.json"]) await assert.rejects(readFile(resolve(root, "dist", file)), { code: "ENOENT" });
   const built = await start({}, resolve(root, "dist"));
   try {
-    assert.equal((await request("/meetings.html", { base: built.url })).status, 200);
     assert.equal((await request("/account.html", { base: built.url })).status, 200);
     assert.equal((await request("/assets/agora-rtc.js", { base: built.url })).status, 200);
     assert.equal((await request("/assets/agora-rtm.js", { base: built.url })).status, 200);
-    assert.equal((await request("/call.js", { base: built.url })).status, 200);
+    for (const file of ["meetings.html", "meetings.js", "call.js"]) await assert.rejects(readFile(resolve(root, "dist", file)), { code: "ENOENT" });
     assert.equal((await request("/stoa/", { base: built.url })).status, 200);
     assert.equal((await (await request("/api/projects", { base: built.url })).json()).projects.length, 16);
   } finally { await close(built.instance); }
