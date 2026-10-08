@@ -62,7 +62,7 @@ export function createSpacesUi({ onSaved = () => {}, onMembersChanged = () => {}
     event.preventDefault();
     const error = $("#manage-error"), button = manageForm.querySelector("[type=submit]");
     error.textContent = ""; button.disabled = true;
-    try { const { space } = await api("/api/spaces/" + encodeURIComponent(managing.id), { method: "PUT", body: JSON.stringify(values(manageForm)) }); const themeChanged = space.themeId !== managing.themeId; managing = { ...managing, ...space }; say("Space settings saved."); onSaved(managing, themeChanged); }
+    try { const { space } = await api("/api/spaces/" + encodeURIComponent(managing.id), { method: "PUT", body: JSON.stringify(values(manageForm)) }); const themeChanged = space.themeId !== managing.themeId, accessChanged = space.visibility !== managing.visibility || space.access !== managing.access; managing = { ...managing, ...space }; say("Space settings saved."); onSaved(managing, themeChanged, accessChanged); }
     catch (failure) { error.textContent = failure.message; }
     finally { button.disabled = false; }
   });

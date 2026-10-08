@@ -91,10 +91,12 @@ if (map && themesResult.status === "fulfilled" && (!spaceId || space)) {
 await sessionReady;
 const self = { id: state.account?.id || state.profile?.id || null, ids: [state.account?.id, state.profile?.id].filter(Boolean), name: state.profile?.name || state.account?.name || "You", signedIn: Boolean(state.account || state.profile) };
 panel.setSignedIn(self.signedIn);
-spacesUi = createSpacesUi({ api, say: (text) => panel.say(text), onSaved: (saved, themeChanged) => {
+spacesUi = createSpacesUi({ api, say: (text) => panel.say(text), onSaved: (saved, themeChanged, accessChanged) => {
   document.querySelector("#stoa-title").textContent = saved.title; document.title = saved.title + " | Agora Build";
   document.querySelector("#stoa-kicker").textContent = kickerFor(saved);
+  // Tighter visibility or access can move everyone to a new channel, so the room checks in now rather than at the next heartbeat.
   stage?.refresh();
+  if (accessChanged && roomNow?.id === saved.id) stage?.rekeyRoom();
   if (themeChanged) panel.say("The new theme shows after you reload.");
 }, onMembersChanged: (id) => { if (roomNow?.id === id) stage?.rekeyRoom(); } });
 panel.setPeople([], self.name);
