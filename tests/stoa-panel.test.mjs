@@ -90,3 +90,20 @@ test("the space owner is never offered Remove", () => {
   panel.setPeople([{ id: "account:o", name: "Owner" }], "Me", { manage: true, hostId: "account:me", ownerId: "account:o", selfId: "account:me" });
   assert.deepEqual(doc.querySelector("#stoa-people").children[1].children.filter((child) => child.tagName === "button").map((button) => button.textContent), ["Make host"]);
 });
+
+test("Manage shows only for the owner; your spaces only for signed-in people on the plaza", () => {
+  const doc = fakeDocument(), panel = createPanel(doc);
+  let managed = 0;
+  panel.on({ manage: () => { managed += 1; } });
+  panel.showRoom({ kicker: "UNLISTED SPACE", title: "Lab", topic: null, tags: [], host: true, owner: false, leaveLabel: "Leave" });
+  assert.equal(doc.querySelector("#stoa-manage").hidden, true);
+  panel.showRoom({ kicker: "UNLISTED SPACE", title: "Lab", topic: null, tags: [], host: true, owner: true, leaveLabel: "Leave" });
+  assert.equal(doc.querySelector("#stoa-manage").hidden, false);
+  doc.querySelector("#stoa-manage").listeners.click();
+  assert.equal(managed, 1);
+  panel.showPlaza();
+  assert.equal(doc.querySelector("#stoa-mine-section").hidden, true);
+  panel.setSignedIn(true);
+  panel.showPlaza();
+  assert.equal(doc.querySelector("#stoa-mine-section").hidden, false);
+});

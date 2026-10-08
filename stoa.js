@@ -6,6 +6,7 @@ import { loadAgora } from "./world/sdk.js";
 import { createPanel } from "./stoa/panel.js";
 import { createCallView } from "./stoa/call.js";
 import { createDecorEditor } from "./stoa/decor.js";
+import { createSpacesUi } from "./stoa/spaces.js";
 import { createStage, outsideDoor } from "./stoa/stage.js";
 
 const root = document.querySelector("#stoa");
@@ -32,9 +33,10 @@ const [spaceResult, worldResult, themesResult, spacesResult] = await Promise.all
 ]);
 failure(spaceResult, "This space"); failure(worldResult, "The map"); failure(themesResult, "Themes"); failure(spacesResult, "The room list");
 const space = spaceResult.value?.space || null;
+document.querySelector("#stoa-kicker").textContent = roomSlug ? "THE STOA / ROOM" : space ? (space.visibility === "private" ? "THE STOA / PRIVATE SPACE" : "THE STOA / UNLISTED SPACE") : "THE STOA / PUBLIC PLAZA";
 if (space) { document.querySelector("#stoa-title").textContent = space.title; document.title = space.title + " | Agora Build"; }
 
-let map = null, engine = null, minimal = stored.get() === "true", preview = null, plazaBounds = null, active = () => null, call = null, decor = null;
+let map = null, engine = null, minimal = stored.get() === "true", preview = null, plazaBounds = null, active = () => null, call = null, decor = null, spacesUi = null;
 try { if (worldResult.status === "fulfilled") map = parseMap(worldResult.value); } catch (error) { problems.push("The map is not valid (" + error.message + ")."); }
 let summaries = new Map((spacesResult.value?.rooms || []).map((room) => [room.slug, room]));
 const lot = roomSlug && map ? map.lots.find((entry) => entry.slug === roomSlug) || null : null;
@@ -77,10 +79,13 @@ if (map && themesResult.status === "fulfilled" && (!spaceId || space)) {
 
 await sessionReady;
 const self = { id: state.account?.id || state.profile?.id || null, ids: [state.account?.id, state.profile?.id].filter(Boolean), name: state.profile?.name || state.account?.name || "You", signedIn: Boolean(state.account || state.profile) };
+panel.setSignedIn(self.signedIn);
+spacesUi = createSpacesUi({ api, say: (text) => panel.say(text) });
 panel.setPeople([], self.name);
 panel.canTalk(self.signedIn);
 let live = null, stage = null;
 const unavailable = "The Stoa view isn't available, so there's nothing to walk or talk in.";
+const startSpace = (prefill) => self.signedIn ? spacesUi.openCreate(prefill) : (panel.say("Sign in to start a space."), openSignIn());
 // Controls work even without the canvas: Go to explains where the door is, Sign in and Start a space still do their jobs.
 panel.on({
   go: (target) => {
@@ -104,7 +109,8 @@ panel.on({
     panel.say("Decor mode is on. Choose a decoration, then click the map or use Place in front of me.");
     canvas.focus();
   },
-  start: async () => { try { const created = await api("/api/spaces", { method: "POST", body: JSON.stringify({ title: self.name + "'s space" }) }); location.assign("/stoa/s/" + created.space.id); } catch (error) { panel.say(error.message); } },
+  start: () => startSpace(),
+  manage: () => spaceId && spacesUi.openManage(spaceId),
   signin: () => openSignIn()
 });
 // Signaling loads and connects in the background: the page is already usable, and the stage picks the connection up when it is ready.
@@ -159,3 +165,12 @@ if (engine) {
 }
 if (problems.length) panel.say((engine && !self.signedIn && !spaceId ? ["You're watching the plaza. Sign in to walk and talk."] : []).concat(problems).join(" "));
 else if (!engine) panel.say("The Stoa view is not available.");
+// Your own spaces show on the plaza; ?start= (from the home page) opens the create dialog with that name.
+if (!spaceId && self.signedIn) api("/api/spaces/mine").then((mine) => spacesUi.showMine(mine)).catch(() => {});
+const params = new URLSearchParams(location.search);
+if (!spaceId && params.has("start")) {
+  const title = params.get("start");
+  params.delete("start");
+  history.replaceState(null, "", location.pathname + (params.size ? "?" + params : "") + location.hash);
+  startSpace({ title });
+}

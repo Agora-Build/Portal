@@ -36,7 +36,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
   const checkManage = () => { const can = canManage(); if (can !== manageNow) { manageNow = can; onManage(can); } };
   const doorTiles = (rect) => { const tiles = []; for (let y = rect.y; y < rect.y + rect.height; y += 1) for (let x = rect.x; x < rect.x + rect.width; x += 1) if (roleAt(map, x, y) === "door") tiles.push({ x, y }); return tiles; };
   const showDecor = (items) => { currentDecor = items || []; if (!editing) engine.setDecor(currentDecor); };
-  const showRoom = (space, hostId) => { panel.showRoom({ kicker: here?.kind === "lot" ? "LOT ROOM" : space.visibility === "private" ? "PRIVATE SPACE" : "UNLISTED SPACE", title: space.title, topic: space.topic, tags: space.tags || [], host: Boolean(self.id) && (mine(hostId) || mine(space.ownerId)), leaveLabel: here?.kind === "lot" ? "Back to the plaza" : "Leave this space", decorate: canManage() }); checkManage(); showPeople(); };
+  const showRoom = (space, hostId) => { panel.showRoom({ kicker: here?.kind === "lot" ? "LOT ROOM" : space.visibility === "private" ? "PRIVATE SPACE" : "UNLISTED SPACE", title: space.title, topic: space.topic, tags: space.tags || [], host: Boolean(self.id) && (mine(hostId) || mine(space.ownerId)), leaveLabel: here?.kind === "lot" ? "Back to the plaza" : "Leave this space", decorate: canManage(), owner: here?.kind === "space" && mine(space.ownerId) }); checkManage(); showPeople(); };
 
   // Every transition claims `here` before it awaits anything; a superseded one stops as soon as it notices.
   async function settle(next) {

@@ -19,7 +19,7 @@
     </header>
     <main id="main" class="main-content stoa-main">
       <section class="stoa" id="stoa" aria-labelledby="stoa-title">
-        <div class="stoa-heading"><div><p class="kicker">THE STOA / PUBLIC PLAZA</p><h1 id="stoa-title">Walk into the plaza.</h1></div><button class="button button-secondary button-small" type="button" id="stoa-minimal" aria-pressed="false">Minimal view</button></div>
+        <div class="stoa-heading"><div><p class="kicker" id="stoa-kicker">THE STOA / PUBLIC PLAZA</p><h1 id="stoa-title">Walk into the plaza.</h1></div><button class="button button-secondary button-small" type="button" id="stoa-minimal" aria-pressed="false">Minimal view</button></div>
         <div class="stoa-layout">
           <div class="stoa-stage"><div class="stoa-view"><canvas id="stoa-canvas" tabindex="0" aria-label="Plaza map" aria-describedby="stoa-help"></canvas><div class="stoa-video" id="stoa-video" data-layout="strip" role="region" aria-label="Call video" hidden></div></div><p class="stoa-help" id="stoa-help">Click or tap to walk. Select the map to use the arrow keys or WASD.</p></div>
           <aside class="stoa-panel" aria-label="Around you">
@@ -34,6 +34,7 @@
                 <button class="button button-small" type="submit">Set topic</button>
               </form>
               <button class="button button-secondary button-small" type="button" id="stoa-decor-open" hidden>Decorate</button>
+              <button class="button button-secondary button-small" type="button" id="stoa-manage" hidden>Manage space</button>
               <section class="stoa-decor" id="stoa-decor" hidden aria-labelledby="stoa-decor-title">
                 <h3 class="stoa-panel-title" id="stoa-decor-title">Decorate</h3>
                 <p class="stoa-decor-selected" id="stoa-decor-selected" aria-live="polite"></p>
@@ -65,6 +66,12 @@
             <section id="stoa-rooms-section" aria-labelledby="stoa-rooms-title">
               <h2 class="stoa-panel-title" id="stoa-rooms-title">Rooms</h2>
               <ul class="stoa-rooms" id="stoa-rooms"></ul>
+            </section>
+            <section id="stoa-mine-section" hidden aria-labelledby="stoa-mine-title">
+              <h2 class="stoa-panel-title" id="stoa-mine-title">Your spaces</h2>
+              <ul class="stoa-rooms" id="stoa-mine"></ul>
+              <p class="stoa-mine-note" id="stoa-mine-note"></p>
+              <button class="button button-small" type="button" id="stoa-new">Start a space</button>
             </section>
             <h2 class="stoa-panel-title">Here now</h2>
             <ul class="stoa-people" id="stoa-people"></ul>
@@ -100,6 +107,51 @@
     <div class="dialog-head"><span class="kicker">MAKE ROOM FOR A CONVERSATION</span><button class="close-button" type="button" data-close aria-label="Close room form">&times;</button></div>
     <h2 id="room-title">Meet around a purpose.</h2><p class="dialog-intro">Create a group room, share the invite, and open a video call together.</p>
     <form id="room-form" class="stack-form"><label>Room name<input name="title" required minlength="2" maxlength="80" placeholder="Voice agents build session"></label><label>What are we meeting for?<textarea name="intent" required minlength="2" maxlength="300" rows="3" placeholder="Debug a problem, plan a demo day, or bring a whiteboard session into the next sprint."></textarea></label><p class="form-note">Room names, purposes, and rosters are public. Audio, video, and screen sharing stay in this workspace, powered by Agora.</p><p id="room-error" class="form-error" role="alert"></p><button type="submit" class="button">Create meeting room <span aria-hidden="true">&#8599;</span></button></form>
+  </dialog>
+  <dialog id="space-dialog" aria-labelledby="space-title">
+    <div class="dialog-head"><span class="kicker">A PLACE OF YOUR OWN</span><button class="close-button" type="button" data-close aria-label="Close space form">&times;</button></div>
+    <h2 id="space-title">Start a space.</h2>
+    <p class="dialog-intro">Your space is unlisted or private: people find it through you. You host it whenever you're there.</p>
+    <form id="space-form" class="stack-form">
+      <label>Name<input name="title" required minlength="2" maxlength="80" placeholder="Voice agents build session"></label>
+      <label>What is it for? <span class="optional">optional</span><textarea name="purpose" maxlength="300" rows="2" placeholder="Pair on interruption handling every Thursday."></textarea></label>
+      <div class="form-row">
+        <label>Who can find it<select name="visibility"><option value="unlisted">Anyone with the link</option><option value="private">Members and invited people</option></select></label>
+        <label>Who can walk in<select name="access"><option value="open">Anyone signed in</option><option value="house">House members</option><option value="members">Members only</option></select></label>
+      </div>
+      <div class="form-row">
+        <label>Capacity<input name="capacity" type="number" min="2" max="50" required></label>
+        <label>Theme<select name="themeId"><option value="agora">Agora</option><option value="minimal">Minimal</option><option value="cyberpunk">Cyberpunk</option></select></label>
+      </div>
+      <p id="space-error" class="form-error" role="alert"></p>
+      <button type="submit" class="button">Create space</button>
+    </form>
+  </dialog>
+  <dialog id="manage-dialog" aria-labelledby="manage-title">
+    <div class="dialog-head"><span class="kicker">YOUR SPACE</span><button class="close-button" type="button" data-close aria-label="Close manage dialog">&times;</button></div>
+    <h2 id="manage-title">Manage space</h2>
+    <form id="manage-form" class="stack-form">
+      <label>Name<input name="title" required minlength="2" maxlength="80"></label>
+      <label>What is it for? <span class="optional">optional</span><textarea name="purpose" maxlength="300" rows="2"></textarea></label>
+      <div class="form-row">
+        <label>Who can find it<select name="visibility"><option value="unlisted">Anyone with the link</option><option value="private">Members and invited people</option></select></label>
+        <label>Who can walk in<select name="access"><option value="open">Anyone signed in</option><option value="house">House members</option><option value="members">Members only</option></select></label>
+      </div>
+      <div class="form-row">
+        <label>Capacity<input name="capacity" type="number" min="2" max="50" required></label>
+        <label>Theme<select name="themeId"><option value="agora">Agora</option><option value="minimal">Minimal</option><option value="cyberpunk">Cyberpunk</option></select></label>
+      </div>
+      <button type="submit" class="button button-small">Save settings</button>
+    </form>
+    <h3 class="stoa-panel-title">Invite</h3>
+    <div class="manage-invite"><button class="button button-secondary button-small" type="button" id="manage-invite">Create an invite link</button><input id="manage-invite-url" readonly hidden aria-label="Invite link"><button class="button button-secondary button-small" type="button" id="manage-copy" hidden>Copy link</button></div>
+    <p class="form-note" id="manage-invite-note"></p>
+    <h3 class="stoa-panel-title">Members</h3>
+    <ul class="manage-people" id="manage-members"></ul>
+    <h3 class="stoa-panel-title">Removed</h3>
+    <ul class="manage-people" id="manage-blocked"></ul>
+    <p id="manage-error" class="form-error" role="alert"></p>
+    <div class="dialog-actions"><button class="delete-button" type="button" id="manage-delete">Delete this space</button></div>
   </dialog>
   <div id="toast" role="status" aria-live="polite"></div>
 </body>
