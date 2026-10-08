@@ -391,3 +391,30 @@ test("a decor notice from the host refetches the room; from anyone else it is ig
   await tick();
   assert.equal(gets.length, 1);
 });
+test("saved decorations survive a same-room channel change and a save that races a settle", async () => {
+  const saved = [{ id: "d2", kind: "lamp", x: lot.entry.x, y: lot.entry.y - 1, rotation: 0, variant: 0 }];
+  const api = async (path) => path === "/api/spaces/plaza/enter" ? access("plaza", "plaza-1") : path.endsWith("/enter") ? access("lot-" + lot.slug, "lot-ch") : path.endsWith("/decor") ? { decor: saved, version: 2 } : {};
+  const { stage, calls, leases } = setup({ api });
+  await stage.toPlaza(null);
+  await stage.enterLot(lot);
+  assert.equal(await stage.saveDecor(saved), true);
+  leases.at(-1).options.onAccess({ channel: "lot-ch-2", key: null, blocked: [], hostId: "a-me" });
+  await tick(); await tick();
+  assert.deepEqual(calls.joined.at(-1), "lot-ch-2");
+  assert.deepEqual(calls.decor.at(-1), saved);
+});
+test("onManage reports when hosting is gained or lost, and the region protects doors and the entry", async () => {
+  const managed = [];
+  const api = async (path) => path === "/api/spaces/plaza/enter" ? access("plaza", "plaza-1") : path.endsWith("/enter") ? access("lot-" + lot.slug, "lot-ch") : {};
+  const { stage, leases } = setup({ api, onManage: (can) => managed.push(can) });
+  await stage.toPlaza(null);
+  await stage.enterLot(lot);
+  assert.deepEqual(managed, [true]);
+  const region = stage.decorRegion();
+  assert.deepEqual(region.start, lot.entry);
+  assert.deepEqual(region.protect[0], lot.entry);
+  leases.at(-1).options.onAccess({ channel: "lot-ch", hostId: "someone-else", blocked: [] });
+  assert.deepEqual(managed, [true, false]);
+  await stage.leaveRoom();
+  assert.equal(stage.decorRegion(), null);
+});

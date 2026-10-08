@@ -97,7 +97,8 @@ panel.on({
   decorate: () => {
     if (!stage?.canManage()) { panel.say("Only the host can decorate."); return; }
     stage.setEditing(true);
-    decor?.open({ items: stage.decor(), area: stage.decorArea() });
+    decor?.open({ items: stage.decor(), ...stage.decorRegion() });
+    panel.decorating(decor?.isOpen());
     panel.say("Decor mode is on. Choose a decoration, then click the map or use Place in front of me.");
     canvas.focus();
   },
@@ -138,8 +139,8 @@ if (engine) {
   engine.setSelf({ id: self.id || undefined, name: self.name });
   call = createCallView({ engine, api, self, people: () => stage?.people() || [], say: (text) => panel.say(text) });
   call.setLayout(active().video);
-  decor = createDecorEditor({ canvas, engine, map, say: (text) => panel.say(text), onSave: (items) => stage.saveDecor(items), onClose: () => stage.setEditing(false) });
-  stage = createStage({ api, map, engine, panel, live: null, self, plaza: spaceId ? null : { bounds: plazaBounds, channel: null }, onRoom: (room) => { decor?.abort(); if (room) call.enter(room.id); else call.exit(); }, onPeople: () => call.refresh() });
+  decor = createDecorEditor({ canvas, engine, map, say: (text) => panel.say(text), onSave: (items) => stage.saveDecor(items), onClose: () => { stage.setEditing(false); panel.decorating(false); } });
+  stage = createStage({ api, map, engine, panel, live: null, self, plaza: spaceId ? null : { bounds: plazaBounds, channel: null }, onRoom: (room) => { decor?.abort(); if (room) call.enter(room.id); else call.exit(); }, onPeople: () => call.refresh(), onManage: (can) => { if (!can) decor?.abort(); } });
   engine.on("arrive", (tile) => stage.onArrive(tile));
   // Leaving the page releases the entry lease and, as far as the browser allows, the Signaling login.
   addEventListener("pagehide", () => { call.exit(); stage.unload(); live?.close().catch(() => {}); });

@@ -1,4 +1,4 @@
-import { walkable } from "../world/map.js";
+import { roleAt, walkable } from "../world/map.js";
 import { openPlace } from "./place.js";
 import { createLease as realLease } from "./lease.js";
 
@@ -9,8 +9,8 @@ export const outsideDoor = (map, lot) => [[0, 1], [0, -1], [1, 0], [-1, 0]].map(
 // Moves the person between the plaza, lot rooms, and user spaces: entry leases on the server, channels on Signaling.
 const REFRESH_GAP = 5000;
 // `live` may be null at first and attached later with attachLive, so the page never waits on the SDK.
-export function createStage({ api, map, engine, panel, live: firstLive, self, plaza, onRoom = () => {}, onPeople = () => {}, createLease = realLease, schedule = (callback) => typeof requestAnimationFrame === "function" ? requestAnimationFrame(callback) : setTimeout(callback, 16), now = () => Date.now(), later = (callback, delay) => setTimeout(callback, delay) }) {
-  let live = firstLive, places = [], lease = null, here = null, chain = Promise.resolve(), drawing = false, everyone = [], roomId = null, currentDecor = [], editing = false;
+export function createStage({ api, map, engine, panel, live: firstLive, self, plaza, onRoom = () => {}, onPeople = () => {}, onManage = () => {}, createLease = realLease, schedule = (callback) => typeof requestAnimationFrame === "function" ? requestAnimationFrame(callback) : setTimeout(callback, 16), now = () => Date.now(), later = (callback, delay) => setTimeout(callback, delay) }) {
+  let live = firstLive, places = [], lease = null, here = null, chain = Promise.resolve(), drawing = false, everyone = [], roomId = null, currentDecor = [], editing = false, manageNow = false;
   // State changes run strictly one at a time, each re-checking its preconditions when it starts.
   const transition = (task) => (chain = chain.then(task, task).catch((error) => panel.say(error.message || "Something went wrong.")));
   const doors = new Map(map.lots.map((lot) => [lot.door.x + "," + lot.door.y, lot]));
@@ -33,8 +33,10 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
   };
   const mine = (id) => Boolean(id) && (self.ids || [self.id]).includes(id);
   const canManage = () => Boolean(here && (here.kind === "lot" || here.kind === "space") && here.leased && self.signedIn && (mine(here.access?.hostId) || mine(here.space?.ownerId)));
+  const checkManage = () => { const can = canManage(); if (can !== manageNow) { manageNow = can; onManage(can); } };
+  const doorTiles = (rect) => { const tiles = []; for (let y = rect.y; y < rect.y + rect.height; y += 1) for (let x = rect.x; x < rect.x + rect.width; x += 1) if (roleAt(map, x, y) === "door") tiles.push({ x, y }); return tiles; };
   const showDecor = (items) => { currentDecor = items || []; if (!editing) engine.setDecor(currentDecor); };
-  const showRoom = (space, hostId) => panel.showRoom({ kicker: here?.kind === "lot" ? "LOT ROOM" : space.visibility === "private" ? "PRIVATE SPACE" : "UNLISTED SPACE", title: space.title, topic: space.topic, tags: space.tags || [], host: Boolean(self.id) && (mine(hostId) || mine(space.ownerId)), leaveLabel: here?.kind === "lot" ? "Back to the plaza" : "Leave this space" });
+  const showRoom = (space, hostId) => { panel.showRoom({ kicker: here?.kind === "lot" ? "LOT ROOM" : space.visibility === "private" ? "PRIVATE SPACE" : "UNLISTED SPACE", title: space.title, topic: space.topic, tags: space.tags || [], host: Boolean(self.id) && (mine(hostId) || mine(space.ownerId)), leaveLabel: here?.kind === "lot" ? "Back to the plaza" : "Leave this space", decorate: canManage() }); checkManage(); };
 
   // Every transition claims `here` before it awaits anything; a superseded one stops as soon as it notices.
   async function settle(next) {
@@ -65,6 +67,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
       lease = made;
     }
     const talk = Boolean(next.leased) && self.signedIn;
+    checkManage();
     panel.canTalk(talk, talk || !self.signedIn ? undefined : next.full ? "The plaza is full \u2014 you're watching." : next.kind === "left" ? "You're no longer in this space." : "You're watching.");
   }
 
@@ -79,7 +82,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
       return;
     }
     for (const place of places) place.setBlocked(access.blocked || []);
-    if (here.kind !== "plaza" && access.hostId !== here.access.hostId) { here.access = { ...here.access, ...access }; refreshRoom(); }
+    if (here.kind !== "plaza" && access.hostId !== here.access.hostId) { here.access = { ...here.access, ...access }; checkManage(); refreshRoom(); }
   }
 
   // A lease the server dropped (410) gets one re-entry into the same place; removed or hidden (403, 404) does not.
@@ -122,7 +125,7 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     if (!at || at.kind === "plaza" || !at.space) return;
     try {
       const { space } = await api("/api/spaces/" + at.space.id + (at.invite ? "?invite=" + encodeURIComponent(at.invite) : ""));
-      if (here === at) { showRoom(space, space.hostId); showDecor(space.decor); }
+      if (here === at) { here.space = { ...here.space, ...space }; showRoom(space, space.hostId); showDecor(space.decor); }
     } catch { /* the next heartbeat reports a lost lease */ }
   }
 
@@ -210,6 +213,12 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
     people: () => everyone,
     canManage,
     decor: () => currentDecor,
+    decorRegion() {
+      if (here?.kind === "lot") return { area: here.lot.interior, start: here.lot.entry, protect: [here.lot.entry, ...doorTiles(here.lot.interior)] };
+      if (here?.kind !== "space") return null;
+      const area = { x: 0, y: 0, width: map.width, height: map.height };
+      return { area, start: map.spawns[0], protect: [...map.spawns, ...doorTiles(area)] };
+    },
     decorArea: () => here?.kind === "lot" ? here.lot.interior : here?.kind === "space" ? { x: 0, y: 0, width: map.width, height: map.height } : null,
     setEditing(value) { editing = Boolean(value); if (!editing) engine.setDecor(currentDecor); },
     async saveDecor(items) {
@@ -217,13 +226,14 @@ export function createStage({ api, map, engine, panel, live: firstLive, self, pl
       if (!canManage()) { panel.say("Only the host can decorate."); return false; }
       try {
         const result = await api("/api/spaces/" + encodeURIComponent(at.space.id) + "/decor", { method: "PUT", body: JSON.stringify({ items }) });
-        if (here !== at) return false;
+        if (!(here?.space?.id === at.space.id && here.leased)) return false;
         editing = false;
+        here.space = { ...here.space, decor: result.decor };
         showDecor(result.decor);
         for (const place of places) place.decorChanged(result.version);
         panel.say("Decorations saved.");
         return true;
-      } catch (error) { if (here === at) panel.say(error.message); return false; }
+      } catch (error) { if (here?.space?.id === at.space.id) panel.say(error.message); return false; }
     },
     say(text) {
       if (here?.kind === "left") { panel.say("You're no longer in this space."); return false; }

@@ -8,6 +8,8 @@ export function createPanel(doc = document) {
   const status = $("#stoa-status"), here = $("#stoa-here"), topicForm = $("#stoa-topic-form"), offer = $("#stoa-offer"), roomsSection = $("#stoa-rooms-section"), rooms = $("#stoa-rooms"), people = $("#stoa-people"), messages = $("#stoa-messages"), sayForm = $("#stoa-say"), sayInput = $("#stoa-say-text"), signin = $("#stoa-signin"), signinText = $("#stoa-signin-text"), signinButton = $("#stoa-signin-button");
   let shownPeople = null;
   const roomRows = new Map();
+  let canDecorate = false, decorating = false;
+  const syncDecor = () => { $("#stoa-decor-open").hidden = !canDecorate || decorating; };
   const handlers = { go() {}, say() { return false; }, topic() {}, leave() {}, start() {}, signin() {}, decorate() {} };
   sayForm.addEventListener("submit", (event) => { event.preventDefault(); if (handlers.say(sayInput.value)) sayInput.value = ""; });
   topicForm.addEventListener("submit", (event) => { event.preventDefault(); handlers.topic(topicForm.elements.topic.value, topicForm.elements.tags.value); });
@@ -16,6 +18,8 @@ export function createPanel(doc = document) {
   $("#stoa-decor-open").addEventListener("click", () => handlers.decorate());
   signinButton.addEventListener("click", () => handlers.signin());
   return {
+    // The Decorate button is for hosts, and hidden while the editor is open.
+    decorating(on) { decorating = Boolean(on); syncDecor(); },
     on(next) { Object.assign(handlers, next); },
     say(message) { status.textContent = message; },
     // Rows are created once per room and updated in place, so a focused Go to button keeps focus across polls.
@@ -56,17 +60,17 @@ export function createPanel(doc = document) {
     clearMessages() { messages.replaceChildren(); },
     // When talking isn't possible, a reason (for someone already signed in) replaces the sign-in prompt.
     canTalk(allowed, reason = "") { sayForm.hidden = !allowed; signin.hidden = allowed; signinText.textContent = reason || "Sign in to walk and talk."; signinButton.hidden = Boolean(reason); },
-    showRoom({ kicker, title, topic, tags = [], host, leaveLabel }) {
+    showRoom({ kicker, title, topic, tags = [], host, decorate = host, leaveLabel }) {
       here.hidden = false; roomsSection.hidden = true;
       $("#stoa-here-kicker").textContent = kicker;
       $("#stoa-here-title").textContent = title;
       $("#stoa-here-topic").textContent = topic ? topic + (tags.length ? " · " + tags.join(", ") : "") : host ? "You're the host. Set a topic so people know what this room is about." : "No topic yet.";
       topicForm.hidden = !host;
-      $("#stoa-decor-open").hidden = !host;
+      canDecorate = Boolean(decorate); syncDecor();
       $("#stoa-leave").textContent = leaveLabel;
       sayInput.placeholder = "Say something to the room";
     },
-    showPlaza() { here.hidden = true; $("#stoa-decor-open").hidden = true; topicForm.hidden = true; roomsSection.hidden = false; sayInput.placeholder = "Say something on the plaza"; },
+    showPlaza() { here.hidden = true; canDecorate = false; syncDecor(); topicForm.hidden = true; roomsSection.hidden = false; sayInput.placeholder = "Say something on the plaza"; },
     showOffer({ spaces = [], canCreate = false } = {}) {
       offer.hidden = false;
       $("#stoa-offer-list").replaceChildren(...spaces.map((space) => { const item = node("li"), link = node("a", space.title); link.href = space.path; item.append(link); return item; }));
