@@ -10,19 +10,19 @@ export function agoraConfig(env = process.env) {
 }
 
 export function createAgoraCalls(config = agoraConfig(), { now = Date.now } = {}) {
+  function credentials(channel, prefix, input) {
+    if (!config.ready) throw new AppError(503, "Agora calls are not connected yet.");
+    // Each tab gets its own identity; renewals can only reuse this person's IDs.
+    const uid = input.uid === undefined ? prefix + randomBytes(6).toString("hex") : input.uid;
+    if (typeof uid !== "string" || !uid.startsWith(prefix) || !/^[a-f0-9]{12}$/.test(uid.slice(prefix.length))) throw new AppError(422, "This call identity does not belong to your profile.");
+    const screenUid = uid + "_screen";
+    const sign = (account) => agoraToken.RtcTokenBuilder.buildTokenWithUserAccount(config.appId, config.certificate, channel, account, agoraToken.RtcRole.PUBLISHER, config.ttl, config.ttl);
+    return { provider: "agora", appId: config.appId, channel, uid, screenUid, token: sign(uid), screenToken: sign(screenUid), expiresAt: new Date(now() + config.ttl * 1000).toISOString() };
+  }
   return {
     ready: config.ready,
-    issue(room, person, input = {}) {
-      if (!room.participants.includes(person.id)) throw new AppError(403, "Join this room's roster before entering the call.");
-      if (!config.ready) throw new AppError(503, "Agora calls are not connected yet.");
-      const prefix = person.id.replace(/^member:/, "") + "_";
-      // Each tab gets its own identity; renewals can only reuse this member's IDs.
-      const uid = input.uid === undefined ? prefix + randomBytes(6).toString("hex") : input.uid;
-      if (typeof uid !== "string" || !uid.startsWith(prefix) || !/^[a-f0-9]{12}$/.test(uid.slice(prefix.length))) throw new AppError(422, "This call identity does not belong to your profile.");
-      const channel = "agora-build-" + room.id;
-      const screenUid = uid + "_screen";
-      const sign = (account) => agoraToken.RtcTokenBuilder.buildTokenWithUserAccount(config.appId, config.certificate, channel, account, agoraToken.RtcRole.PUBLISHER, config.ttl, config.ttl);
-      return { provider: "agora", appId: config.appId, channel, uid, screenUid, token: sign(uid), screenToken: sign(screenUid), expiresAt: new Date(now() + config.ttl * 1000).toISOString() };
+    issueSpace(space, actor, input = {}) {
+      return credentials("agora-build-space-" + space.id, actor.id.replace(/^(account|member):/, "") + "_", input);
     }
   };
 }

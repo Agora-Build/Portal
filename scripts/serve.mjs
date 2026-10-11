@@ -15,10 +15,15 @@ import { createLedger } from "./ledger.mjs";
 import { createBilling } from "./billing.mjs";
 import { createConnections } from "./connections.mjs";
 import { createPostgresPersistence } from "./persistence.mjs";
+import { createSignaling, signalingConfig } from "./spaces/signaling.mjs";
+import { createSpaces, loadWorlds } from "./spaces/service.mjs";
+import { handleSpaces } from "./spaces/routes.mjs";
+import { loadThemes } from "./spaces/themes.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const sdkFile = createRequire(import.meta.url).resolve("agora-rtc-sdk-ng");
-const publicFiles = new Set(["index.html", "explore.html", "services.html", "radar.html", "meetings.html", "account.html", "account.js", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "services.js", "radar.js", "meetings.js", "call.js", "assets/agora-rtc.js", "assets/favicon.svg", "assets/guohai.jpg"]);
+// Vendored browser SDKs are served from node_modules in development and from dist/assets after a build.
+const vendor = { "assets/agora-rtc.js": createRequire(import.meta.url).resolve("agora-rtc-sdk-ng"), "assets/agora-rtm.js": createRequire(import.meta.url).resolve("agora-rtm-sdk") };
+const publicFiles = new Set(["index.html", "explore.html", "services.html", "radar.html", "account.html", "account.js", "stoa.html", "stoa.js", "world/map.js", "world/kinds.js", "world/themes.js", "world/camera.js", "world/motion.js", "world/renderer-canvas.js", "world/engine.js", "world/sdk.js", "world/rtc-client.js", "stoa/panel.js", "stoa/stage.js", "stoa/call.js", "stoa/decor.js", "stoa/place.js", "stoa/lease.js", "stoa/spaces.js", "world/protocol.js", "world/crypto.js", "world/signaling.js", "world/presence.js", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "services.js", "radar.js", "assets/agora-rtc.js", "assets/agora-rtm.js", "assets/favicon.svg", "assets/guohai.jpg"]);
 const types = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".jpg": "image/jpeg" };
 
 function json(response, status, body, headers = {}) {
@@ -65,6 +70,10 @@ export function createAppServer(directory = root, options = {}) {
   const connections = options.connections || createConnections(store, auth);
   const models = options.models || createModelClient(modelConfig());
   const activity = options.activity || createActivityFeed({ store, projectsFile: resolve(dataDirectory, "projects.json"), snapshotFile: resolve(dataDirectory, "activity.json") });
+  const worlds = options.worlds || loadWorlds(directory);
+  const themes = options.themes || loadThemes(directory);
+  const signaling = options.signaling || createSignaling(signalingConfig());
+  const spaces = options.spaces || createSpaces({ store, worlds, signaling, calls, secret: options.channelSecret ?? signalingConfig().secret, admins: (process.env.PLATFORM_ADMINS || "").split(",").map((id) => id.trim()).filter(Boolean), plazaCapacity: options.plazaCapacity });
   const windows = new Map();
   const scanning = new Set();
   const radarHours = Math.max(1, Number(process.env.RADAR_INTERVAL_HOURS) || 24);
@@ -311,33 +320,29 @@ export function createAppServer(directory = root, options = {}) {
           limit("radar:" + person.id, 1, 60000);
           allowance(request);
           json(response, 200, { result: await scan(person) });
-        } else if (path === "/api/rooms" && request.method === "GET") json(response, 200, { rooms: await store.rooms(), calls: { provider: "agora", ready: calls.ready } });
-        else if (path === "/api/rooms" && request.method === "POST") {
-          await member(); limit("rooms:" + request.socket.remoteAddress, 10, 3600000);
-          json(response, 201, { room: await store.createRoom(token, await body(request)) });
-        } else if (/^\/api\/rooms\/[a-f0-9-]+\/join$/.test(path) && request.method === "POST") {
-          json(response, 200, { room: await store.joinRoom(token, path.split("/")[3]) });
-        } else if (/^\/api\/rooms\/[a-f0-9-]+\/call$/.test(path) && request.method === "POST") {
-          const person = await member();
-          const room = (await store.rooms()).find((room) => room.id === path.split("/")[3]);
-          if (!room) throw new AppError(404, "This room was not found.");
-          limit("call:" + person.id, 30, 60000);
-          json(response, 200, calls.issue(room, person, await body(request)));
-        } else throw new AppError(404, "This page or service was not found.");
+        } else if (path === "/api/rooms" || path.startsWith("/api/rooms/")) throw new AppError(410, "Meeting rooms are now Stoa spaces. Start one from the Stoa.");
+        else {
+          const handled = await handleSpaces({ path, method: request.method, url: requestUrl, token, read: () => body(request), spaces, worlds, themes, limit, ip: request.socket.remoteAddress });
+          if (!handled) throw new AppError(404, "This page or service was not found.");
+          json(response, handled.status, handled.body);
+        }
         return;
       }
       if (!["GET", "HEAD"].includes(request.method)) { response.writeHead(405, { Allow: "GET, HEAD" }).end("Method not allowed"); return; }
       const meeting = /^\/meet\/([a-f0-9-]{36})$/.exec(path);
-      if (meeting && !(await store.rooms()).some((room) => room.id === meeting[1])) { response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("This meeting room was not found."); return; }
-      const filename = meeting ? "meetings.html" : path === "/" ? "index.html" : path.slice(1);
+      if (meeting) { response.writeHead(308, { Location: "/stoa/s/" + meeting[1] + requestUrl.search }).end(); return; }
+      if (path === "/meetings.html") { const room = requestUrl.searchParams.get("room"); response.writeHead(308, { Location: /^[a-f0-9-]{36}$/.test(room || "") ? "/stoa/s/" + room : "/stoa/" }).end(); return; }
+      const stoa = /^\/stoa(?:\/|\/room\/([a-z0-9-]{2,40})|\/s\/([a-f0-9-]{36}))$/.exec(path);
+      if (stoa && ((stoa[1] && !worlds.plaza.map.lots.some((lot) => lot.slug === stoa[1])) || (stoa[2] && !(await spaces.visible(token, stoa[2], requestUrl.searchParams.get("invite")))))) { response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("This space was not found."); return; }
+      const filename = stoa ? "stoa.html" : path === "/" ? "index.html" : path.slice(1);
       if (!publicFiles.has(filename)) { response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found"); return; }
       const file = resolve(directory, filename);
-      const content = await readFile(filename === "assets/agora-rtc.js" && !existsSync(file) ? sdkFile : file);
+      const content = await readFile(Object.hasOwn(vendor, filename) && !existsSync(file) ? vendor[filename] : file);
       response.writeHead(200, { "Content-Type": types[extname(filename)], "X-Content-Type-Options": "nosniff" });
       response.end(request.method === "HEAD" ? undefined : content);
     } catch (error) {
       if (response.headersSent) { response.end(); return; }
-      json(response, error.code === "ENOENT" ? 404 : error.status || 500, { error: error.code === "ENOENT" ? "This page was not found." : error.status ? error.message : "The house could not complete this request. Please try again." });
+      json(response, error.code === "ENOENT" ? 404 : error.status || 500, { error: error.code === "ENOENT" ? "This page was not found." : error.status ? error.message : "The house could not complete this request. Please try again.", ...(error.status && error.details ? error.details : {}) });
     }
   });
 
@@ -363,6 +368,9 @@ export function createAppServer(directory = root, options = {}) {
   const expiry = setInterval(() => { ledger.expire().catch(() => {}); }, 5 * 60000);
   expiry.unref();
   server.on("close", () => { clearInterval(expiry); persistence?.close().catch(() => {}); });
+  const spaceSweep = setInterval(() => { spaces.sweep().catch(() => {}); }, 15000);
+  spaceSweep.unref();
+  server.on("close", () => clearInterval(spaceSweep));
   return server;
 }
 

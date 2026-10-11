@@ -51,7 +51,8 @@ export function authConfig(env = process.env) {
 export function returnPath(value) {
   if (typeof value !== "string" || value.length > 1500 || !value.startsWith("/") || value.startsWith("//") || /[\\\r\n]/.test(value)) return "/";
   const url = new URL(value, "https://foundry.invalid");
-  if (!["/", "/index.html", "/explore.html", "/meetings.html", "/radar.html", "/services.html", "/account.html", "/oauth/authorize"].includes(url.pathname) && !/^\/meet\/[a-f0-9-]{36}$/.test(url.pathname)) return "/";
+  const stoa = /^\/stoa\/(?:room\/[a-z0-9-]{2,40}|s\/[a-f0-9-]{36})?$/.test(url.pathname);
+  if (!["/", "/index.html", "/explore.html", "/radar.html", "/services.html", "/account.html", "/oauth/authorize"].includes(url.pathname) && !stoa && !/^\/meet\/[a-f0-9-]{36}$/.test(url.pathname)) return "/";
   url.searchParams.delete("signin");
   return url.pathname + url.search + url.hash;
 }

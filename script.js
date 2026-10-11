@@ -18,7 +18,7 @@ export function avatar(person, size = "") {
 export async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers: { ...(options.body ? { "Content-Type": "application/json" } : {}), ...options.headers } });
   const data = await response.json();
-  if (!response.ok) { const error = new Error(data.error || "Something went wrong."); error.status = response.status; throw error; }
+  if (!response.ok) { const error = new Error(data.error || "Something went wrong."); error.status = response.status; error.data = data; throw error; }
   return data;
 }
 let toastTimer;
@@ -47,7 +47,7 @@ const loginStatus = el("p", { class: "login-status", role: "status", text: "Chec
 const guest = el("button", { class: "inline-link login-guest", type: "button", text: "Continue with this browser", onclick: () => { loginDialog.close(); openJoin(afterJoin, true); } });
 const signOut = el("button", { class: "button button-secondary", type: "button", text: "Sign out", onclick: async () => {
   signOut.disabled = true;
-  try { await api("/api/auth/logout", { method: "POST" }); await refreshSession(); loginDialog.close(); notify("You are signed out. Your public profile and rooms remain available."); }
+  try { await api("/api/auth/logout", { method: "POST" }); await refreshSession(); loginDialog.close(); notify("You are signed out. Your public profile and spaces remain available."); }
   catch (error) { notify(error.message); }
   finally { signOut.disabled = false; }
 } });
@@ -95,18 +95,9 @@ export function openJoin(callback, browserOnly = false) {
   document.querySelector("#profile-error").textContent = "";
   document.querySelector("#join-dialog").showModal();
 }
+// Rooms are Stoa spaces now: starting one opens the Stoa's create dialog.
 export function newRoom(person, title = "") {
-  if (!state.profile) {
-    sessionStorage.setItem("foundry-room-draft", JSON.stringify({ title: person ? "Connect with " + person.name : title }));
-    openJoin(() => newRoom(person, title)); return;
-  }
-  sessionStorage.removeItem("foundry-room-draft");
-  const form = document.querySelector("#room-form");
-  form.reset();
-  form.elements.title.value = person ? "Connect with " + person.name : title;
-  form.elements.intent.value = state.profile.intent.slice(0, 300);
-  document.querySelector("#room-error").textContent = "";
-  document.querySelector("#room-dialog").showModal();
+  location.assign("/stoa/?start=" + encodeURIComponent(person ? "Connect with " + person.name : title));
 }
 export async function openProfile(id) {
   let person = state.people.find((person) => person.id === id);
@@ -128,7 +119,7 @@ export async function openProfile(id) {
     ...(projects.length ? [el("div", { class: "profile-projects" }, [el("span", { class: "kicker", text: "PUBLIC PROJECTS" }), ...projects])] : []),
     el("div", { class: "dialog-actions" }, [
       el("a", { class: "button", href: person.contact, target: "_blank", rel: "noopener noreferrer", text: person.source === "github" ? "View on GitHub ↗" : "Get in touch ↗" }),
-      el("button", { class: "button button-secondary", type: "button", text: "Start a room", onclick: () => { document.querySelector("#person-dialog").close(); newRoom(person); } })
+      el("button", { class: "button button-secondary", type: "button", text: "Start a space", onclick: () => { document.querySelector("#person-dialog").close(); newRoom(person); } })
     ])
   );
   document.querySelector("#person-dialog").showModal();
@@ -195,17 +186,6 @@ document.querySelector("#profile-delete").addEventListener("click", async () => 
     notify("Your profile has been removed.");
   } catch (error) { document.querySelector("#profile-error").textContent = error.message; }
 });
-document.querySelector("#room-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const button = form.querySelector("[type=submit]");
-  button.disabled = true;
-  try {
-    const result = await api("/api/rooms", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form))) });
-    window.location.href = result.room.path;
-  } catch (error) { document.querySelector("#room-error").textContent = error.message; }
-  finally { button.disabled = false; }
-});
 export const sessionReady = refreshSession().catch((error) => { notify(error.message); return null; });
 sessionReady.then(() => {
   const url = new URL(location.href);
@@ -215,12 +195,6 @@ sessionReady.then(() => {
   history.replaceState(null, "", url.pathname + url.search + url.hash);
   if (result === "failed") { notify("Sign-in could not be completed. Please try again."); return; }
   if (state.account && !state.profile && location.pathname !== "/account.html" && location.pathname !== "/services.html") {
-    let draft;
-    try { draft = JSON.parse(sessionStorage.getItem("foundry-room-draft")); } catch { sessionStorage.removeItem("foundry-room-draft"); }
-    openJoin(draft ? () => newRoom(undefined, draft.title || "") : undefined);
-  }
-  else if (state.profile && sessionStorage.getItem("foundry-room-draft")) {
-    try { newRoom(undefined, JSON.parse(sessionStorage.getItem("foundry-room-draft")).title || ""); }
-    catch { sessionStorage.removeItem("foundry-room-draft"); }
-  } else notify("You are signed in. Your profile and rooms are ready.");
+    openJoin();
+  } else notify("You are signed in. Your profile and spaces are ready.");
 });

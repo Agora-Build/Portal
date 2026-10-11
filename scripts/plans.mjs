@@ -13,5 +13,5 @@ export function effectivePlan(account, now = Date.now()) {
 
 export function entitlements(plan) {
   const premium = plan !== "basic";
-  return { projects: premium ? 20 : 5, evalFlowsPerProject: premium ? 20 : 10, apiEvalFlows: premium ? 200 : 50, privateResources: premium, ownStorage: premium, publishMainline: ["principal", "fellow"].includes(plan) };
+  return { projects: premium ? 20 : 5, evalFlowsPerProject: premium ? 20 : 10, apiEvalFlows: premium ? 200 : 50, privateResources: premium, ownStorage: premium, publishMainline: ["principal", "fellow"].includes(plan), spaces: premium ? 20 : 3 };
 }

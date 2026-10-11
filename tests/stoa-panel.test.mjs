@@ -1,0 +1,119 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { createPanel, peopleKey } from "../stoa/panel.js";
+
+// A minimal document: just enough of the element API for the panel to build lists and wire forms.
+class Element {
+  constructor(tag) { Object.assign(this, { tagName: tag, children: [], listeners: {}, attrs: {}, hidden: false, textContent: "", className: "", replaced: 0, elements: { topic: { value: "" }, tags: { value: "" } }, classList: { toggle() {}, add() {} }, type: "" }); }
+  append(...items) { this.children.push(...items); }
+  replaceChildren(...items) { this.children = items; this.replaced += 1; }
+  addEventListener(type, listener) { this.listeners[type] = listener; }
+  setAttribute(name, value) { this.attrs[name] = value; }
+  get firstElementChild() { return this.children[0]; }
+  remove() {}
+}
+function fakeDocument() {
+  const registry = new Map();
+  return { registry, querySelector: (selector) => { if (!registry.has(selector)) registry.set(selector, new Element(selector)); return registry.get(selector); }, createElement: (tag) => new Element(tag), createTextNode: (text) => ({ text }) };
+}
+const lots = [{ slug: "agents", title: "AI agents", capacity: 8 }, { slug: "voice", title: "Voice", capacity: 6 }];
+
+test("room rows are created once and updated in place, so focus survives polling", () => {
+  const doc = fakeDocument(), panel = createPanel(doc), rooms = doc.registry.get("#stoa-rooms");
+  panel.setRooms(lots, new Map());
+  const [first, second] = rooms.children, button = first.children[2];
+  assert.equal(first.children[1].textContent, "Open · 0 of 8 here");
+  panel.setRooms(lots, new Map([["agents", { topic: "Evals", occupancy: 3, capacity: 8 }]]));
+  assert.deepEqual(rooms.children, [first, second]);
+  assert.equal(rooms.children[0].children[2], button, "the same Go to button stays in the page");
+  assert.equal(first.children[1].textContent, "Evals · 3 of 8 here");
+  assert.equal(rooms.replaced, 1, "the list was built once");
+});
+test("people are rebuilt only when who is here or a name changes", () => {
+  const doc = fakeDocument(), panel = createPanel(doc), list = doc.registry.get("#stoa-people");
+  const ada = { id: "account:1", name: "Ada", walk: {} };
+  panel.setPeople([ada], "Me");
+  panel.setPeople([{ ...ada, walk: { moved: true } }], "Me");
+  assert.equal(list.replaced, 1, "walking changes nothing visible in the list");
+  panel.setPeople([{ ...ada, name: "Ada L." }], "Me");
+  assert.equal(list.replaced, 2);
+  panel.setPeople([{ ...ada, name: "Ada L." }, { id: "account:2", name: "Bo" }], "Me");
+  assert.equal(list.replaced, 3);
+  assert.equal(peopleKey([{ id: "b", name: "B" }, { id: "a", name: "A" }], "Me"), peopleKey([{ id: "a", name: "A" }, { id: "b", name: "B" }], "Me"));
+});
+test("a reason replaces the sign-in prompt for people who are signed in", () => {
+  const doc = fakeDocument(), panel = createPanel(doc), signin = doc.registry.get("#stoa-signin"), button = doc.registry.get("#stoa-signin-button"), text = doc.registry.get("#stoa-signin-text");
+  panel.canTalk(false);
+  assert.deepEqual([signin.hidden, button.hidden, text.textContent], [false, false, "Sign in to walk and talk."]);
+  panel.canTalk(false, "The plaza is full — you're watching.");
+  assert.deepEqual([signin.hidden, button.hidden, text.textContent], [false, true, "The plaza is full — you're watching."]);
+  panel.canTalk(true);
+  assert.equal(signin.hidden, true);
+});
+
+test("the Decorate button shows only for the host and calls the decorate handler", () => {
+  const doc = fakeDocument(), panel = createPanel(doc);
+  let opened = 0;
+  panel.on({ decorate: () => { opened += 1; } });
+  panel.showRoom({ kicker: "LOT ROOM", title: "AI agents", topic: null, tags: [], host: false, leaveLabel: "Back" });
+  assert.equal(doc.querySelector("#stoa-decor-open").hidden, true);
+  panel.showRoom({ kicker: "LOT ROOM", title: "AI agents", topic: null, tags: [], host: true, leaveLabel: "Back" });
+  assert.equal(doc.querySelector("#stoa-decor-open").hidden, false);
+  doc.querySelector("#stoa-decor-open").listeners.click();
+  assert.equal(opened, 1);
+});
+
+test("hosts get Make host and Remove for everyone else; the host is marked", () => {
+  const doc = fakeDocument(), panel = createPanel(doc), calls = [];
+  panel.on({ makeHost: (person) => calls.push(["host", person.id]), remove: (person) => calls.push(["remove", person.id]) });
+  const list = [{ id: "account:a", name: "Ada" }, { id: "account:b", name: "Bo" }];
+  panel.setPeople(list, "Me", { manage: false, hostId: "account:a", selfId: "account:me" });
+  const people = doc.querySelector("#stoa-people");
+  const text = (item) => [item.textContent, ...item.children.map((child) => child.textContent)].join("|");
+  assert.match(text(people.children[1]), /host/, "Ada is marked as host");
+  assert.equal(people.children[1].children.some((child) => child.tagName === "button"), false, "no tools without manage");
+  panel.setPeople(list, "Me", { manage: true, hostId: "account:me", selfId: "account:me" });
+  assert.match(text(people.children[0]), /host/, "you are marked as host");
+  const buttons = people.children[1].children.filter((child) => child.tagName === "button");
+  assert.deepEqual(buttons.map((button) => button.textContent), ["Make host", "Remove"]);
+  buttons[0].listeners.click(); buttons[1].listeners.click();
+  assert.deepEqual(calls, [["host", "account:a"], ["remove", "account:a"]]);
+  assert.match(buttons[1].attrs["aria-label"], /Remove Ada/);
+});
+test("the people key changes with manage and host", () => {
+  const list = [{ id: "account:a", name: "Ada" }];
+  assert.notEqual(peopleKey(list, "Me", { manage: true }), peopleKey(list, "Me", { manage: false }));
+  assert.notEqual(peopleKey(list, "Me", { hostId: "account:a" }), peopleKey(list, "Me", { hostId: null }));
+});
+test("the space owner is never offered Remove", () => {
+  const doc = fakeDocument(), panel = createPanel(doc);
+  panel.setPeople([{ id: "account:o", name: "Owner" }], "Me", { manage: true, hostId: "account:me", ownerId: "account:o", selfId: "account:me" });
+  assert.deepEqual(doc.querySelector("#stoa-people").children[1].children.filter((child) => child.tagName === "button").map((button) => button.textContent), ["Make host"]);
+});
+
+test("Manage shows only for the owner; your spaces only for signed-in people on the plaza", () => {
+  const doc = fakeDocument(), panel = createPanel(doc);
+  let managed = 0;
+  panel.on({ manage: () => { managed += 1; } });
+  panel.showRoom({ kicker: "UNLISTED SPACE", title: "Lab", topic: null, tags: [], host: true, owner: false, leaveLabel: "Leave" });
+  assert.equal(doc.querySelector("#stoa-manage").hidden, true);
+  panel.showRoom({ kicker: "UNLISTED SPACE", title: "Lab", topic: null, tags: [], host: true, owner: true, leaveLabel: "Leave" });
+  assert.equal(doc.querySelector("#stoa-manage").hidden, false);
+  doc.querySelector("#stoa-manage").listeners.click();
+  assert.equal(managed, 1);
+  panel.showPlaza();
+  assert.equal(doc.querySelector("#stoa-mine-section").hidden, true);
+  panel.setSignedIn(true);
+  panel.showPlaza();
+  assert.equal(doc.querySelector("#stoa-mine-section").hidden, false);
+});
+test("a full plaza lists your spaces once: the offer replaces the Your spaces section until you are on the plaza", () => {
+  const doc = fakeDocument(), panel = createPanel(doc), mine = doc.querySelector("#stoa-mine-section"), offer = doc.querySelector("#stoa-offer");
+  panel.setSignedIn(true);
+  panel.showPlaza();
+  assert.equal(mine.hidden, false);
+  panel.showOffer({ spaces: [{ title: "Lab", path: "/stoa/s/1" }], canCreate: true });
+  assert.deepEqual([offer.hidden, mine.hidden, doc.querySelector("#stoa-start").hidden], [false, true, false]);
+  panel.hideOffer();
+  assert.deepEqual([offer.hidden, mine.hidden], [true, false]);
+});

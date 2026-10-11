@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#202824">
+  <meta name="description" content="The Stoa is Agora Build's walkable plaza for builders: meet people, start a topic, and work together.">
+  <title>Stoa | Agora Build</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/script.js"></script><script type="module" src="/stoa.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="workspace">
+    <header class="site-header">
+      <a class="wordmark" href="/index.html" aria-label="Agora Build home"><span class="brand-symbol" aria-hidden="true">b_</span><span>agora<span class="brand-dot">.</span>build<small>THE BUILDER'S FOUNDRY</small></span></a>
+      <nav id="site-nav" class="site-nav" aria-label="Main navigation"><a href="/index.html">The floor</a><a href="/explore.html">Projects</a><a href="/stoa/" class="is-active" aria-current="page">Stoa</a><a href="/radar.html">Radar</a><a href="/services.html">Services</a><a href="/account.html">Account</a><a class="nav-github" href="https://github.com/Agora-Build" target="_blank" rel="noopener noreferrer">GitHub <span aria-hidden="true">&#8599;</span></a></nav>
+      <div class="header-actions"><button class="button button-small" type="button" data-join data-guest-label="Take a seat" data-member-label="Your profile">Take a seat <span aria-hidden="true">+</span></button><button type="button" class="nav-toggle" aria-controls="site-nav" aria-expanded="false" aria-label="Toggle navigation"><span></span><span></span></button></div>
+    </header>
+    <main id="main" class="main-content stoa-main">
+      <section class="stoa" id="stoa" aria-labelledby="stoa-title">
+        <div class="stoa-heading"><div><p class="kicker" id="stoa-kicker">THE STOA / PUBLIC PLAZA</p><h1 id="stoa-title">Walk into the plaza.</h1></div><button class="button button-secondary button-small" type="button" id="stoa-minimal" aria-pressed="false">Minimal view</button></div>
+        <div class="stoa-layout">
+          <div class="stoa-stage"><div class="stoa-view"><canvas id="stoa-canvas" tabindex="0" aria-label="Plaza map" aria-describedby="stoa-help"></canvas><div class="stoa-video" id="stoa-video" data-layout="strip" role="region" aria-label="Call video" hidden></div></div><p class="stoa-help" id="stoa-help">Click or tap to walk. Select the map to use the arrow keys or WASD.</p></div>
+          <aside class="stoa-panel" aria-label="Around you">
+            <p class="stoa-status" id="stoa-status" role="status" aria-live="polite">Opening the plaza...</p>
+            <section class="stoa-here" id="stoa-here" hidden aria-labelledby="stoa-here-title">
+              <p class="kicker" id="stoa-here-kicker"></p>
+              <h2 id="stoa-here-title"></h2>
+              <p class="stoa-here-topic" id="stoa-here-topic"></p>
+              <form class="stoa-topic-form" id="stoa-topic-form" hidden>
+                <label>Topic<input name="topic" required minlength="2" maxlength="80" autocomplete="off"></label>
+                <label>Tags <span class="optional">up to 5, separated by commas</span><input name="tags" maxlength="160" autocomplete="off"></label>
+                <button class="button button-small" type="submit">Set topic</button>
+              </form>
+              <button class="button button-secondary button-small" type="button" id="stoa-decor-open" hidden>Decorate</button>
+              <button class="button button-secondary button-small" type="button" id="stoa-manage" hidden>Manage space</button>
+              <section class="stoa-decor" id="stoa-decor" hidden aria-labelledby="stoa-decor-title">
+                <h3 class="stoa-panel-title" id="stoa-decor-title">Decorate</h3>
+                <p class="stoa-decor-selected" id="stoa-decor-selected" aria-live="polite"></p>
+                <div class="stoa-palette" id="stoa-palette" role="group" aria-label="Decorations"></div>
+                <button class="button button-secondary button-small" type="button" id="stoa-decor-here">Place in front of me</button>
+                <ul class="stoa-decor-list" id="stoa-decor-list" aria-label="Placed decorations"></ul>
+                <div class="stoa-decor-actions"><button class="button button-secondary button-small" type="button" id="stoa-decor-turn" disabled>Turn</button><button class="button button-secondary button-small" type="button" id="stoa-decor-remove" disabled>Remove</button><button class="button button-small" type="button" id="stoa-decor-save">Save decorations</button><button class="button button-secondary button-small" type="button" id="stoa-decor-cancel">Cancel</button></div>
+              </section>
+              <section class="stoa-call" id="stoa-call" hidden aria-labelledby="stoa-call-title">
+                <h3 class="stoa-panel-title" id="stoa-call-title">Call</h3>
+                <p class="stoa-call-status" id="stoa-call-status" role="status" aria-live="polite"></p>
+                <div class="stoa-call-preflight" id="stoa-call-preflight"><label><input type="checkbox" id="stoa-call-mic" checked> Microphone on</label><label><input type="checkbox" id="stoa-call-camera"> Camera on</label></div>
+                <div class="stoa-call-controls">
+                  <button class="button button-small" type="button" id="stoa-call-join">Join call</button>
+                  <button class="button button-secondary button-small" type="button" id="stoa-call-audio" aria-pressed="false" hidden>Microphone</button>
+                  <button class="button button-secondary button-small" type="button" id="stoa-call-video" aria-pressed="false" hidden>Camera</button>
+                  <button class="button button-secondary button-small" type="button" id="stoa-call-share" aria-pressed="false" hidden>Share screen</button>
+                  <button class="button button-secondary button-small" type="button" id="stoa-call-resume" hidden>Play call audio</button>
+                  <button class="button button-secondary button-small stoa-call-leave" type="button" id="stoa-call-leave" hidden>Leave call</button>
+                </div>
+              </section>
+              <button class="button button-secondary button-small" type="button" id="stoa-leave">Back to the plaza</button>
+            </section>
+            <section class="stoa-offer" id="stoa-offer" hidden aria-labelledby="stoa-offer-title">
+              <h2 class="stoa-panel-title" id="stoa-offer-title">The plaza is full</h2>
+              <ul class="stoa-offer-list" id="stoa-offer-list"></ul>
+              <button class="button button-small" type="button" id="stoa-start">Start a space</button>
+            </section>
+            <section id="stoa-rooms-section" aria-labelledby="stoa-rooms-title">
+              <h2 class="stoa-panel-title" id="stoa-rooms-title">Rooms</h2>
+              <ul class="stoa-rooms" id="stoa-rooms"></ul>
+            </section>
+            <section id="stoa-mine-section" hidden aria-labelledby="stoa-mine-title">
+              <h2 class="stoa-panel-title" id="stoa-mine-title">Your spaces</h2>
+              <ul class="stoa-rooms" id="stoa-mine"></ul>
+              <p class="stoa-mine-note" id="stoa-mine-note"></p>
+              <button class="button button-small" type="button" id="stoa-new">Start a space</button>
+            </section>
+            <h2 class="stoa-panel-title">Here now</h2>
+            <ul class="stoa-people" id="stoa-people"></ul>
+            <h2 class="stoa-panel-title" id="stoa-talk-title">Talk</h2>
+            <ol class="stoa-messages" id="stoa-messages" role="log" aria-labelledby="stoa-talk-title"></ol>
+            <form class="stoa-say" id="stoa-say" hidden><label class="sr-only" for="stoa-say-text">Message</label><input id="stoa-say-text" name="text" maxlength="500" autocomplete="off" placeholder="Say something on the plaza"><button class="button button-small" type="submit">Say</button></form>
+            <p class="stoa-signin" id="stoa-signin" hidden><span id="stoa-signin-text">Sign in to walk and talk.</span> <button class="button button-secondary button-small" type="button" id="stoa-signin-button">Sign in</button></p>
+          </aside>
+        </div>
+      </section>
+    </main>
+    <footer class="site-footer"><span>The frontier is a shared workspace.</span><a href="https://github.com/Agora-Build" target="_blank" rel="noopener noreferrer">Open minds. Open doors. <span aria-hidden="true">&#8599;</span></a></footer>
+  </div>
+  <dialog id="join-dialog" aria-labelledby="join-title">
+    <div class="dialog-head"><span class="kicker">YOUR PLACE IN THE HOUSE</span><button class="close-button" type="button" data-close aria-label="Close profile form">&times;</button></div>
+    <h2 id="join-title">Pull up a chair.</h2>
+    <p class="dialog-intro">Good connections start with honest intent. Your profile and participation in rooms are public. Sign in to keep access across devices, or continue with this browser.</p>
+    <form id="profile-form" class="stack-form">
+      <div class="form-row"><label>Your name<input name="name" required minlength="2" maxlength="60" autocomplete="name" placeholder="What should we call you?"></label><label>Location <span class="optional">optional</span><input name="location" maxlength="80" placeholder="City or remote" autocomplete="address-level2"></label></div>
+      <label>A little about you<textarea name="bio" required minlength="2" maxlength="400" rows="2" placeholder="Your work, experience, or interests."></textarea></label>
+      <label>Your real intent <span class="required-label">required</span><textarea name="intent" required minlength="2" maxlength="400" rows="3" placeholder="I am building a voice agent for language practice. I need help making interruptions feel natural."></textarea></label>
+      <label>Who would you like to meet? <span class="optional">optional</span><input name="lookingFor" maxlength="300" placeholder="Audio engineers, language teachers, people building similar things."></label>
+      <label>Skills & interests <span class="optional">comma separated, up to 8</span><input name="skills" required maxlength="327" placeholder="Rust, voice AI, WebRTC"></label>
+      <label>A public contact link<input name="contact" type="url" required maxlength="240" placeholder="https://github.com/yourname"></label>
+      <label class="checkbox-label"><input name="monitor" type="checkbox"><span>Keep a radar on my intent.<small>When connected, web search checks public sources for relevant people and resources. Your intent and interests are sent to the configured model provider.</small></span></label>
+      <p class="form-note">Your profile and room activity are shared with the foundry. Model search may use its public text. Save your intent here; keep personal or sensitive details out.</p>
+      <p id="profile-error" class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button class="button" id="profile-submit" type="submit">Join the house</button><button class="delete-button" id="profile-delete" type="button" hidden>Remove my profile</button></div>
+    </form>
+  </dialog>
+  <dialog id="person-dialog" aria-labelledby="person-title"><div class="dialog-head"><span class="kicker">BUILDER PROFILE</span><button class="close-button" type="button" data-close aria-label="Close builder profile">&times;</button></div><div id="profile-content"></div></dialog>
+  <dialog id="space-dialog" aria-labelledby="space-title">
+    <div class="dialog-head"><span class="kicker">A PLACE OF YOUR OWN</span><button class="close-button" type="button" data-close aria-label="Close space form">&times;</button></div>
+    <h2 id="space-title">Start a space.</h2>
+    <p class="dialog-intro">Your space is unlisted or private: people find it through you. You host it whenever you're there.</p>
+    <form id="space-form" class="stack-form">
+      <label>Name<input name="title" required minlength="2" maxlength="80" placeholder="Voice agents build session"></label>
+      <label>What is it for? <span class="optional">optional</span><textarea name="purpose" maxlength="300" rows="2" placeholder="Pair on interruption handling every Thursday."></textarea></label>
+      <div class="form-row">
+        <label>Who can find it<select name="visibility"><option value="unlisted">Anyone with the link</option><option value="private">Members and invited people</option></select></label>
+        <label>Who can walk in<select name="access"><option value="open">Anyone signed in</option><option value="house">House members</option><option value="members">Members only</option></select></label>
+      </div>
+      <div class="form-row">
+        <label>Capacity<input name="capacity" type="number" min="2" max="50" required></label>
+        <label>Theme<select name="themeId"><option value="agora">Agora</option><option value="minimal">Minimal</option><option value="cyberpunk">Cyberpunk</option></select></label>
+      </div>
+      <p id="space-error" class="form-error" role="alert"></p>
+      <button type="submit" class="button">Create space</button>
+    </form>
+  </dialog>
+  <dialog id="manage-dialog" aria-labelledby="manage-title">
+    <div class="dialog-head"><span class="kicker">YOUR SPACE</span><button class="close-button" type="button" data-close aria-label="Close manage dialog">&times;</button></div>
+    <h2 id="manage-title">Manage space</h2>
+    <form id="manage-form" class="stack-form">
+      <label>Name<input name="title" required minlength="2" maxlength="80"></label>
+      <label>What is it for? <span class="optional">optional</span><textarea name="purpose" maxlength="300" rows="2"></textarea></label>
+      <div class="form-row">
+        <label>Who can find it<select name="visibility"><option value="unlisted">Anyone with the link</option><option value="private">Members and invited people</option></select></label>
+        <label>Who can walk in<select name="access"><option value="open">Anyone signed in</option><option value="house">House members</option><option value="members">Members only</option></select></label>
+      </div>
+      <div class="form-row">
+        <label>Capacity<input name="capacity" type="number" min="2" max="50" required></label>
+        <label>Theme<select name="themeId"><option value="agora">Agora</option><option value="minimal">Minimal</option><option value="cyberpunk">Cyberpunk</option></select></label>
+      </div>
+      <button type="submit" class="button button-small">Save settings</button>
+    </form>
+    <h3 class="stoa-panel-title">Invite</h3>
+    <div class="manage-invite"><button class="button button-secondary button-small" type="button" id="manage-invite">Create an invite link</button><input id="manage-invite-url" readonly hidden aria-label="Invite link"><button class="button button-secondary button-small" type="button" id="manage-copy" hidden>Copy link</button></div>
+    <p class="form-note" id="manage-invite-note"></p>
+    <h3 class="stoa-panel-title">Members</h3>
+    <ul class="manage-people" id="manage-members"></ul>
+    <h3 class="stoa-panel-title">Removed</h3>
+    <ul class="manage-people" id="manage-blocked"></ul>
+    <p id="manage-error" class="form-error" role="alert"></p>
+    <div class="dialog-actions"><button class="delete-button" type="button" id="manage-delete">Delete this space</button></div>
+  </dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

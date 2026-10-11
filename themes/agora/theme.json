@@ -1,0 +1,39 @@
+{
+  "id": "agora",
+  "name": "Agora",
+  "version": 1,
+  "roles": {
+    "floor": { "pattern": "tiles", "colors": ["#ebe5d5", "#dcd3bd"] },
+    "path": { "pattern": "path", "colors": ["#ddd2b8", "#c9bc9c"] },
+    "grass": { "pattern": "grass", "colors": ["#b9c29b", "#97a37a"] },
+    "water": { "pattern": "water", "colors": ["#7ea6aa", "#a9c9cb"] },
+    "wall": { "pattern": "wall", "colors": ["#d7cdb5", "#b9ad92", "#e8e0cc"] },
+    "column": { "pattern": "column", "colors": ["#f4f1e8", "#cfc6b0"] },
+    "door": { "pattern": "door", "colors": ["#ce4b24", "#7a2c14"] },
+    "table": { "pattern": "table", "colors": ["#8a6a4f", "#6b503b"] },
+    "seat": { "pattern": "seat", "colors": ["#b5552f", "#8a3f22"] },
+    "plant": { "pattern": "plant", "colors": ["#526951", "#a0522d"] },
+    "decor": { "pattern": "decor", "colors": ["#ce4b24"] }
+  },
+  "decor": {
+    "plant": { "colors": ["#526951", "#a0522d"], "variants": [["#526951", "#a0522d"], ["#6f8a5a", "#8a5a3c"]] },
+    "lamp": { "colors": ["#f2c46d", "#3b3a33"] },
+    "rug": { "colors": ["#ce4b24", "#8f3a1d"], "variants": [["#ce4b24", "#8f3a1d"], ["#526951", "#384a37"]] },
+    "sofa": { "colors": ["#b5552f", "#7f3a20"] },
+    "chair": { "colors": ["#8a6a4f", "#5e4734"] },
+    "table": { "colors": ["#8a6a4f", "#6b503b"] },
+    "whiteboard": { "colors": ["#fffef9", "#6c746b"] },
+    "bookshelf": { "colors": ["#ce4b24", "#5e4734", "#526951"] },
+    "screen": { "colors": ["#7ea6aa", "#272d28"] },
+    "banner": { "colors": ["#ce4b24", "#272d28"] },
+    "poster": { "colors": ["#f5f4ee", "#272d28"] },
+    "statue": { "colors": ["#f4f1e8", "#cfc6b0"] },
+    "fountain": { "colors": ["#e8e0cc", "#7ea6aa"] },
+    "noticeboard": { "colors": ["#c9a97a", "#5e4734", "#fffef9"] }
+  },
+  "avatar": { "style": "token", "palette": ["#ce4b24", "#526951", "#3c5a78", "#8a6a4f", "#7a4f8a", "#c08a1f"], "outline": "#272d28" },
+  "ui": { "--paper": "#f5f4ee", "--surface": "#fffef9", "--ink": "#272d28", "--muted": "#6c746b", "--line": "#dedfd3", "--accent": "#ce4b24", "--accent-dark": "#a93a1a", "--green": "#526951", "font": "IBM Plex Sans" },
+  "lighting": { "ambient": 1, "tint": "#fff4dc" },
+  "effects": ["dust"],
+  "video": "over-avatar"
+}

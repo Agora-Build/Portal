@@ -1,0 +1,39 @@
+{
+  "id": "minimal",
+  "name": "Minimal",
+  "version": 1,
+  "roles": {
+    "floor": { "pattern": "flat", "colors": ["#ffffff"] },
+    "path": { "pattern": "flat", "colors": ["#eeeeee"] },
+    "grass": { "pattern": "flat", "colors": ["#e3eee0"] },
+    "water": { "pattern": "flat", "colors": ["#cfe3f5"] },
+    "wall": { "pattern": "flat", "colors": ["#1a1a1a"] },
+    "column": { "pattern": "flat", "colors": ["#555555"] },
+    "door": { "pattern": "flat", "colors": ["#0057d9"] },
+    "table": { "pattern": "flat", "colors": ["#8c8c8c"] },
+    "seat": { "pattern": "seat", "colors": ["#4a4a4a", "#222222"] },
+    "plant": { "pattern": "flat", "colors": ["#2e7d32"] },
+    "decor": { "pattern": "flat", "colors": ["#0057d9"] }
+  },
+  "decor": {
+    "plant": { "colors": ["#2e7d32", "#4a4a4a"] },
+    "lamp": { "colors": ["#f9a825", "#222222"] },
+    "rug": { "colors": ["#cccccc", "#999999"] },
+    "sofa": { "colors": ["#4a4a4a", "#222222"] },
+    "chair": { "colors": ["#4a4a4a", "#222222"] },
+    "table": { "colors": ["#8c8c8c", "#5c5c5c"] },
+    "whiteboard": { "colors": ["#ffffff", "#222222"] },
+    "bookshelf": { "colors": ["#0057d9", "#222222", "#b3261e"] },
+    "screen": { "colors": ["#cfe3f5", "#111111"] },
+    "banner": { "colors": ["#0057d9", "#222222"] },
+    "poster": { "colors": ["#ffffff", "#222222"] },
+    "statue": { "colors": ["#bbbbbb", "#777777"] },
+    "fountain": { "colors": ["#bbbbbb", "#cfe3f5"] },
+    "noticeboard": { "colors": ["#ffffff", "#222222", "#0057d9"] }
+  },
+  "avatar": { "style": "token", "palette": ["#0057d9", "#b3261e", "#1e7d32", "#6a1b9a", "#e65100", "#00695c"], "outline": "#000000" },
+  "ui": { "--paper": "#ffffff", "--surface": "#ffffff", "--ink": "#111111", "--muted": "#4a4a4a", "--line": "#c8c8c8", "--accent": "#0057d9", "--accent-dark": "#003c99", "--green": "#1e7d32", "font": "system-ui" },
+  "lighting": { "ambient": 1, "tint": "#ffffff" },
+  "effects": [],
+  "video": "grid"
+}
