@@ -248,13 +248,13 @@ test("lot decorations stay inside the lot's interior and keep its doors clear", 
 import tokenTypes from "agora-token/src/AccessToken2.js";
 import { channelName, createSignaling, signalingConfig, signalingUser, spaceKey } from "../scripts/spaces/signaling.mjs";
 
-const signalingEnv = { AGORA_APP_ID: "a".repeat(32), AGORA_APP_CERTIFICATE: "b".repeat(32), SPACE_CHANNEL_SECRET: "s".repeat(32) };
+const signalingEnv = { AGORA_APP_ID: "a".repeat(32), AGORA_APP_CERTIFICATE: "b".repeat(32), SPACES_SIGNALING_SECRET: "s".repeat(32) };
 const parse = (token) => { const parsed = new tokenTypes.AccessToken2(); assert.equal(parsed.from_string(token), true); assert.equal(parsed.verifySignature("b".repeat(32)), true); return parsed; };
 
 test("Signaling needs Agora credentials and a long channel secret", () => {
   const config = signalingConfig(signalingEnv);
   assert.deepEqual([config.ready, config.ttl, config.permissions], [true, 900, false]);
-  assert.equal(signalingConfig({ ...signalingEnv, SPACE_CHANNEL_SECRET: "short" }).ready, false);
+  assert.equal(signalingConfig({ ...signalingEnv, SPACES_SIGNALING_SECRET: "short" }).ready, false);
   assert.equal(signalingConfig({}).ready, false);
   assert.equal(signalingConfig({ ...signalingEnv, AGORA_RTM_PERMISSIONS: "true" }).permissions, true);
   assert.throws(() => createSignaling(signalingConfig({})).issue("a-x", []), { status: 503 });
@@ -289,4 +289,10 @@ test("Signaling tokens are signed for the user and add channel permissions only 
   const scoped = createSignaling(signalingConfig({ ...signalingEnv, AGORA_RTM_PERMISSIONS: "true" })).issue("g-1", [{ name: "ab-stoa-plaza", write: false }, { name: "ab-stoa-ai-agents", write: true }]);
   const service = parse(scoped.token).getServices(tokenTypes.kRtm2ServiceType)[0];
   assert.deepEqual(service.__permissions.details, { 0: { 0: ["ab-stoa-plaza", "ab-stoa-ai-agents"], 1: ["ab-stoa-ai-agents"] } });
+});
+test("the spaces Signaling secret is read under its new name, with the old name as a fallback", () => {
+  const base = { AGORA_APP_ID: "a".repeat(32), AGORA_APP_CERTIFICATE: "b".repeat(32) };
+  assert.equal(signalingConfig({ ...base, SPACES_SIGNALING_SECRET: "n".repeat(32) }).secret, "n".repeat(32));
+  assert.equal(signalingConfig({ ...base, SPACE_CHANNEL_SECRET: "o".repeat(32) }).secret, "o".repeat(32));
+  assert.equal(signalingConfig({ ...base, SPACES_SIGNALING_SECRET: "n".repeat(32), SPACE_CHANNEL_SECRET: "o".repeat(32) }).secret, "n".repeat(32), "the new name wins");
 });

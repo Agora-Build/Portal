@@ -4,8 +4,9 @@ import { AppError } from "../store.mjs";
 
 // Signaling tokens grant login only. Isolation comes from secret-derived channel names and per-space keys;
 // AGORA_RTM_PERMISSIONS=true adds Agora's per-channel permissions on top when Agora enables them.
+// SPACES_SIGNALING_SECRET derives unlisted and private spaces' channel names and keys. SPACE_CHANNEL_SECRET is its old name, still read.
 export function signalingConfig(env = process.env) {
-  const appId = env.AGORA_APP_ID || "", certificate = env.AGORA_APP_CERTIFICATE || "", secret = env.SPACE_CHANNEL_SECRET || "";
+  const appId = env.AGORA_APP_ID || "", certificate = env.AGORA_APP_CERTIFICATE || "", secret = env.SPACES_SIGNALING_SECRET || env.SPACE_CHANNEL_SECRET || "";
   return { appId, certificate, secret, permissions: env.AGORA_RTM_PERMISSIONS === "true", ttl: 900, ready: /^[a-f0-9]{32}$/i.test(appId) && /^[a-f0-9]{32}$/i.test(certificate) && secret.length >= 32 };
 }
 

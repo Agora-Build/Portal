@@ -154,7 +154,7 @@ test("Agora OAuth refuses changing loginId and email as identities; verified acc
   await assert.rejects(bad.agoraIdentity("upstream-token"), { status: 401 });
   const auth = createAuth(config, { request: async () => Response.json({ sub: "permanent-agora-user", name: "Agora builder" }) });
   const store = newStore(), login = await store.login(await auth.agoraIdentity("upstream-token"));
-  const connectionConfig = connectionsConfig({ CONNECTION_ENCRYPTION_KEY: randomBytes(32).toString("base64") });
+  const connectionConfig = connectionsConfig({ AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64") });
   let refreshes = 0;
   const resources = createConnections(store, auth, connectionConfig, { request: async (url, options) => {
     if (url.endsWith("/token")) { refreshes++; return Response.json({ access_token: "renewed-upstream-token", refresh_token: "rotated-upstream-refresh", expires_in: 7200 }); }
@@ -269,4 +269,11 @@ test("an app can use paid portal services without a public profile, with scopes 
     assert.equal((await ledger.balance(login.account.id)).credits, 5);
     assert.equal((await store.session(login.token)).profile, null);
   } finally { await new Promise((done) => { server.close(done); server.closeIdleConnections(); }); }
+});
+test("the Agora Console key is read under its new name, with the old name as a fallback", () => {
+  const key = randomBytes(32).toString("base64"), other = randomBytes(32).toString("base64");
+  assert.equal(connectionsConfig({ AGORA_CONSOLE_ENCRYPTION_KEY: key }).key.toString("base64"), key);
+  assert.equal(connectionsConfig({ CONNECTION_ENCRYPTION_KEY: key }).key.toString("base64"), key);
+  assert.equal(connectionsConfig({ AGORA_CONSOLE_ENCRYPTION_KEY: key, CONNECTION_ENCRYPTION_KEY: other }).key.toString("base64"), key, "the new name wins");
+  assert.equal(connectionsConfig({}).ready, false);
 });
