@@ -9,7 +9,7 @@ export class AppError extends Error {
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const publicProfile = ({ sessionHash, accountId, ...person }) => person;
 const publicRoom = ({ videoUrl, ...room }) => ({ ...room, callProvider: "agora", path: "/meet/" + room.id });
-const publicAccount = (account) => account ? { id: account.id, name: account.name, avatar: account.avatar, contact: account.contact, providers: account.identities.filter((identity) => identity.provider !== "service").map((identity) => identity.provider), plan: effectivePlan(account), entitlements: entitlements(effectivePlan(account)), connections: Object.keys(account.connections || {}) } : null;
+const publicAccount = (account) => account ? { id: account.id, name: account.name, avatar: account.avatar, contact: account.contact, providers: account.identities.filter((identity) => identity.provider !== "service").map((identity) => identity.provider), emails: [...new Set(account.identities.map((identity) => identity.email).filter(Boolean))], plan: effectivePlan(account), entitlements: entitlements(effectivePlan(account)), connections: Object.keys(account.connections || {}) } : null;
 export const safeUrl = (value) => {
   try {
     const url = new URL(value);
@@ -113,7 +113,11 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
     async session(token) {
       const state = await read();
       const person = personFor(state, token);
-      return { profile: person ? publicProfile(person) : null, account: publicAccount(accountFor(state, token)) };
+      const account = publicAccount(accountFor(state, token));
+      // Emails are for the owner's own browser; an app token reading /api/me never sees them.
+      const browser = token && state.sessions.some((session) => session.hash === hash(token) && session.expiresAt > now());
+      if (account && !browser) delete account.emails;
+      return { profile: person ? publicProfile(person) : null, account };
     },
     async accountIdentity(id) {
       const account = (await read()).accounts.find((account) => account.id === id);
@@ -178,17 +182,33 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
         state.authorizationCodes = state.authorizationCodes.filter((code) => code.accountId !== account.id);
       });
     },
-    async login(identity, { linkToken } = {}) {
+    async login(identity, { linkToken, pendingLink } = {}) {
       const { provider, issuer, subject } = identity;
+      // Providers pass an email only when they verified it; it is private and never identifies a user on its own.
+      const email = typeof identity.email === "string" && identity.email ? identity.email.toLowerCase() : null;
+      const same = (entry) => (other) => other.provider === entry.provider && other.issuer === entry.issuer && other.subject === entry.subject;
       if (!["google", "github", "apple", "agora"].includes(provider) || typeof subject !== "string" || !subject || subject.length > 255 || typeof issuer !== "string" || !issuer) throw new AppError(422, "This login identity is invalid.");
       const token = randomBytes(32).toString("base64url");
       return update((state) => {
+        state.pendingLinks = (state.pendingLinks || []).filter((entry) => entry.expiresAt > now());
+        const waiting = pendingLink ? state.pendingLinks.find((entry) => entry.hash === hash(pendingLink)) || null : null;
+        if (waiting) state.pendingLinks = state.pendingLinks.filter((entry) => entry !== waiting);
         let account = state.accounts.find((entry) => entry.identities.some((entry) => entry.provider === provider && entry.issuer === issuer && entry.subject === subject));
         const browser = linkToken && state.sessions.find((session) => session.hash === hash(linkToken) && session.expiresAt > now());
         const linking = browser && accountFor(state, linkToken);
         const legacy = linkToken && state.people.find((person) => person.sessionHash === hash(linkToken));
         if (linkToken && !linking && !legacy) throw new AppError(401, "Your session expired. Sign in again before connecting another login.");
         if (account && ((linking && account.id !== linking.id) || (!linking && legacy && account.profileId && account.profileId !== legacy.id))) throw new AppError(409, "That login belongs to another account. Sign out to use it.");
+        // A new login whose verified email already belongs to an account is held until that account signs in to confirm it.
+        if (!account && !linkToken && email) {
+          const owner = state.accounts.find((entry) => entry.identities.some((other) => other.email === email));
+          if (owner) {
+            const raw = randomBytes(32).toString("base64url");
+            state.pendingLinks.push({ hash: hash(raw), accountId: owner.id, identity: { provider, issuer, subject, email }, expiresAt: now() + 600000 });
+            state.pendingLinks = state.pendingLinks.slice(-500);
+            return { pendingLink: { token: raw, provider, providers: [...new Set(owner.identities.filter((entry) => entry.provider !== "service").map((entry) => entry.provider))] } };
+          }
+        }
         if (!account) {
           if (linking?.identities.some((entry) => entry.provider === provider)) throw new AppError(409, "A login from this provider is already connected.");
           if (linking) account = linking;
@@ -197,7 +217,15 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
             account = { id: "account:" + randomUUID(), identities: [], name: String(identity.name || "Builder").slice(0, 60), avatar: safeUrl(identity.avatar || ""), contact: safeUrl(identity.contact || ""), profileId: null, createdAt: new Date(now()).toISOString() };
             state.accounts.push(account);
           }
-          account.identities.push({ provider, issuer, subject });
+          account.identities.push({ provider, issuer, subject, email });
+        } else account.identities.find(same({ provider, issuer, subject })).email = email;
+        let link = {};
+        if (pendingLink && !waiting) link = { linkExpired: true };
+        else if (waiting && waiting.accountId !== account.id) link = { linkMismatch: true };
+        else if (waiting) {
+          const held = waiting.identity;
+          if (state.accounts.some((entry) => entry.identities.some(same(held))) || account.identities.some((entry) => entry.provider === held.provider)) link = { linkFailed: true };
+          else { account.identities.push(held); link = { linked: held.provider }; }
         }
         if (legacy && !linking) {
           account.profileId = legacy.id;
@@ -206,7 +234,7 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
         }
         addSession(state, account, token);
         const person = state.people.find((person) => person.id === account.profileId);
-        return { token, account: publicAccount(account), profile: person ? publicProfile(person) : null };
+        return { token, account: publicAccount(account), profile: person ? publicProfile(person) : null, ...link };
       });
     },
     async logout(token) {

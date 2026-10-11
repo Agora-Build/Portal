@@ -56,6 +56,9 @@ export function returnPath(value) {
   return url.pathname + url.search + url.hash;
 }
 
+// An email counts only when the provider says it verified it; stored lower-case so the same address matches across providers.
+const verifiedEmail = (value, verified) => verified && typeof value === "string" && value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? value.trim().toLowerCase() : null;
+
 export function createAuth(config = authConfig(), { request = fetch, now = Date.now } = {}) {
   const pending = new Map();
   const clients = new Map();
@@ -107,7 +110,7 @@ export function createAuth(config = authConfig(), { request = fetch, now = Date.
     config,
     agoraIdentity,
     providers() { return Object.values(config.providers).map(({ id, name, ready }) => ({ id, name, ready })); },
-    async begin(id, { returnTo, linkToken } = {}) {
+    async begin(id, { returnTo, linkToken, pendingLink } = {}) {
       const value = provider(id);
       for (const [state, transaction] of pending) if (transaction.expiresAt <= now()) pending.delete(state);
       if (pending.size >= 500) throw new AppError(429, "There are too many sign-ins in progress. Try again shortly.");
@@ -116,11 +119,11 @@ export function createAuth(config = authConfig(), { request = fetch, now = Date.
       const nonce = oidc.randomNonce();
       const verifier = id === "apple" ? undefined : oidc.randomPKCECodeVerifier();
       const redirect = config.origin + "/auth/" + id + "/callback";
-      const parameters = { redirect_uri: redirect, response_type: "code", state, scope: value.mode === "oauth" ? "basic_info,console" : id === "github" ? "read:user" : id === "apple" ? "openid name email" : "openid profile email" };
+      const parameters = { redirect_uri: redirect, response_type: "code", state, scope: value.mode === "oauth" ? "basic_info,console" : id === "github" ? "read:user user:email" : id === "apple" ? "openid name email" : "openid profile email" };
       if (id !== "github" && value.mode !== "oauth") parameters.nonce = nonce;
       if (verifier) { parameters.code_challenge = await oidc.calculatePKCECodeChallenge(verifier); parameters.code_challenge_method = "S256"; }
       if (id === "apple") parameters.response_mode = "form_post";
-      pending.set(state, { id, nonce, verifier, redirect, returnTo: returnPath(returnTo), linkToken, expiresAt: now() + 600000 });
+      pending.set(state, { id, nonce, verifier, redirect, returnTo: returnPath(returnTo), linkToken, pendingLink, expiresAt: now() + 600000 });
       return { url: oidc.buildAuthorizationUrl(client, parameters).href, state, formPost: id === "apple" };
     },
     async complete(id, parameters, browserState) {
@@ -142,7 +145,10 @@ export function createAuth(config = authConfig(), { request = fetch, now = Date.
           if (!response.ok) throw new Error("GitHub profile unavailable");
           const user = await response.json();
           if (!Number.isSafeInteger(user.id) || user.id < 1 || typeof user.login !== "string" || !/^[a-z0-9-]+$/i.test(user.login)) throw new Error("Invalid GitHub identity");
-          identity = { subject: String(user.id), name: user.name || user.login, avatar: safeUrl(user.avatar_url), contact: "https://github.com/" + user.login };
+          // The account email links logins only when GitHub has verified it; the public profile email is not used.
+          const emails = await request("https://api.github.com/user/emails", { headers: { Authorization: "Bearer " + tokens.access_token, Accept: "application/vnd.github+json", "User-Agent": "Agora-Build-Portal", "X-GitHub-Api-Version": "2022-11-28" }, signal: AbortSignal.timeout(10000) }).then((reply) => reply.ok ? reply.json() : [], () => []);
+          const primary = Array.isArray(emails) ? emails.find((entry) => entry?.primary && entry.verified === true) : null;
+          identity = { subject: String(user.id), name: user.name || user.login, avatar: safeUrl(user.avatar_url), contact: "https://github.com/" + user.login, email: verifiedEmail(primary?.email, true) };
         } else {
           const claims = tokens.claims();
           if (!claims?.sub) throw new Error("Missing identity");
@@ -151,9 +157,9 @@ export function createAuth(config = authConfig(), { request = fetch, now = Date.
             try { const user = JSON.parse(parameters.get("user")); name = [user.name?.firstName, user.name?.lastName].filter((part) => typeof part === "string").join(" "); }
             catch { /* Apple returns the name only on the first authorization. */ }
           }
-          identity = { subject: claims.sub, name, avatar: safeUrl(claims.picture), contact: "" };
+          identity = { subject: claims.sub, name, avatar: safeUrl(claims.picture), contact: "", email: verifiedEmail(claims.email, claims.email_verified === true || claims.email_verified === "true") };
         }
-        return { identity: { ...identity, provider: id, issuer: value.issuer }, returnTo: transaction.returnTo, linkToken: transaction.linkToken, ...(value.mode === "oauth" ? { connection: { accessToken: tokens.access_token, refreshToken: tokens.refresh_token || "", expiresAt: now() + Math.min(Number(tokens.expires_in) || 300, 86400) * 1000 } } : {}) };
+        return { identity: { ...identity, provider: id, issuer: value.issuer }, returnTo: transaction.returnTo, linkToken: transaction.linkToken, pendingLink: transaction.pendingLink, ...(value.mode === "oauth" ? { connection: { accessToken: tokens.access_token, refreshToken: tokens.refresh_token || "", expiresAt: now() + Math.min(Number(tokens.expires_in) || 300, 86400) * 1000 } } : {}) };
       } catch { throw new AppError(400, "Sign-in could not be verified. Please try again."); }
     }
   };

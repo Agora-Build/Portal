@@ -78,6 +78,28 @@ function renderSignIn() {
   }));
 }
 export function openSignIn() { renderSignIn(); loginDialog.showModal(); }
+
+// A login whose verified email already has an account waits here until the person signs in to that account to confirm it.
+const PROVIDER_NAMES = { google: "Google", github: "GitHub", apple: "Apple", agora: "Agora" };
+const nameOf = (id) => PROVIDER_NAMES[id] || "another login";
+function confirmLink(login, via) {
+  const choices = via.filter((id) => Object.hasOwn(PROVIDER_NAMES, id));
+  const dialog = el("dialog", { id: "link-dialog", "aria-labelledby": "link-title" }, [
+    el("div", { class: "dialog-head" }, [el("span", { class: "kicker", text: "ONE ACCOUNT, MANY LOGINS" }), el("button", { class: "close-button", type: "button", "data-close": "", "aria-label": "Close", text: "\u00d7" })]),
+    el("h2", { id: "link-title", text: "This email already has an account." }),
+    el("p", { class: "dialog-intro", text: "Your " + nameOf(login) + " email already belongs to an Agora.Build account that signs in with " + choices.map(nameOf).join(" or ") + ". Sign in with it once to connect " + nameOf(login) + ", and both will open the same account." }),
+    el("div", { class: "login-providers" }, choices.map((id) => el("button", { class: "login-provider", type: "button", onclick: () => {
+      const url = new URL("/auth/" + id, location.origin);
+      url.searchParams.set("returnTo", location.pathname + location.search + location.hash);
+      url.searchParams.set("confirmLink", "1");
+      location.href = url.href;
+    } }, [el("span", { class: "login-provider-mark mono", "aria-hidden": "true", text: id === "agora" ? "a_" : nameOf(id)[0] }), el("span", { text: "Continue with " + nameOf(id) })]))),
+    el("p", { class: "form-note", text: "Not you? Close this and nothing is connected. The request expires in ten minutes." })
+  ]);
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+}
 api("/api/auth/providers").then((result) => { providers = result.providers; renderSignIn(); }).catch(() => { loginStatus.textContent = "Sign-in options could not load. You can continue with this browser."; });
 
 export function openJoin(callback, browserOnly = false) {
@@ -213,7 +235,15 @@ sessionReady.then(() => {
   if (!result) return;
   url.searchParams.delete("signin");
   history.replaceState(null, "", url.pathname + url.search + url.hash);
+  const login = url.searchParams.get("login");
+  url.searchParams.delete("login");
+  const via = (url.searchParams.get("via") || "").split(",").filter(Boolean);
+  url.searchParams.delete("via");
+  history.replaceState(null, "", url.pathname + url.search + url.hash);
   if (result === "failed") { notify("Sign-in could not be completed. Please try again."); return; }
+  if (result === "confirm-link") { confirmLink(login, via); return; }
+  const linkNotices = { linked: nameOf(login) + " is now connected. Either login opens this account.", "link-mismatch": "You signed in to a different account, so the new login was not connected.", "link-expired": "The request to connect that login expired. Sign in with it again to retry.", "link-failed": "That login could not be connected because this account already has a login from the same provider." };
+  if (Object.hasOwn(linkNotices, result)) { notify(linkNotices[result]); return; }
   if (state.account && !state.profile && location.pathname !== "/account.html" && location.pathname !== "/services.html") {
     let draft;
     try { draft = JSON.parse(sessionStorage.getItem("foundry-room-draft")); } catch { sessionStorage.removeItem("foundry-room-draft"); }

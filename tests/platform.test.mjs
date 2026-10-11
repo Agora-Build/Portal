@@ -234,6 +234,9 @@ test("server-side integration completes direct app login, shares credits, isolat
     assert.equal(forbidden.status, 401);
     const disguisedCookie = await fetch(base + "/api/me", { headers: { Cookie: "house_session=" + tokens.access_token } });
     assert.equal((await disguisedCookie.json()).account, null);
+    const appView = await (await fetch(base + "/api/me", { headers: { Authorization: "Bearer " + tokens.access_token } })).json();
+    assert.ok(appView.account.id, "an app token reads the account");
+    assert.equal("emails" in appView.account, false, "but never the owner's private emails");
     const mismatch = await fetch(base + "/api/platform/credits/reserve", { method: "POST", headers: { Authorization: "Bearer " + clientSecret, "X-Agora-Client-Id": "other", "X-Agora-User-Token": tokens.access_token, "Content-Type": "application/json" }, body: JSON.stringify({ service: "analysis", idempotencyKey: "other-request-001" }) });
     assert.equal(mismatch.status, 403);
     const signInPage = await fetch(base + "/oauth/authorize?" + new URL(start.url).searchParams);

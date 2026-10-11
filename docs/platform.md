@@ -7,8 +7,20 @@ private user immediately; publishing a profile requires real intent.
 
 Google, GitHub, Apple, and Agora identities are matched by verified issuer and
 subject. Connecting another provider is an explicit operation on a signed-in
-account. Email addresses and Agora callback `loginId` values never identify or
-merge users. Accounts and purchased credits survive public profile deletion.
+account. Agora callback `loginId` values never identify users, and an email
+never signs anyone in on its own.
+
+Each login keeps the provider's verified email privately, refreshed at every
+sign-in (GitHub: primary and verified in `/user/emails`; Google and Apple:
+`email_verified`; Agora OIDC: `email_verified`; Agora OAuth: none until its SSO returns a stable user ID). A new login
+whose verified email already belongs to an account does not create a second
+account. It is held for ten minutes in an HttpOnly `house_link` cookie in that
+browser, and it is connected only when that browser then signs in with one of the
+account's existing logins (`/auth/<provider>?confirmLink=1`). A sign-in to a
+different account, an expired hold, or an account that already has a login from
+the same provider connects nothing. Accounts that already share an email are not
+merged. Emails appear only to the owner in a browser session (`/api/me`), never
+to applications. Accounts and purchased credits survive public profile deletion.
 
 ## Storage And Deployment
 
