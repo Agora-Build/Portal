@@ -78,7 +78,54 @@ function renderSignIn() {
   }));
 }
 export function openSignIn() { renderSignIn(); loginDialog.showModal(); }
-api("/api/auth/providers").then((result) => { providers = result.providers; renderSignIn(); }).catch(() => { loginStatus.textContent = "Sign-in options could not load. You can continue with this browser."; });
+
+// A login whose verified email already has an account is held by the server; these dialogs read it from there, never from the URL.
+const PROVIDER_NAMES = { google: "Google", github: "GitHub", apple: "Apple", agora: "Agora" };
+const nameOf = (id) => PROVIDER_NAMES[id] || "another login";
+function linkDialog(kicker, title, intro, actions, note) {
+  const dialog = el("dialog", { id: "link-dialog", "aria-labelledby": "link-title" }, [
+    el("div", { class: "dialog-head" }, [el("span", { class: "kicker", text: kicker }), el("button", { class: "close-button", type: "button", "data-close": "", "aria-label": "Close", text: "\u00d7" })]),
+    el("h2", { id: "link-title", text: title }), el("p", { class: "dialog-intro", text: intro }), ...actions, el("p", { class: "form-note", text: note })
+  ]);
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+  return dialog;
+}
+const resolveLink = async (action) => api("/api/auth/pending-link", { method: "POST", body: JSON.stringify({ action }) });
+async function confirmLink() {
+  let held;
+  try { held = await api("/api/auth/pending-link"); } catch { notify("That sign-in request expired. Sign in again."); return; }
+  const choices = held.providers.filter((id) => Object.hasOwn(PROVIDER_NAMES, id));
+  const separate = el("button", { class: "inline-link", type: "button", text: "Create a separate account instead", onclick: async () => {
+    try { await resolveLink("separate"); location.reload(); } catch (error) { notify(error.message); }
+  } });
+  const dialog = linkDialog("ONE ACCOUNT, MANY LOGINS", "This email already has an account.", "Your " + nameOf(held.provider) + " login (" + held.email + ") matches an Agora.Build account that signs in with " + choices.map(nameOf).join(" or ") + ". Sign in with it to connect " + nameOf(held.provider) + ", so both open the same account.", [
+    el("div", { class: "login-providers" }, choices.map((id) => el("button", { class: "login-provider", type: "button", onclick: () => {
+      const url = new URL("/auth/" + id, location.origin);
+      url.searchParams.set("returnTo", location.pathname + location.search + location.hash);
+      url.searchParams.set("confirmLink", "1");
+      location.href = url.href;
+    } }, [el("span", { class: "login-provider-mark mono", "aria-hidden": "true", text: id === "agora" ? "a_" : nameOf(id)[0] }), el("span", { text: "Continue with " + nameOf(id) })]))),
+    separate
+  ], "Not you? Close this and nothing is connected. The request expires in ten minutes.");
+  // Closing by Esc or by the close button means "not now": the held login is discarded.
+  dialog.addEventListener("cancel", () => { resolveLink("discard").catch(() => {}); });
+  dialog.querySelector(".close-button").addEventListener("click", () => { resolveLink("discard").catch(() => {}); });
+}
+async function confirmConnect() {
+  let held;
+  try { held = await api("/api/auth/pending-link"); } catch { notify("The request to connect that login expired. Sign in with it again to retry."); return; }
+  if (!held.ready) { notify("Sign in to the matching account to connect that login."); return; }
+  let dialog;
+  const choose = (action) => async () => {
+    try { const result = await resolveLink(action); dialog.close(); await refreshSession(); notify(result.linked ? nameOf(result.linked) + " is now connected. Either login opens this account." : "Nothing was connected."); }
+    catch (error) { dialog.close(); notify(error.message); }
+  };
+  dialog = linkDialog("CONNECT A LOGIN", "Connect " + nameOf(held.provider) + " to this account?", nameOf(held.provider) + (held.name ? " login “" + held.name + "”" : "") + " (" + held.email + ") will sign in to this account from now on. Connect it only if it is yours.", [
+    el("div", { class: "dialog-actions" }, [el("button", { class: "button", type: "button", text: "Connect " + nameOf(held.provider), onclick: choose("connect") }), el("button", { class: "button button-secondary", type: "button", text: "Don't connect", onclick: choose("discard") })])
+  ], "Only connect a login you own.");
+}api("/api/auth/providers").then((result) => { providers = result.providers; renderSignIn(); }).catch(() => { loginStatus.textContent = "Sign-in options could not load. You can continue with this browser."; });
 
 export function openJoin(callback, browserOnly = false) {
   afterJoin = typeof callback === "function" ? callback : null;
@@ -194,6 +241,10 @@ sessionReady.then(() => {
   url.searchParams.delete("signin");
   history.replaceState(null, "", url.pathname + url.search + url.hash);
   if (result === "failed") { notify("Sign-in could not be completed. Please try again."); return; }
+  if (result === "confirm-link") { confirmLink(); return; }
+  if (result === "confirm-connect") { confirmConnect(); return; }
+  const linkNotices = { "link-mismatch": "You signed in to a different account, so the new login was not connected.", "link-expired": "The request to connect that login expired. Sign in with it again to retry." };
+  if (Object.hasOwn(linkNotices, result)) { notify(linkNotices[result]); return; }
   if (state.account && !state.profile && location.pathname !== "/account.html" && location.pathname !== "/services.html") {
     openJoin();
   } else notify("You are signed in. Your profile and spaces are ready.");

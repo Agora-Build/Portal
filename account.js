@@ -87,7 +87,7 @@ async function loadAccount() {
   const version = ++renderVersion;
   const account = state.account;
   status.textContent = account ? "Signed in as " + account.name : "Sign in to manage your account, membership, and credits.";
-  document.querySelector("#account-identity").replaceChildren(account ? el("div", {}, [el("h3", { text: account.name }), el("p", { class: "account-user-id mono", text: account.id }), el("p", { text: "Logins: " + (account.providers.join(", ") || "Connected application") })]) : el("p", { text: "Your private account is separate from your public community profile." }));
+  document.querySelector("#account-identity").replaceChildren(account ? el("div", {}, [el("h3", { text: account.name }), el("p", { class: "account-user-id mono", text: account.id }), el("p", { text: "Logins: " + (account.providers.join(", ") || "Connected application") }), ...(account.emails?.length ? [el("p", { class: "muted", text: "Verified email" + (account.emails.length > 1 ? "s" : "") + " (private): " + account.emails.join(", ") })] : [])]) : el("p", { text: "Your private account is separate from your public community profile." }));
   document.querySelector("#logout-everywhere").hidden = !account;
   renderPlans();
   if (!account) {

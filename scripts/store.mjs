@@ -7,9 +7,10 @@ export class AppError extends Error {
   constructor(status, message, details) { super(message); this.status = status; if (details) this.details = details; }
 }
 const hash = (value) => createHash("sha256").update(value).digest("hex");
+const same = (entry) => (other) => other.provider === entry.provider && other.issuer === entry.issuer && other.subject === entry.subject;
 const publicProfile = ({ sessionHash, accountId, ...person }) => person;
 const publicRoom = ({ videoUrl, ...room }) => ({ ...room, callProvider: "agora", path: "/meet/" + room.id });
-const publicAccount = (account) => account ? { id: account.id, name: account.name, avatar: account.avatar, contact: account.contact, providers: account.identities.filter((identity) => identity.provider !== "service").map((identity) => identity.provider), plan: effectivePlan(account), entitlements: entitlements(effectivePlan(account)), connections: Object.keys(account.connections || {}) } : null;
+const publicAccount = (account) => account ? { id: account.id, name: account.name, avatar: account.avatar, contact: account.contact, providers: account.identities.filter((identity) => identity.provider !== "service").map((identity) => identity.provider), emails: [...new Set(account.identities.map((identity) => identity.email).filter(Boolean))], plan: effectivePlan(account), entitlements: entitlements(effectivePlan(account)), connections: Object.keys(account.connections || {}) } : null;
 export const safeUrl = (value) => {
   try {
     const url = new URL(value);
@@ -71,6 +72,8 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
     queue = operation;
     return operation;
   }
+  const newAccount = (profile) => ({ id: "account:" + randomUUID(), identities: [], name: String(profile.name || "Builder").slice(0, 60), avatar: safeUrl(profile.avatar || ""), contact: safeUrl(profile.contact || ""), profileId: null, createdAt: new Date(now()).toISOString() });
+  const loginsOf = (account) => [...new Set(account.identities.filter((entry) => entry.provider !== "service").map((entry) => entry.provider))];
   const accountFor = (state, token) => {
     const session = token && state.sessions.find((session) => session.hash === hash(token) && session.expiresAt > now());
     const grant = token && state.grants.find((grant) => grant.accessHash === hash(token) && grant.accessExpiresAt > now() && validGrant(state, grant));
@@ -121,12 +124,16 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
     async session(token) {
       const state = await read();
       const person = personFor(state, token);
-      return { profile: person ? publicProfile(person) : null, account: publicAccount(accountFor(state, token)) };
+      const account = publicAccount(accountFor(state, token));
+      // Emails are for the owner's own browser; an app token reading /api/me never sees them.
+      const browser = token && state.sessions.some((session) => session.hash === hash(token) && session.expiresAt > now());
+      if (account && !browser) delete account.emails;
+      return { profile: person ? publicProfile(person) : null, account };
     },
     async accountIdentity(id) {
       const account = (await read()).accounts.find((account) => account.id === id);
       if (!account) throw new AppError(404, "Account not found.");
-      return { sub: account.id, name: account.name, picture: account.avatar, identities: account.identities, plan: effectivePlan(account), entitlements: entitlements(effectivePlan(account)) };
+      return { sub: account.id, name: account.name, picture: account.avatar, identities: account.identities.map(({ provider, issuer, subject }) => ({ provider, issuer, subject })), plan: effectivePlan(account), entitlements: entitlements(effectivePlan(account)) };
     },
     async authorize(token, { clientId, redirectUri, challenge, scopes }) {
       const code = randomBytes(32).toString("base64url");
@@ -186,27 +193,47 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
         state.authorizationCodes = state.authorizationCodes.filter((code) => code.accountId !== account.id);
       });
     },
-    async login(identity, { linkToken } = {}) {
+    async login(identity, { linkToken, pendingLink } = {}) {
       const { provider, issuer, subject } = identity;
+      // Providers pass an email only when they verified it; it is private and never identifies a user on its own.
+      // Undefined means the provider could not be asked this time, so the stored email is kept.
+      const email = identity.email === undefined ? undefined : typeof identity.email === "string" && identity.email ? identity.email.toLowerCase() : null;
       if (!["google", "github", "apple", "agora"].includes(provider) || typeof subject !== "string" || !subject || subject.length > 255 || typeof issuer !== "string" || !issuer) throw new AppError(422, "This login identity is invalid.");
       const token = randomBytes(32).toString("base64url");
       return update((state) => {
+        state.pendingLinks = (state.pendingLinks || []).filter((entry) => entry.expiresAt > now());
+        const waiting = pendingLink ? state.pendingLinks.find((entry) => entry.hash === hash(pendingLink)) || null : null;
         let account = state.accounts.find((entry) => entry.identities.some((entry) => entry.provider === provider && entry.issuer === issuer && entry.subject === subject));
         const browser = linkToken && state.sessions.find((session) => session.hash === hash(linkToken) && session.expiresAt > now());
         const linking = browser && accountFor(state, linkToken);
         const legacy = linkToken && state.people.find((person) => person.sessionHash === hash(linkToken));
         if (linkToken && !linking && !legacy) throw new AppError(401, "Your session expired. Sign in again before connecting another login.");
         if (account && ((linking && account.id !== linking.id) || (!linking && legacy && account.profileId && account.profileId !== legacy.id))) throw new AppError(409, "That login belongs to another account. Sign out to use it.");
+        // A new login whose verified email already belongs to an account is held until that account signs in to confirm it.
+        if (!account && !linkToken && email) {
+          const owner = state.accounts.find((entry) => entry.identities.some((other) => other.email === email));
+          if (owner) {
+            const raw = randomBytes(32).toString("base64url");
+            state.pendingLinks.push({ hash: hash(raw), accountId: owner.id, identity: { provider, issuer, subject, email }, profile: { name: identity.name, avatar: identity.avatar, contact: identity.contact }, confirmedBy: null, expiresAt: now() + 600000 });
+            state.pendingLinks = state.pendingLinks.slice(-500);
+            return { pendingLink: { token: raw, provider, providers: loginsOf(owner) } };
+          }
+        }
         if (!account) {
           if (linking?.identities.some((entry) => entry.provider === provider)) throw new AppError(409, "A login from this provider is already connected.");
           if (linking) account = linking;
           else {
             if (state.accounts.length >= 1000) throw new AppError(409, "Account sign-ups are full for now.");
-            account = { id: "account:" + randomUUID(), identities: [], name: String(identity.name || "Builder").slice(0, 60), avatar: safeUrl(identity.avatar || ""), contact: safeUrl(identity.contact || ""), profileId: null, createdAt: new Date(now()).toISOString() };
+            account = newAccount(identity);
             state.accounts.push(account);
           }
-          account.identities.push({ provider, issuer, subject });
-        }
+          account.identities.push({ provider, issuer, subject, email: email ?? null });
+        } else if (email !== undefined) account.identities.find(same({ provider, issuer, subject })).email = email;
+        // Signing in to the matching account only readies the held login; connecting it is a separate, explicit step on the portal.
+        let link = {};
+        if (pendingLink && !waiting) link = { linkExpired: true };
+        else if (waiting && waiting.accountId !== account.id) { state.pendingLinks = state.pendingLinks.filter((entry) => entry !== waiting); link = { linkMismatch: true }; }
+        else if (waiting) { waiting.confirmedBy = account.id; waiting.confirmedSession = hash(token); waiting.expiresAt = now() + 600000; link = { linkReady: true }; }
         if (legacy && !linking) {
           account.profileId = legacy.id;
           legacy.accountId = account.id;
@@ -214,7 +241,46 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
         }
         addSession(state, account, token);
         const person = state.people.find((person) => person.id === account.profileId);
-        return { token, account: publicAccount(account), profile: person ? publicProfile(person) : null };
+        return { token, account: publicAccount(account), profile: person ? publicProfile(person) : null, ...link };
+      });
+    },
+    // What a held login is, for the browser holding it: the provider, a masked email, and whether this session may connect it.
+    async pendingLink(raw, sessionToken) {
+      const state = await read();
+      const hold = raw && (state.pendingLinks || []).find((entry) => entry.hash === hash(raw) && entry.expiresAt > now());
+      if (!hold) throw new AppError(404, "There is no login waiting to be connected.");
+      const owner = state.accounts.find((account) => account.id === hold.accountId);
+      const current = accountFor(state, sessionToken);
+      const [name, domain] = hold.identity.email.split("@");
+      return { provider: hold.identity.provider, email: name[0] + "***@" + domain, name: String(hold.profile?.name || "").slice(0, 60), providers: owner ? loginsOf(owner) : [], ready: Boolean(current && hold.confirmedBy === current.id && sessionToken && hold.confirmedSession === hash(sessionToken)) };
+    },
+    async resolvePendingLink(raw, sessionToken, action) {
+      if (!["connect", "separate", "discard"].includes(action)) throw new AppError(422, "Choose connect, separate, or discard.");
+      const token = randomBytes(32).toString("base64url");
+      return update((state) => {
+        state.pendingLinks = (state.pendingLinks || []).filter((entry) => entry.expiresAt > now());
+        const hold = raw && state.pendingLinks.find((entry) => entry.hash === hash(raw));
+        if (!hold) throw new AppError(404, "There is no login waiting to be connected.");
+        state.pendingLinks = state.pendingLinks.filter((entry) => entry !== hold);
+        if (action === "discard") return { discarded: true };
+        const held = hold.identity;
+        if (state.accounts.some((account) => account.identities.some(same(held)))) throw new AppError(409, "That login already belongs to an account.");
+        if (action === "connect") {
+          const current = accountFor(state, sessionToken);
+          // Only the very session that signed in through the hold may connect it.
+          if (!current || hold.confirmedBy !== current.id || !sessionToken || hold.confirmedSession !== hash(sessionToken)) throw new AppError(403, "Sign in to the matching account before connecting this login.");
+          if (current.identities.some((entry) => entry.provider === held.provider)) throw new AppError(409, "This account already has a login from that provider.");
+          current.identities.push(held);
+          return { linked: held.provider, account: publicAccount(current) };
+        }
+        if (state.accounts.length >= 1000) throw new AppError(409, "Account sign-ups are full for now.");
+        const account = newAccount(hold.profile || {});
+        account.identities.push(held);
+        state.accounts.push(account);
+        // The browser switches to the new account, so its previous session ends rather than lingering.
+        if (sessionToken) state.sessions = state.sessions.filter((session) => session.hash !== hash(sessionToken));
+        addSession(state, account, token);
+        return { token, account: publicAccount(account) };
       });
     },
     async logout(token) {
