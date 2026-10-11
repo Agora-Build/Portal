@@ -11,7 +11,7 @@ import { createSpaces, loadWorlds } from "../scripts/spaces/service.mjs";
 const root = new URL("../", import.meta.url).pathname;
 const worlds = loadWorlds(root);
 const secret = "s".repeat(32);
-const env = { AGORA_APP_ID: "a".repeat(32), AGORA_APP_CERTIFICATE: "b".repeat(32), SPACE_CHANNEL_SECRET: secret };
+const env = { AGORA_APP_ID: "a".repeat(32), AGORA_APP_CERTIFICATE: "b".repeat(32), SPACES_SIGNALING_SECRET: secret };
 const profile = (name) => ({ name, bio: "Building voice agents with Rust.", intent: "Build a language practice voice agent with natural interruptions.", lookingFor: "Audio engineers", skills: ["Rust", "Voice AI"], location: "Remote", contact: "https://example.com/builder", monitor: false });
 const missing = { status: 404, message: "This space was not found." };
 

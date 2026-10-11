@@ -2,7 +2,8 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { AppError } from "./store.mjs";
 
 export function connectionsConfig(env = process.env) {
-  const key = Buffer.from(env.CONNECTION_ENCRYPTION_KEY || "", "base64");
+  // Encrypts stored Agora Console tokens. CONNECTION_ENCRYPTION_KEY is the old name, still read so an existing deployment keeps its data.
+  const key = Buffer.from(env.AGORA_CONSOLE_ENCRYPTION_KEY || env.CONNECTION_ENCRYPTION_KEY || "", "base64");
   let bffUrl = "";
   try {
     const url = new URL(env.AGORA_BFF_URL || "https://agora-cli.agora.io");

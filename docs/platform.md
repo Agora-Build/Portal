@@ -221,7 +221,7 @@ that is the registered issuer. The documented upstream userinfo 401 / changing
 callback `loginId` issue must be resolved before existing Agora tokens can identify
 portal users. The portal refuses to substitute email or the callback login ID.
 
-Set `CONNECTION_ENCRYPTION_KEY` to a base64-encoded 32-byte server key. Agora OAuth
+Set `AGORA_CONSOLE_ENCRYPTION_KEY` (formerly `CONNECTION_ENCRYPTION_KEY`, still read as a fallback) to a base64-encoded 32-byte server key. It is used only for Agora Console connections. Agora OAuth
 access/refresh tokens are encrypted with AES-256-GCM at rest. Keep and back up this
 key separately from the database. `AGORA_BFF_URL` defaults to the existing
 `https://agora-cli.agora.io` service used by Astation. OIDC sign-in alone does not

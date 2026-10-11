@@ -10,13 +10,13 @@ import { authConfig, createAuth } from "../scripts/auth.mjs";
 import { createSignaling, signalingConfig } from "../scripts/spaces/signaling.mjs";
 
 const root = new URL("../", import.meta.url).pathname;
-const env = { AGORA_APP_ID: "a".repeat(32), AGORA_APP_CERTIFICATE: "b".repeat(32), SPACE_CHANNEL_SECRET: "s".repeat(32) };
+const env = { AGORA_APP_ID: "a".repeat(32), AGORA_APP_CERTIFICATE: "b".repeat(32), SPACES_SIGNALING_SECRET: "s".repeat(32) };
 const profile = (name) => ({ name, bio: "Building voice agents with Rust.", intent: "Build a language practice voice agent with natural interruptions.", lookingFor: "Audio engineers", skills: ["Rust", "Voice AI"], location: "Remote", contact: "https://example.com/builder", monitor: false });
 const absent = "/00000000-0000-4000-8000-000000000000";
 let temporary;
 const close = (instance) => new Promise((done) => { instance.close(done); instance.closeIdleConnections(); });
 async function start(options = {}) {
-  const instance = createAppServer(root, { monitor: false, storageFile: resolve(temporary, Math.random() + ".json"), models: createModelClient(modelConfig({})), calls: createAgoraCalls(agoraConfig(env)), auth: createAuth(authConfig({})), signaling: createSignaling(signalingConfig(env)), channelSecret: env.SPACE_CHANNEL_SECRET, ...options });
+  const instance = createAppServer(root, { monitor: false, storageFile: resolve(temporary, Math.random() + ".json"), models: createModelClient(modelConfig({})), calls: createAgoraCalls(agoraConfig(env)), auth: createAuth(authConfig({})), signaling: createSignaling(signalingConfig(env)), channelSecret: env.SPACES_SIGNALING_SECRET, ...options });
   await new Promise((done) => instance.listen(0, "127.0.0.1", done));
   return { instance, url: "http://127.0.0.1:" + instance.address().port };
 }
