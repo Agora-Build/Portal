@@ -225,7 +225,7 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
         let link = {};
         if (pendingLink && !waiting) link = { linkExpired: true };
         else if (waiting && waiting.accountId !== account.id) { state.pendingLinks = state.pendingLinks.filter((entry) => entry !== waiting); link = { linkMismatch: true }; }
-        else if (waiting) { waiting.confirmedBy = account.id; waiting.expiresAt = now() + 600000; link = { linkReady: true }; }
+        else if (waiting) { waiting.confirmedBy = account.id; waiting.confirmedSession = hash(token); waiting.expiresAt = now() + 600000; link = { linkReady: true }; }
         if (legacy && !linking) {
           account.profileId = legacy.id;
           legacy.accountId = account.id;
@@ -244,7 +244,7 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
       const owner = state.accounts.find((account) => account.id === hold.accountId);
       const current = accountFor(state, sessionToken);
       const [name, domain] = hold.identity.email.split("@");
-      return { provider: hold.identity.provider, email: name[0] + "***@" + domain, providers: owner ? loginsOf(owner) : [], ready: Boolean(current && hold.confirmedBy === current.id) };
+      return { provider: hold.identity.provider, email: name[0] + "***@" + domain, name: String(hold.profile?.name || "").slice(0, 60), providers: owner ? loginsOf(owner) : [], ready: Boolean(current && hold.confirmedBy === current.id && sessionToken && hold.confirmedSession === hash(sessionToken)) };
     },
     async resolvePendingLink(raw, sessionToken, action) {
       if (!["connect", "separate", "discard"].includes(action)) throw new AppError(422, "Choose connect, separate, or discard.");
@@ -259,7 +259,8 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
         if (state.accounts.some((account) => account.identities.some(same(held)))) throw new AppError(409, "That login already belongs to an account.");
         if (action === "connect") {
           const current = accountFor(state, sessionToken);
-          if (!current || hold.confirmedBy !== current.id) throw new AppError(403, "Sign in to the matching account before connecting this login.");
+          // Only the very session that signed in through the hold may connect it.
+          if (!current || hold.confirmedBy !== current.id || !sessionToken || hold.confirmedSession !== hash(sessionToken)) throw new AppError(403, "Sign in to the matching account before connecting this login.");
           if (current.identities.some((entry) => entry.provider === held.provider)) throw new AppError(409, "This account already has a login from that provider.");
           current.identities.push(held);
           return { linked: held.provider, account: publicAccount(current) };
@@ -268,6 +269,8 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
         const account = newAccount(hold.profile || {});
         account.identities.push(held);
         state.accounts.push(account);
+        // The browser switches to the new account, so its previous session ends rather than lingering.
+        if (sessionToken) state.sessions = state.sessions.filter((session) => session.hash !== hash(sessionToken));
         addSession(state, account, token);
         return { token, account: publicAccount(account) };
       });

@@ -109,7 +109,9 @@ async function confirmLink() {
     } }, [el("span", { class: "login-provider-mark mono", "aria-hidden": "true", text: id === "agora" ? "a_" : nameOf(id)[0] }), el("span", { text: "Continue with " + nameOf(id) })]))),
     separate
   ], "Not you? Close this and nothing is connected. The request expires in ten minutes.");
+  // Closing by Esc or by the close button means "not now": the held login is discarded.
   dialog.addEventListener("cancel", () => { resolveLink("discard").catch(() => {}); });
+  dialog.querySelector(".close-button").addEventListener("click", () => { resolveLink("discard").catch(() => {}); });
 }
 async function confirmConnect() {
   let held;
@@ -120,7 +122,7 @@ async function confirmConnect() {
     try { const result = await resolveLink(action); dialog.close(); await refreshSession(); notify(result.linked ? nameOf(result.linked) + " is now connected. Either login opens this account." : "Nothing was connected."); }
     catch (error) { dialog.close(); notify(error.message); }
   };
-  dialog = linkDialog("CONNECT A LOGIN", "Connect " + nameOf(held.provider) + " to this account?", nameOf(held.provider) + " (" + held.email + ") will sign in to this account from now on.", [
+  dialog = linkDialog("CONNECT A LOGIN", "Connect " + nameOf(held.provider) + " to this account?", nameOf(held.provider) + (held.name ? " login “" + held.name + "”" : "") + " (" + held.email + ") will sign in to this account from now on. Connect it only if it is yours.", [
     el("div", { class: "dialog-actions" }, [el("button", { class: "button", type: "button", text: "Connect " + nameOf(held.provider), onclick: choose("connect") }), el("button", { class: "button button-secondary", type: "button", text: "Don't connect", onclick: choose("discard") })])
   ], "Only connect a login you own.");
 }api("/api/auth/providers").then((result) => { providers = result.providers; renderSignIn(); }).catch(() => { loginStatus.textContent = "Sign-in options could not load. You can continue with this browser."; });
