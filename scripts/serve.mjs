@@ -104,6 +104,9 @@ export function createAppServer(directory = root, options = {}) {
       const token = bearer || (cookieToken && await store.browserToken(cookieToken) ? cookieToken : "");
       const secure = auth.config.origin.startsWith("https:") || Boolean(request.socket.encrypted);
       const sessionCookie = (value, maxAge = 30 * 86400) => "house_session=" + value + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=" + maxAge + (secure ? "; Secure" : "");
+      // A login waiting to be connected by email. Over HTTPS the __Host- prefix stops a sibling subdomain from planting one.
+      const linkName = secure ? "__Host-house_link" : "house_link";
+      const linkCookie = (value, maxAge = 600) => linkName + "=" + value + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=" + maxAge + (secure ? "; Secure" : "");
       if (path === "/api/billing/webhook" && request.method === "POST") {
         let size = 0; const chunks = [];
         for await (const chunk of request) { size += chunk.length; if (size > 262144) throw new AppError(413, "Payment event too large."); chunks.push(chunk); }
@@ -156,15 +159,15 @@ export function createAppServer(directory = root, options = {}) {
         const id = loginRoute[1];
         const cookieName = "foundry_oauth_" + id;
         const transactionCookie = (value, maxAge = 600) => cookieName + "=" + value + "; HttpOnly; Path=/auth/; Max-Age=" + maxAge + "; SameSite=" + (id === "apple" ? "None" : "Lax") + (secure ? "; Secure" : "");
-        // A login waiting to be connected by email; only this browser can confirm it, by signing in to the matching account.
-        const linkCookie = (value, maxAge = 600) => "house_link=" + value + "; HttpOnly; Path=/auth/; Max-Age=" + maxAge + "; SameSite=Lax" + (secure ? "; Secure" : "");
         if (!loginRoute[2]) {
           if (request.method !== "GET") throw new AppError(405, "Use a sign-in button to start this login.");
           limit("login:" + request.socket.remoteAddress, 20, 60000);
           const linking = requestUrl.searchParams.get("link") === "1";
           const current = await store.session(token);
           if (linking && !current.account && !current.profile) throw new AppError(401, "Sign in before connecting another login.");
-          const pendingLink = requestUrl.searchParams.get("confirmLink") === "1" ? cookieValue(request, "house_link") || undefined : undefined;
+          const confirming = requestUrl.searchParams.get("confirmLink") === "1";
+          if (confirming && request.headers["sec-fetch-site"] && request.headers["sec-fetch-site"] !== "same-origin") throw new AppError(403, "Connect logins from the Agora.Build website.");
+          const pendingLink = confirming ? cookieValue(request, linkName) || undefined : undefined;
           const result = await auth.begin(id, { returnTo: requestUrl.searchParams.get("returnTo"), linkToken: linking ? token : undefined, pendingLink });
           redirect(response, result.url, [transactionCookie(result.state)]);
         } else {
@@ -175,16 +178,14 @@ export function createAppServer(directory = root, options = {}) {
             const account = await store.login(result.identity, { linkToken: result.linkToken, pendingLink: result.pendingLink });
             const next = new URL(result.returnTo, "https://foundry.invalid");
             if (account.pendingLink) {
+              // No session for the held login; the page asks this browser to confirm with the existing account.
               next.searchParams.set("signin", "confirm-link");
-              next.searchParams.set("login", account.pendingLink.provider);
-              next.searchParams.set("via", account.pendingLink.providers.join(","));
               redirect(response, next.pathname + next.search + next.hash, [linkCookie(account.pendingLink.token), transactionCookie("", 0)]);
               return;
             }
             if (result.connection) await connections.save(account.account.id, result.connection);
-            next.searchParams.set("signin", account.linked ? "linked" : account.linkMismatch ? "link-mismatch" : account.linkExpired ? "link-expired" : account.linkFailed ? "link-failed" : "success");
-            if (account.linked) next.searchParams.set("login", account.linked);
-            redirect(response, next.pathname + next.search + next.hash, [sessionCookie(account.token), transactionCookie("", 0), ...(result.pendingLink ? [linkCookie("", 0)] : [])]);
+            next.searchParams.set("signin", account.linkReady ? "confirm-connect" : account.linkMismatch ? "link-mismatch" : account.linkExpired ? "link-expired" : "success");
+            redirect(response, next.pathname + next.search + next.hash, [sessionCookie(account.token), transactionCookie("", 0), ...(result.pendingLink && !account.linkReady ? [linkCookie("", 0)] : [])]);
           } catch {
             redirect(response, "/?signin=failed", [transactionCookie("", 0)]);
           }
@@ -268,6 +269,12 @@ export function createAppServer(directory = root, options = {}) {
         else if (path === "/api/auth/logout-all" && request.method === "POST") {
           await store.logoutEverywhere(token);
           json(response, 200, { signedOut: true }, { "Set-Cookie": sessionCookie("", 0) });
+        }
+        else if (path === "/api/auth/pending-link" && request.method === "GET") json(response, 200, await store.pendingLink(cookieValue(request, linkName), token));
+        else if (path === "/api/auth/pending-link" && request.method === "POST") {
+          // Same-origin only: /api/ POSTs already refuse other origins and cross-site fetches.
+          const result = await store.resolvePendingLink(cookieValue(request, linkName), token, (await body(request))?.action);
+          json(response, 200, { linked: result.linked || null, separate: Boolean(result.token), account: result.account || null }, { "Set-Cookie": [linkCookie("", 0), ...(result.token ? [sessionCookie(result.token)] : [])] });
         }
         else if (path === "/api/auth/logout" && request.method === "POST") {
           await store.logout(token);

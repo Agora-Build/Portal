@@ -12,15 +12,29 @@ never signs anyone in on its own.
 
 Each login keeps the provider's verified email privately, refreshed at every
 sign-in (GitHub: primary and verified in `/user/emails`; Google and Apple:
-`email_verified`; Agora OIDC: `email_verified`; Agora OAuth: none until its SSO returns a stable user ID). A new login
-whose verified email already belongs to an account does not create a second
-account. It is held for ten minutes in an HttpOnly `house_link` cookie in that
-browser, and it is connected only when that browser then signs in with one of the
-account's existing logins (`/auth/<provider>?confirmLink=1`). A sign-in to a
-different account, an expired hold, or an account that already has a login from
-the same provider connects nothing. Accounts that already share an email are not
-merged. Emails appear only to the owner in a browser session (`/api/me`), never
-to applications. Accounts and purchased credits survive public profile deletion.
+`email_verified`; Agora OIDC: `email_verified`; Agora OAuth: none until its SSO
+returns a stable user ID). Only plain ASCII addresses match. If GitHub's email
+lookup fails, the stored email is kept rather than cleared.
+
+A new login whose verified email already belongs to an account does not create a
+second account and gets no session. It is held for ten minutes, referenced by an
+HttpOnly `__Host-house_link` cookie (`house_link` over plain HTTP in development),
+which a sibling subdomain cannot set. The browser then has three choices:
+
+1. Sign in with one of the matching account's logins (`/auth/<provider>?confirmLink=1`,
+   refused when `Sec-Fetch-Site` is not same-origin). This only readies the hold;
+   the page then asks "Connect Google (a***@example.com) to this account?" and the
+   login is connected by a same-origin `POST /api/auth/pending-link {action:"connect"}`.
+2. Create a separate account for the new login (`{action:"separate"}`).
+3. Discard it (`{action:"discard"}`), or let it lapse.
+
+A sign-in to a different account discards the hold, and an account that already
+has a login from the same provider cannot connect another. `GET /api/auth/pending-link`
+shows the holding browser only the provider, a masked email, and the matching
+account's providers. Accounts that already share an email are not merged. Emails
+appear only to the owner in a browser session (`/api/me`), never to applications:
+not in `/oauth/userinfo`, app reads of `/api/me`, or identity lookup.
+Accounts and purchased credits survive public profile deletion.
 
 ## Storage And Deployment
 

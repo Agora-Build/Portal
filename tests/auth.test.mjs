@@ -222,61 +222,79 @@ test("unconfigured providers report availability without secrets and cannot issu
 });
 
 const verified = (provider, subject, email) => ({ ...identity(provider, subject), email });
-test("a verified email that already has an account waits for a sign-in with that account before connecting", async () => {
-  let clock = 1800000000000;
-  const data = store("email-link", { now: () => clock });
+test("a verified email that already has an account is held, readied by signing in to that account, and connected only on request", async () => {
+  const data = store("email-link");
   const first = await data.login(verified("github", "123", "ada@example.com"));
-  const second = await data.login(verified("google", "456", "Ada@Example.com"));
-  assert.equal(second.token, undefined, "no new account or session is created");
-  assert.deepEqual(second.pendingLink.providers, ["github"]);
-  assert.equal(second.pendingLink.provider, "google");
-  const confirmed = await data.login(verified("github", "123", "ada@example.com"), { pendingLink: second.pendingLink.token });
-  assert.equal(confirmed.account.id, first.account.id);
-  assert.deepEqual(confirmed.account.providers, ["github", "google"]);
-  assert.equal(confirmed.linked, "google");
-  assert.equal((await data.login(verified("google", "456", "ada@example.com"))).account.id, first.account.id, "either login now signs in to the same user");
-  const again = await data.login(verified("github", "123", "ada@example.com"), { pendingLink: second.pendingLink.token });
-  assert.equal(again.linkExpired, true, "a pending link works once; signing in still works");
+  const held = await data.login(verified("google", "456", "Ada@Example.com"));
+  assert.equal(held.token, undefined, "no new account or session is created");
+  assert.deepEqual([held.pendingLink.provider, held.pendingLink.providers], ["google", ["github"]]);
+  const raw = held.pendingLink.token;
+  assert.deepEqual(await data.pendingLink(raw, null), { provider: "google", email: "a***@example.com", providers: ["github"], ready: false });
+  await assert.rejects(data.resolvePendingLink(raw, first.token, "connect"), { status: 403 }, "an old session cannot connect without signing in through the hold");
+  const confirmed = await data.login(verified("github", "123", "ada@example.com"), { pendingLink: raw });
+  assert.equal(confirmed.linkReady, true);
+  assert.deepEqual(confirmed.account.providers, ["github"], "signing in alone connects nothing");
+  assert.equal((await data.pendingLink(raw, confirmed.token)).ready, true);
+  const stranger = await data.login(identity("github", "999"));
+  assert.equal((await data.pendingLink(raw, stranger.token)).ready, false, "another account is never ready");
+  await assert.rejects(data.resolvePendingLink(raw, stranger.token, "connect"), { status: 403 });
+  const linked = await data.resolvePendingLink(raw, confirmed.token, "connect");
+  assert.deepEqual([linked.linked, linked.account.providers], ["google", ["github", "google"]]);
+  assert.equal((await data.login(verified("google", "456", "ada@example.com"))).account.id, first.account.id, "either login now opens the same user");
+  await assert.rejects(data.resolvePendingLink(raw, confirmed.token, "connect"), { status: 404 }, "a hold works once");
 });
-test("a pending email link is discarded when another account signs in, and expires after ten minutes", async () => {
+test("a held login can become its own account, be discarded, or lapse; a different account connects nothing", async () => {
   let clock = 1800000000000;
-  const data = store("email-link-mismatch", { now: () => clock });
+  const data = store("email-link-choices", { now: () => clock });
   const ada = await data.login(verified("github", "1", "ada@example.com"));
   const bo = await data.login(verified("github", "2", "bo@example.com"));
-  const waiting = await data.login(verified("google", "g1", "ada@example.com"));
-  const other = await data.login(verified("github", "2", "bo@example.com"), { pendingLink: waiting.pendingLink.token });
-  assert.equal(other.account.id, bo.account.id);
-  assert.equal(other.linked, undefined);
-  assert.equal(other.linkMismatch, true);
-  assert.deepEqual(other.account.providers, ["github"], "nothing is connected to the wrong account");
-  const later = await data.login(verified("google", "g1", "ada@example.com"));
+  const first = await data.login(verified("google", "g1", "ada@example.com"));
+  const other = await data.login(verified("github", "2", "bo@example.com"), { pendingLink: first.pendingLink.token });
+  assert.deepEqual([other.account.id, other.linkMismatch, other.account.providers], [bo.account.id, true, ["github"]]);
+  await assert.rejects(data.pendingLink(first.pendingLink.token, other.token), { status: 404 }, "a mismatch discards the hold");
+  const second = await data.login(verified("google", "g1", "ada@example.com"));
+  const separate = await data.resolvePendingLink(second.pendingLink.token, null, "separate");
+  assert.ok(separate.token);
+  assert.notEqual(separate.account.id, ada.account.id);
+  assert.equal((await data.login(verified("google", "g1", "ada@example.com"))).account.id, separate.account.id, "the separate account keeps that login from then on");
+  const third = await data.login(verified("apple", "a1", "ada@example.com"));
+  assert.deepEqual(await data.resolvePendingLink(third.pendingLink.token, null, "discard"), { discarded: true });
+  await assert.rejects(data.resolvePendingLink(third.pendingLink.token, null, "separate"), { status: 404 });
+  const fourth = await data.login(verified("apple", "a1", "ada@example.com"));
   clock += 600001;
-  const expired = await data.login(verified("github", "1", "ada@example.com"), { pendingLink: later.pendingLink.token });
-  assert.equal(expired.linkExpired, true);
-  assert.deepEqual(expired.account.providers, ["github"]);
-  assert.ok(ada.account);
+  const lapsed = await data.login(verified("github", "1", "ada@example.com"), { pendingLink: fourth.pendingLink.token });
+  assert.deepEqual([lapsed.linkExpired, lapsed.account.providers], [true, ["github"]]);
+  await assert.rejects(data.resolvePendingLink(fourth.pendingLink.token, null, "nonsense"), { status: 422 });
 });
-test("logins without a verified email, or with a new email, create their own account; emails are private to the owner", async () => {
+test("connecting refuses a provider the account already has", async () => {
+  const data = store("email-link-conflict");
+  const ada = await data.login(verified("github", "1", "ada@example.com"));
+  await data.login(verified("google", "g1", "other@example.com"), { linkToken: ada.token });
+  const held = await data.login(verified("google", "g2", "ada@example.com"));
+  const ready = await data.login(verified("github", "1", "ada@example.com"), { pendingLink: held.pendingLink.token });
+  await assert.rejects(data.resolvePendingLink(held.pendingLink.token, ready.token, "connect"), { status: 409 });
+});
+test("logins without a verified email create their own account; a failed lookup keeps the stored email; apps never see emails", async () => {
   const data = store("email-none");
   const ada = await data.login(verified("github", "1", "ada@example.com"));
   assert.deepEqual(ada.account.emails, ["ada@example.com"]);
-  const noEmail = await data.login(identity("google", "g1"));
-  assert.notEqual(noEmail.account.id, ada.account.id);
-  const fresh = await data.login(verified("apple", "a1", "someone@privaterelay.appleid.com"));
-  assert.notEqual(fresh.account.id, ada.account.id);
-  const explicit = await data.login(verified("google", "g2", "ada@example.com"), { linkToken: ada.token });
-  assert.equal(explicit.account.id, ada.account.id, "explicit connecting from a signed-in account still works directly");
-  const changed = await data.login(verified("github", "1", "ada@new.example"));
-  assert.deepEqual(changed.account.emails.sort(), ["ada@example.com", "ada@new.example"].sort(), "each login keeps its own latest email");
+  assert.notEqual((await data.login(identity("google", "g1"))).account.id, ada.account.id);
+  assert.notEqual((await data.login(verified("apple", "a1", "someone@privaterelay.appleid.com"))).account.id, ada.account.id);
+  assert.equal((await data.login(verified("google", "g2", "ada@example.com"), { linkToken: ada.token })).account.id, ada.account.id, "explicit connecting still works directly");
+  assert.deepEqual((await data.login({ ...identity("github", "1"), email: undefined })).account.emails.sort(), ["ada@example.com"], "an unanswered lookup keeps the email");
+  assert.deepEqual((await data.login(verified("github", "1", null))).account.emails, ["ada@example.com"], "a positively unverified email clears GitHub's, leaving Google's");
+  const lookup = await data.accountIdentity(ada.account.id);
+  assert.ok(lookup.identities.length >= 2);
+  assert.ok(lookup.identities.every((entry) => !("email" in entry)), "identity lookup for apps carries no emails");
 });
-test("providers report only verified emails", async () => {
-  for (const [emails, expected] of [[[{ email: "Ada@Example.com", primary: true, verified: true }, { email: "x@example.com", primary: false, verified: true }], "ada@example.com"], [[{ email: "ada@example.com", primary: true, verified: false }], null], [[], null]]) {
+test("providers report only verified ASCII emails, and a failed GitHub lookup reports nothing", async () => {
+  for (const [emails, expected] of [[[{ email: "Ada@Example.com", primary: true, verified: true }, { email: "x@example.com", primary: false, verified: true }], "ada@example.com"], [[{ email: "ada@example.com", primary: true, verified: false }], null], [[], null], [{ message: "Requires authentication" }, undefined], [[{ email: "Kada@example.com", primary: true, verified: true }], null]]) {
     const upstream = providerRequests({ id: "github", githubEmails: emails });
     const auth = createAuth(configuration(), { request: upstream.request });
     const started = await auth.begin("github");
     assert.match(new URL(started.url).searchParams.get("scope"), /user:email/);
     const result = await auth.complete("github", new URLSearchParams({ code: "test-code", state: started.state }), started.state);
-    assert.equal(result.identity.email, expected);
+    assert.equal(result.identity.email, expected, JSON.stringify(emails));
   }
   for (const [claims, expected] of [[{ email: "Ada@Example.com", email_verified: true }, "ada@example.com"], [{ email: "ada@example.com", email_verified: false }, null], [{ email: "ada@example.com", email_verified: "true" }, "ada@example.com"], [{}, null]]) {
     let nonce;
@@ -288,7 +306,7 @@ test("providers report only verified emails", async () => {
     assert.equal(result.identity.email, expected, JSON.stringify(claims));
   }
 });
-test("HTTP: a second provider with the same verified email is held in this browser and connected by signing in to the first", async () => {
+test("HTTP: a held login is confirmed by signing in to the matching account, then connected by a same-origin request", async () => {
   const data = store("http-email-link");
   let nonce;
   const google = providerRequests({ nonce: () => nonce, claims: { email: "ada@example.com", email_verified: true } });
@@ -303,21 +321,33 @@ test("HTTP: a second provider with the same verified email is held in this brows
     const transaction = start.headers.get("set-cookie").split(";")[0];
     return fetch(base + "/auth/" + id + "/callback?code=test-code&state=" + url.searchParams.get("state"), { headers: { Cookie: [transaction, ...cookies].join("; ") }, redirect: "manual" });
   };
+  const cookie = (response, name) => response.headers.getSetCookie().find(entry => entry.startsWith(name + "="));
   try {
-    const first = await signIn("github");
-    assert.equal(first.headers.get("location"), "/account.html?signin=success");
+    assert.equal((await signIn("github")).headers.get("location"), "/account.html?signin=success");
     const second = await signIn("google");
-    assert.equal(second.headers.get("location"), "/account.html?signin=confirm-link&login=google&via=github");
-    assert.ok(!second.headers.getSetCookie().some(cookie => cookie.startsWith("house_session=")), "no session for the held login");
-    const held = second.headers.getSetCookie().find(cookie => cookie.startsWith("house_link="));
-    assert.match(held, /HttpOnly; Path=\/auth\/; Max-Age=600; SameSite=Lax; Secure/);
-    const confirmed = await signIn("github", "&confirmLink=1", [held.split(";")[0]]);
-    assert.equal(confirmed.headers.get("location"), "/account.html?signin=linked&login=google");
-    assert.ok(confirmed.headers.getSetCookie().some(cookie => cookie.startsWith("house_link=;")), "the held login is cleared");
-    const session = confirmed.headers.getSetCookie().find(cookie => cookie.startsWith("house_session=")).split(";")[0];
+    assert.equal(second.headers.get("location"), "/account.html?signin=confirm-link");
+    assert.equal(cookie(second, "house_session"), undefined, "no session for the held login");
+    const held = cookie(second, "__Host-house_link");
+    assert.match(held, /HttpOnly; SameSite=Lax; Path=\/; Max-Age=600; Secure/);
+    const heldCookie = held.split(";")[0];
+    assert.deepEqual(await (await fetch(base + "/api/auth/pending-link", { headers: { Cookie: heldCookie } })).json(), { provider: "google", email: "a***@example.com", providers: ["github"], ready: false });
+    const crossSite = await fetch(base + "/auth/github?confirmLink=1", { headers: { Cookie: heldCookie, "Sec-Fetch-Site": "cross-site" }, redirect: "manual" });
+    assert.equal(crossSite.status, 403, "another site cannot start the confirming sign-in");
+    const confirmed = await signIn("github", "&confirmLink=1", [heldCookie]);
+    assert.equal(confirmed.headers.get("location"), "/account.html?signin=confirm-connect");
+    assert.equal(cookie(confirmed, "__Host-house_link"), undefined, "the hold stays until the person chooses");
+    const session = cookie(confirmed, "house_session").split(";")[0];
+    const both = [session, heldCookie].join("; ");
+    assert.equal((await (await fetch(base + "/api/auth/pending-link", { headers: { Cookie: both } })).json()).ready, true);
+    assert.deepEqual((await (await fetch(base + "/api/me", { headers: { Cookie: session } })).json()).account.providers, ["github"], "nothing is connected by the sign-in alone");
+    const forged = await fetch(base + "/api/auth/pending-link", { method: "POST", headers: { Cookie: both, "Content-Type": "application/json", Origin: "https://evil.example" }, body: JSON.stringify({ action: "connect" }) });
+    assert.equal(forged.status, 403, "other origins cannot connect it");
+    const connect = await fetch(base + "/api/auth/pending-link", { method: "POST", headers: { Cookie: both, "Content-Type": "application/json" }, body: JSON.stringify({ action: "connect" }) });
+    assert.equal(connect.status, 200);
+    assert.equal((await connect.json()).linked, "google");
+    assert.match(cookie(connect, "__Host-house_link"), /Max-Age=0/);
     const me = await (await fetch(base + "/api/me", { headers: { Cookie: session } })).json();
     assert.deepEqual([me.account.providers, me.account.emails], [["github", "google"], ["ada@example.com"]]);
-    const again = await signIn("google");
-    assert.equal(again.headers.get("location"), "/account.html?signin=success", "Google now signs straight in to the same user");
+    assert.equal((await signIn("google")).headers.get("location"), "/account.html?signin=success", "Google now signs straight in to the same user");
   } finally { await new Promise(done => { server.close(done); server.closeIdleConnections(); }); }
 });

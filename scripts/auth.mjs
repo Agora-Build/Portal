@@ -57,7 +57,8 @@ export function returnPath(value) {
 }
 
 // An email counts only when the provider says it verified it; stored lower-case so the same address matches across providers.
-const verifiedEmail = (value, verified) => verified && typeof value === "string" && value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? value.trim().toLowerCase() : null;
+// Only plain ASCII addresses match, so no Unicode case-folding can make two mailboxes look alike.
+const verifiedEmail = (value, verified) => verified && typeof value === "string" && value.length <= 254 && /^[\x21-\x3f\x41-\x7e]+@[\x21-\x3f\x41-\x7e]+\.[\x21-\x3f\x41-\x7e]+$/.test(value) ? value.toLowerCase() : null;
 
 export function createAuth(config = authConfig(), { request = fetch, now = Date.now } = {}) {
   const pending = new Map();
@@ -146,9 +147,10 @@ export function createAuth(config = authConfig(), { request = fetch, now = Date.
           const user = await response.json();
           if (!Number.isSafeInteger(user.id) || user.id < 1 || typeof user.login !== "string" || !/^[a-z0-9-]+$/i.test(user.login)) throw new Error("Invalid GitHub identity");
           // The account email links logins only when GitHub has verified it; the public profile email is not used.
-          const emails = await request("https://api.github.com/user/emails", { headers: { Authorization: "Bearer " + tokens.access_token, Accept: "application/vnd.github+json", "User-Agent": "Agora-Build-Portal", "X-GitHub-Api-Version": "2022-11-28" }, signal: AbortSignal.timeout(10000) }).then((reply) => reply.ok ? reply.json() : [], () => []);
+          // If GitHub can't be asked this time, the email is left undefined so the stored one is kept rather than cleared.
+          const emails = await request("https://api.github.com/user/emails", { headers: { Authorization: "Bearer " + tokens.access_token, Accept: "application/vnd.github+json", "User-Agent": "Agora-Build-Portal", "X-GitHub-Api-Version": "2022-11-28" }, signal: AbortSignal.timeout(10000) }).then((reply) => reply.ok ? reply.json() : undefined).catch(() => undefined);
           const primary = Array.isArray(emails) ? emails.find((entry) => entry?.primary && entry.verified === true) : null;
-          identity = { subject: String(user.id), name: user.name || user.login, avatar: safeUrl(user.avatar_url), contact: "https://github.com/" + user.login, email: verifiedEmail(primary?.email, true) };
+          identity = { subject: String(user.id), name: user.name || user.login, avatar: safeUrl(user.avatar_url), contact: "https://github.com/" + user.login, email: Array.isArray(emails) ? verifiedEmail(primary?.email, true) : undefined };
         } else {
           const claims = tokens.claims();
           if (!claims?.sub) throw new Error("Missing identity");
