@@ -2,6 +2,7 @@
   "name": "agora-build-portal",
   "version": "1.0.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "The home of the Agora Build community.",
   "scripts": {
