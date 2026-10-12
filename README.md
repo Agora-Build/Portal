@@ -126,3 +126,7 @@ Demo days, hackathons, and whiteboard sessions are core community activities. Th
 ## Verification
 
 `npm test` uses the Node test runner with isolated temporary data and mocked providers. It covers public-file restrictions, profiles and ownership, cross-device sign-in, OAuth state/PKCE/JWT verification, Apple's POST callback, safe account linking, session expiry and logout, old meeting-link redirects, persistence, search, sourced research, service limits, Agora token signatures/renewal, provider migration, activity caching/deletion, and production output. For UI changes, check all pages on desktop and mobile, keyboard navigation, reduced motion, dialogs, empty states, filters, sourced activity, provider availability, and two browser sessions entering one room. With configured provider registrations, verify live logins and Agora media, token renewal, and device release on leave.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
