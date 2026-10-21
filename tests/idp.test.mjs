@@ -65,6 +65,72 @@ test("available() is false while the IdP is unreachable, retries at most every 3
   assert.equal(fake.counts.discovery, 1, "discovery is cached");
 });
 
+test("available() re-checks an IdP that has been silent for 30 s: a stopped IdP makes sign-in unavailable, then it recovers", async () => {
+  let clock = 1_000_000;
+  const { fake, idp } = await setup({ now: () => clock });
+  assert.equal(await idp.available(), true);
+  const token = await fake.issueAccessToken();
+  await idp.verifyAccessToken(token);
+  fake.setDown(true);
+  clock += 10_000;
+  const attempts = fake.counts.attempts;
+  assert.equal(await idp.available(), true, "within 30 s of the last contact nothing is probed");
+  assert.equal(fake.counts.attempts, attempts);
+  clock += 20_001;
+  assert.equal(await idp.available(), false, "a silent IdP is probed and found down");
+  assert.equal(fake.counts.attempts, attempts + 1);
+  fake.setDown(false);
+  clock += 10_000;
+  assert.equal(await idp.available(), false, "no new probe inside the 30 s retry interval");
+  assert.equal(fake.counts.attempts, attempts + 1);
+  assert.equal((await idp.verifyAccessToken(token)).sub.length > 0, true, "cached keys still verify access tokens meanwhile");
+  clock += 20_001;
+  const discoveries = fake.counts.discovery;
+  assert.equal(await idp.available(), true, "the IdP answers again");
+  assert.equal(fake.counts.discovery, discoveries + 1);
+  assert.equal(await idp.available(), true);
+  assert.equal(fake.counts.discovery, discoveries + 1, "a successful probe counts as contact");
+});
+
+test("a probe refreshes changed IdP metadata, and gives up after 2 s on an IdP that hangs", async () => {
+  let clock = 1_000_000;
+  let hang = false;
+  const fake = await createFakeIdp({ issuer, clientId: "portal", clientSecret });
+  const request = (url, options = {}) => hang ? new Promise((_, reject) => options.signal?.addEventListener("abort", () => reject(options.signal.reason))) : fake.request(url, options);
+  const idp = createIdp({ issuer, clientId: "portal", clientSecret, siteUrl, audience, request, now: () => clock });
+  assert.equal(await idp.available(), true);
+  assert.match(idp.endSessionUrl(), /^https:\/\/auth\.example\/logout\?/);
+  fake.metadata.end_session_endpoint = issuer + "/session/end";
+  clock += 31_000;
+  assert.equal(await idp.available(), true);
+  assert.match(idp.endSessionUrl(), /^https:\/\/auth\.example\/session\/end\?/, "the refreshed end-session endpoint is used");
+  hang = true;
+  clock += 31_000;
+  const started = Date.now();
+  // AbortSignal.timeout() doesn't hold the event loop open; a server's listener does, so this test holds it.
+  const keepAlive = setTimeout(() => {}, 5000);
+  assert.equal(await idp.available(), false);
+  clearTimeout(keepAlive);
+  const waited = Date.now() - started;
+  assert.ok(waited >= 1900 && waited < 3000, "the probe timed out after about 2 s (" + waited + " ms)");
+  await rejectsLogin((async () => { if (!(await idp.available())) throw new LoginError("unavailable"); })(), "unavailable");
+});
+
+test("bearer: after a rotation a new kid is refetched 5 s after the last JWKS fetch, not 30 s", async () => {
+  mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const { fake, idp } = await setup();
+  await idp.verifyAccessToken(await fake.issueAccessToken());
+  assert.equal(fake.counts.jwks, 1);
+  await fake.rotate({ drop: true });
+  mock.timers.tick(1_000);
+  await rejectsToken(idp.verifyAccessToken(await fake.issueAccessToken()), 401);
+  assert.equal(fake.counts.jwks, 1, "no refetch within 5 s of the last one");
+  mock.timers.tick(4_100);
+  const sub = fake.accountId();
+  assert.equal((await idp.verifyAccessToken(await fake.issueAccessToken({ sub }))).sub, sub, "the new key is accepted");
+  assert.equal(fake.counts.jwks, 2);
+});
+
 test("beginLogin builds a code + PKCE S256 request with state, nonce and the openid profile email scopes", async () => {
   const { idp } = await setup({ now: () => 1234 });
   const { url, transaction } = await idp.beginLogin({ returnTo: "/explore.html?q=voice" });

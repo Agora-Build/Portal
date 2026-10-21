@@ -11,6 +11,11 @@ const TRANSACTION_LIFETIME = 600000;
 const DISCOVERY_RETRY = 30000;
 const SCOPE = "openid profile email";
 const KEY_BACKOFF = 30000;
+// After a key rotation, a new kid may be refetched 5 s after the last JWKS fetch (jose's default is 30 s).
+const KEY_COOLDOWN = 5000;
+// Sign-in re-checks that the IdP answers when nothing has been heard from it for 30 s, with a short timeout.
+const CONTACT_WINDOW = 30000;
+const PROBE_TIMEOUT = 2000;
 const SNAPSHOT_LIFETIME = 3600000;
 // Codes from openid-client/oauth4webapi that mean the ID token failed validation. Anything else from the code
 // exchange is labelled "exchange". OAUTH_INVALID_RESPONSE covers both, so its detail decides (labels only; both fail).
@@ -72,6 +77,11 @@ export function createIdp({ issuer, clientId = "portal", clientSecret, siteUrl, 
   let discovered = null;
   let pending = null;
   let lastAttempt = -Infinity;
+  // The last time the IdP answered (discovery, a token exchange or a JWKS fetch), and until when a failed probe
+  // keeps sign-in unavailable. The cached keys stay usable for access tokens meanwhile.
+  let lastContact = -Infinity;
+  let unreachableUntil = -Infinity;
+  let probing = null;
   // Discovery is cached once it succeeds; until then a new attempt is made at most every 30 s.
   function discover() {
     if (discovered) return Promise.resolve(discovered);
@@ -89,6 +99,7 @@ export function createIdp({ issuer, clientId = "portal", clientSecret, siteUrl, 
         const { jwks_uri: jwksUri } = client.serverMetadata();
         if (!jwksUri) throw new Error("no jwks_uri");
         discovered = { client, skew, keys: keysFrom(new URL(jwksUri)) };
+        lastContact = now();
         return discovered;
       } catch {
         return null;
@@ -125,7 +136,7 @@ export function createIdp({ issuer, clientId = "portal", clientSecret, siteUrl, 
       try {
         const response = await request(url, options);
         const body = response.status === 200 ? await response.clone().json().catch(() => null) : null;
-        if (Array.isArray(body?.keys)) fetchedAt = now();
+        if (Array.isArray(body?.keys)) { fetchedAt = now(); lastContact = fetchedAt; }
         else { failedAt = now(); failures += 1; }
         return response;
       } catch (error) {
@@ -134,7 +145,7 @@ export function createIdp({ issuer, clientId = "portal", clientSecret, siteUrl, 
         throw error;
       }
     };
-    const remote = createRemoteJWKSet(jwksUrl, { [customFetch]: jwksFetch, cacheMaxAge: 60000, timeoutDuration: 5000 });
+    const remote = createRemoteJWKSet(jwksUrl, { [customFetch]: jwksFetch, cacheMaxAge: 60000, cooldownDuration: KEY_COOLDOWN, timeoutDuration: 5000 });
     const cached = async (header, token) => {
       const jwks = remote.jwks();
       if (!jwks || fetchedAt === undefined || now() - fetchedAt > SNAPSHOT_LIFETIME) throw new KeysUnavailable();
@@ -154,6 +165,34 @@ export function createIdp({ issuer, clientId = "portal", clientSecret, siteUrl, 
     };
   }
 
+  // Fetches the discovery document (at most 2 s). On success the cached metadata is refreshed if it changed; on
+  // failure sign-in is unavailable for the 30 s retry interval.
+  function probe() {
+    if (probing) return probing;
+    probing = (async () => {
+      try {
+        const response = await request(new URL(".well-known/openid-configuration", issuerUrl.href.endsWith("/") ? issuerUrl.href : issuerUrl.href + "/").href, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(PROBE_TIMEOUT) });
+        const metadata = response.status === 200 ? await response.json() : null;
+        if (!metadata || metadata.issuer !== issuer || typeof metadata.jwks_uri !== "string" || !metadata.jwks_uri) throw new Error("invalid discovery");
+        const state = discovered;
+        if (JSON.stringify(metadata) !== JSON.stringify(state.client.serverMetadata())) {
+          const client = setUp(new oidc.Configuration(metadata, clientId, clientMetadata(state.skew), oidc.ClientSecretBasic(clientSecret)));
+          const keys = metadata.jwks_uri === state.client.serverMetadata().jwks_uri ? state.keys : keysFrom(new URL(metadata.jwks_uri));
+          discovered = { client, skew: state.skew, keys };
+        }
+        lastContact = now();
+        unreachableUntil = -Infinity;
+        return true;
+      } catch {
+        unreachableUntil = now() + DISCOVERY_RETRY;
+        return false;
+      } finally {
+        probing = null;
+      }
+    })();
+    return probing;
+  }
+
   async function verify(token, options) {
     if (typeof token !== "string" || !token || token.length > 8192) throw new TokenError(401, "malformed");
     const state = await discover();
@@ -169,8 +208,13 @@ export function createIdp({ issuer, clientId = "portal", clientSecret, siteUrl, 
 
   return {
     config,
+    // Whether sign-in can start. Once discovery has succeeded, the IdP is probed again only when it hasn't answered
+    // for 30 s, so a healthy IdP costs nothing here and a stopped one makes sign-in report itself unavailable.
     async available() {
-      return Boolean(await discover());
+      if (!discovered) return Boolean(await discover());
+      if (now() - lastContact < CONTACT_WINDOW) return true;
+      if (now() < unreachableUntil) return false;
+      return probe();
     },
     async beginLogin({ returnTo } = {}) {
       const state = await discover();
@@ -209,6 +253,7 @@ export function createIdp({ issuer, clientId = "portal", clientSecret, siteUrl, 
       let tokens;
       try {
         tokens = await oidc.authorizationCodeGrant(loginClient(state), current, { pkceCodeVerifier: transaction.verifier, expectedState: transaction.state, expectedNonce: transaction.nonce, idTokenExpected: true });
+        lastContact = now();
       } catch (error) {
         throw new LoginError(idTokenFailure(error) ? "id_token" : "exchange");
       }

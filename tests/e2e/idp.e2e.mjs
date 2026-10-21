@@ -229,33 +229,56 @@ describe("the Portal against the real auth.agora.build", { skip: skip || false }
     assertNothingSecretLogged();
   });
 
-  test("8. key rotation: after an emergency rotation the old access token is refused and a fresh one works", { timeout: 120000 }, async () => {
+  // What `npm run keys -- emergency <kid>` does in the Auth checkout, against the IdP's database. Returns the kids
+  // the IdP publishes once it has dropped the old one (the running IdP reloads on NOTIFY).
+  async function emergencyRotation(kid) {
+    const keys = lib.createKeyStore(stack.auth.db, { encryptionKey: stack.auth.app.services.config.keyEncryptionKey });
+    const audit = lib.createAudit(stack.auth.db, { knownClient: () => false, log: { error: () => {} } });
+    assert.equal((await lib.keysCommand({ keys, audit }, "emergency", kid)).code, 0);
+    const published = await eventually(async () => {
+      const kids = (await (await fetch(stack.issuer + "/jwks")).json()).keys.map((key) => key.kid);
+      return kids.includes(kid) ? null : kids;
+    }, { timeout: 3000 });
+    assert.ok(published?.length, "the IdP dropped the old key from its JWKS");
+    return published;
+  }
+
+  test("8a. key rotation: after an emergency rotation a fresh token works within about 6 s, and then the old one is refused", { timeout: 60000 }, async () => {
     const { browser } = await portalSignIn(stack, person(5801, "Rosalind"));
     const old = await voxTokens(browser);
     const oldKid = decodeProtectedHeader(old.access_token).kid;
     assert.equal((await bearer(stack, "/api/me", old.access_token)).status, 200, "the Portal knows the current key");
-    // What `npm run keys -- emergency <kid>` does in the Auth checkout, against the IdP's database.
-    const keys = lib.createKeyStore(stack.auth.db, { encryptionKey: stack.auth.app.services.config.keyEncryptionKey });
-    const audit = lib.createAudit(stack.auth.db, { knownClient: () => false, log: { error: () => {} } });
-    const rotated = await lib.keysCommand({ keys, audit }, "emergency", oldKid);
-    assert.equal(rotated.code, 0);
-    const published = await eventually(async () => {
-      const kids = (await (await fetch(stack.issuer + "/jwks")).json()).keys.map((key) => key.kid);
-      return kids.includes(oldKid) ? null : kids;
-    }, { timeout: 3000 });
-    assert.ok(published?.length, "the IdP dropped the old key from its JWKS (NOTIFY reload)");
+    const published = await emergencyRotation(oldKid);
     const rotatedAt = Date.now();
+    const fresh = await voxTokens(browser);
+    assert.equal(decodeProtectedHeader(fresh.access_token).kid, published[0], "the fresh token uses the replacement key");
+    // The Portal may refetch the JWKS for a new kid 5 s after its last fetch.
+    const accepted = await eventually(async () => (await bearer(stack, "/api/me", fresh.access_token)).status === 200, { timeout: 6500, every: 250 });
+    const elapsed = Date.now() - rotatedAt;
+    assert.ok(accepted, "a fresh token works within about 6 s of the rotation");
+    const refused = await bearer(stack, "/api/me", old.access_token);
+    assert.equal(refused.status, 401, "the refetched JWKS no longer has the old key");
+    assert.match(refused.headers.get("www-authenticate"), /^Bearer error="invalid_token"/);
+    console.log("# flow 8a: the fresh token was accepted " + elapsed + " ms after the rotation");
+    assertNothingSecretLogged();
+  });
+
+  test("8b. key rotation: with no fresh traffic, the old token is refused once the Portal's 60 s JWKS cache expires", { timeout: 120000 }, async () => {
+    const { browser } = await portalSignIn(stack, person(5802, "Chien-Shiung"));
+    const old = await voxTokens(browser);
+    assert.equal((await bearer(stack, "/api/me", old.access_token)).status, 200, "the Portal knows the current key");
+    await emergencyRotation(decodeProtectedHeader(old.access_token).kid);
+    const rotatedAt = Date.now();
+    // The documented trade-off: until the 60 s cache expires, the cached JWKS still has the old key.
     const meanwhile = (await bearer(stack, "/api/me", old.access_token)).status;
-    // The Portal caches the JWKS for 60 s (jose's cache uses the real clock; no Portal option shortens it), so this
-    // test waits for the cache to go stale rather than reaching into the Portal.
+    // jose's cache uses the real clock and no Portal option shortens it, so this test waits.
     await sleep(Math.max(0, rotatedAt + 61000 - Date.now()));
     const refused = await bearer(stack, "/api/me", old.access_token);
     assert.equal(refused.status, 401, "the old token's key is unknown once the Portal refetches the JWKS");
     assert.match(refused.headers.get("www-authenticate"), /^Bearer error="invalid_token"/);
     const fresh = await voxTokens(browser);
-    assert.equal(decodeProtectedHeader(fresh.access_token).kid, published[0], "the fresh token uses the replacement key");
     assert.equal((await bearer(stack, "/api/me", fresh.access_token)).status, 200);
-    console.log("# flow 8: right after the rotation the cached JWKS still answered " + meanwhile + " for the old token; after 61 s it answered 401");
+    console.log("# flow 8b: right after the rotation the cached JWKS still answered " + meanwhile + " for the old token; after 61 s it answered 401");
     assertNothingSecretLogged();
   });
 
@@ -319,16 +342,18 @@ describe("the Portal against the real auth.agora.build", { skip: skip || false }
     }
   });
 
-  // Portal bug (see task-6-report.md): discovery is cached for good once it succeeds, and /auth/login never notices
-  // that the IdP stopped answering, so a new sign-in on a running Portal is sent to the unreachable IdP instead of
-  // getting ?signin=unavailable (spec §5 flow 9). Remove `todo` once the Portal is fixed; the assertion stays.
-  test("9b. IdP down: a new sign-in on a running Portal shows the unavailable message", { todo: "Portal bug: a running Portal sends new sign-ins to an unreachable IdP" }, async () => {
+  // A running Portal re-checks the IdP when it has heard nothing from it for 30 s (its last contact here is the
+  // sign-in's token exchange), so a new sign-in after that reports itself unavailable.
+  test("9b. IdP down: a new sign-in on a running Portal shows the unavailable message", { timeout: 120000 }, async () => {
     const own = await startStack(lib);
     try {
       const { browser } = await portalSignIn(own, person(5902, "Sophie"));
+      const signedInAt = Date.now();
       assert.match((await meOf(browser)).account.id, ACCOUNT_ID);
       await own.front.stop();
       assert.equal(await fetch(own.issuer + "/jwks").catch(() => null), null, "the IdP is unreachable");
+      await sleep(Math.max(0, signedInAt + 30500 - Date.now()));
+      assert.equal((await meOf(browser)).account.name, "Sophie", "the existing session still works");
       const newcomer = createBrowser(own);
       const login = await newcomer.request(own.site + "/auth/login?returnTo=%2Faccount.html");
       assert.equal(login.status, 303);
