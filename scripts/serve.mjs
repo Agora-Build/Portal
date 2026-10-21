@@ -93,6 +93,10 @@ export function createAppServer(directory = root, options = {}) {
   idp?.warm?.().then((reason) => { if (reason) log("auth.agora.build warm-up failed: " + reason + "."); }, () => log("auth.agora.build warm-up failed: error."));
   const siteUrl = options.siteUrl ?? process.env.SITE_URL ?? "";
   const clock = options.now || Date.now;
+  // Behind a proxy that appends X-Forwarded-For (TRUST_PROXY=1), the client is the last hop, the one that proxy added;
+  // anything before it is client-supplied. Otherwise it is the socket address. Every IP-keyed limit uses this.
+  const trustProxy = (options.trustProxy ?? process.env.TRUST_PROXY) === "1";
+  const clientAddress = (request) => (trustProxy && String(request.headers["x-forwarded-for"] || "").split(",").map((hop) => hop.trim()).filter(Boolean).at(-1)) || request.socket.remoteAddress;
   // Platform billing clients and their server-side prices; null turns platform billing off.
   const billingClients = "billingClients" in options ? (options.billingClients && parseBillingClients(options.billingClients)) : loadBillingClients(process.env.PORTAL_BILLING_FILE, log);
   const ledger = createLedger(store);
@@ -121,7 +125,7 @@ export function createAppServer(directory = root, options = {}) {
     else bucket.count += 1;
   }
   function allowance(request) {
-    if (request) limit("model:" + request.socket.remoteAddress, 6, 60000);
+    if (request) limit("model:" + clientAddress(request), 6, 60000);
     if (Date.now() - globalWindow.start >= 3600000) globalWindow = { start: Date.now(), count: 0 };
     if (globalWindow.count >= (options.modelLimit || Number(process.env.MODEL_REQUESTS_PER_HOUR) || 60)) throw new AppError(429, "The house has used its service allowance for this hour. Please try again later.");
     globalWindow.count += 1;
@@ -169,7 +173,7 @@ export function createAppServer(directory = root, options = {}) {
         return;
       }
       if (path === "/auth/login" && request.method === "GET") {
-        limit("login:" + request.socket.remoteAddress, 20, 60000);
+        limit("login:" + clientAddress(request), 20, 60000);
         const returnTo = returnPath(requestUrl.searchParams.get("returnTo") || "/");
         let started = null;
         if (idp && await idp.available()) {
@@ -340,7 +344,7 @@ export function createAppServer(directory = root, options = {}) {
         }
         else if (path === "/api/profile" && request.method === "POST") {
           if (await store.me(token)) throw new AppError(409, "You already have a profile. Edit it instead.");
-          limit("join:" + request.socket.remoteAddress, 10, 3600000);
+          limit("join:" + clientAddress(request), 10, 3600000);
           const { person, token: nextToken } = await store.join(await body(request), token);
           json(response, 201, { profile: person }, { "Set-Cookie": sessionCookie(nextToken) });
         } else if (path === "/api/profile" && request.method === "PUT") json(response, 200, { profile: await store.edit(token, await body(request)) });
@@ -388,7 +392,7 @@ export function createAppServer(directory = root, options = {}) {
           json(response, 200, { result: await scan(person) });
         } else if (path === "/api/rooms" || path.startsWith("/api/rooms/")) throw new AppError(410, "Meeting rooms are now Stoa spaces. Start one from the Stoa.");
         else {
-          const handled = await handleSpaces({ path, method: request.method, url: requestUrl, token, read: () => body(request), spaces, worlds, themes, limit, ip: request.socket.remoteAddress });
+          const handled = await handleSpaces({ path, method: request.method, url: requestUrl, token, read: () => body(request), spaces, worlds, themes, limit, ip: clientAddress(request) });
           if (!handled) throw new AppError(404, "This page or service was not found.");
           json(response, handled.status, handled.body);
         }

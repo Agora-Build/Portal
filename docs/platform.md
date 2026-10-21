@@ -269,6 +269,14 @@ receipts and ledger mutations commit atomically. This storage model prioritizes
 consistency and serializes writes; it can be split into normalized tables as
 volume grows without changing account IDs.
 
+Rate limits keyed by client address (sign-in starts, joining, spaces, Signaling
+tokens and model calls) use the socket address by default. Behind a reverse
+proxy every request would share the proxy's address, so set `TRUST_PROXY=1`
+only behind a proxy that appends `X-Forwarded-For`: the client address is then
+the header's last hop, the one that proxy appended, and anything a client put
+before it is ignored. Without the header the socket address is used. Logs never
+include addresses.
+
 Without PostgreSQL, local development uses `.data/community.json` and supports
 one Node process. Back up the database or this private directory. Local admin
 writes require stopping the Portal and setting `PORTAL_OFFLINE_ADMIN=true`.

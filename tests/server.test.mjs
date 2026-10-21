@@ -240,3 +240,27 @@ test("public activity API returns the feed without exposing runtime files", asyn
     assert.equal((await request("/data/activity.json", { base: isolated.url })).status, 404);
   } finally { await close(isolated.instance); }
 });
+// /auth/login allows 20 requests a minute per client address.
+async function loginsUntilLimited(base, forwarded) {
+  const statuses = [];
+  for (const hops of forwarded) statuses.push((await fetch(base + "/auth/login", { redirect: "manual", headers: hops ? { "X-Forwarded-For": hops } : {} })).status);
+  return statuses;
+}
+test("without TRUST_PROXY, IP limits use the socket address and ignore X-Forwarded-For", async () => {
+  const { instance, url } = await start({ trustProxy: "0" });
+  try {
+    const statuses = await loginsUntilLimited(url, Array.from({ length: 21 }, (_, index) => "203.0.113." + index));
+    assert.deepEqual([statuses.slice(0, 20).every((status) => status === 303), statuses[20]], [true, 429]);
+  } finally { await close(instance); }
+});
+test("with TRUST_PROXY=1, IP limits use the last X-Forwarded-For hop only", async () => {
+  const { instance, url } = await start({ trustProxy: "1" });
+  try {
+    // A client can prepend anything; only the hop the trusted proxy appended counts.
+    const spoofed = Array.from({ length: 21 }, (_, index) => "198.51.100." + index + ", 203.0.113.7");
+    const statuses = await loginsUntilLimited(url, spoofed);
+    assert.deepEqual([statuses.slice(0, 20).every((status) => status === 303), statuses[20]], [true, 429]);
+    assert.equal((await loginsUntilLimited(url, ["198.51.100.1, 203.0.113.8"]))[0], 303, "another client behind the proxy has its own allowance");
+    assert.equal((await loginsUntilLimited(url, [""]))[0], 303, "without the header the socket address is used");
+  } finally { await close(instance); }
+});
