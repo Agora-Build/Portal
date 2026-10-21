@@ -13,6 +13,8 @@ Use Node.js 20 or newer; no dependency installation is required.
 - `npm test`: check pages, asset delivery, navigation, server restrictions, and production output.
 - `npm run build`: copy the public site into `dist/`.
 - `npm run preview`: serve the built site locally.
+- `npm run test:e2e`: opt-in; run the Portal against the real auth.agora.build (Node 22, an Agora-Build/Auth checkout in `AUTH_REPO`, default `../Auth`, and a throwaway PostgreSQL in `TEST_DATABASE_URL`).
+- `node scripts/browser-smoke.mjs`: opt-in; drive a real Chromium through sign-in on the same stack (the e2e settings plus `PLAYWRIGHT_CORE` and `CHROMIUM_PATH`).
 
 ## Coding Style & Naming Conventions
 

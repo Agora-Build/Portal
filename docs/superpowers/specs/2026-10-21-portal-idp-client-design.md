@@ -1,6 +1,7 @@
 # The Portal signs in through auth.agora.build
 
-**Status:** approved 2026-10-21, after design review in conversation. This is plan 2 of the auth.agora.build
+**Status:** approved 2026-10-21, after design review in conversation; amended 2026-10-21 during implementation
+(back-channel 503 in §3.1, `PORTAL_BILLING_FILE` replacing `PORTAL_BILLING_CLIENTS` in §2, §3.3 and §4). This is plan 2 of the auth.agora.build
 rollout (Agora-Build/Auth, `docs/superpowers/specs/2026-10-12-auth-agora-build-design.md` §10). That spec's
 decisions still stand: the Portal is a client; it starts empty; plans, credits, billing and the Agora Console
 connection stay in the Portal.
@@ -19,7 +20,7 @@ Portal stops being an identity provider or an OAuth server. Its APIs accept the 
 | Provider sign-in in the Portal | Removed: Google, GitHub, Apple, the Agora OIDC and OAuth modes, and email linking with pending links. |
 | Portal OAuth server (`/oauth/*`) | Removed in this change, along with its client registry, codes, grants and access/refresh tokens, and the identity lookup endpoint. |
 | API callers | The browser uses the cookie session, with the same-origin checks unchanged. Apps and servers use `Authorization: Bearer <IdP access token>`. |
-| Platform credits reserve/settle | An IdP access token with the `credits` scope, whose `client_id` is in `PORTAL_BILLING_CLIENTS` (e.g. `vox`). |
+| Platform credits reserve/settle | An IdP access token with the `credits` scope, whose `client_id` is listed in `PORTAL_BILLING_FILE` (e.g. `vox`). That file holds server-side prices per client and service (`credits` per unit, `maxUnits`); the client names a service and units, never a charge. *(Amended: replaces `PORTAL_BILLING_CLIENTS`, so a stolen access token can't set its own price.)* |
 | Agora Console | A separate connect flow, `/connect/agora`: Agora OAuth used only to authorise Console access for the signed-in account. Tokens stay sealed with `AGORA_CONSOLE_ENCRYPTION_KEY`. |
 | Guests | "Continue with this browser" stays for looking around: walking Stoa and appearing on the radar. Credits, services, billing, Agora Console and owning spaces need a signed-in account. |
 | Login management | Linked logins, devices and sign-out everywhere live on `auth.agora.build/account`. The Portal links to it. |
@@ -75,6 +76,8 @@ The ID token is kept with the session for `id_token_hint`, and deleted with it.
   - `sid` or `sub`.
 - Deletes Portal sessions matching `sid`, or every session of `sub` when no `sid` is given.
 - Answers 200 with `Cache-Control: no-store`, or 400 if the token is invalid.
+- *(Amended.)* Answers 503 when the IdP's keys can't be fetched (or sign-in isn't configured), so the token can't be
+  checked yet: the IdP retries a non-2xx answer, so a logout isn't lost while the keys are briefly unreachable.
 - It is exempt from the same-origin check, because it is a server-to-server POST.
 
 **Access tokens.** `verifyAccessToken(token)` uses `jose.createRemoteJWKSet(jwks_uri)`, which caches keys and
@@ -116,7 +119,7 @@ It returns `{ sub, clientId, scopes }`.
 | services chat and TTS | account (no guests) | `credits` |
 | billing account, checkout, manage | account | not accepted |
 | `/api/connections*`, Agora projects and certificates | account | `agora:projects` (certificates: `agora:certificates`) |
-| platform credits reserve/settle | not accepted | `credits`, and `client_id` in `PORTAL_BILLING_CLIENTS` |
+| platform credits reserve/settle | not accepted | `credits`, and `client_id` listed in `PORTAL_BILLING_FILE` |
 | Stoa spaces: create, own, admin | account | not accepted |
 | Stoa: walk, presence, radar | account or guest | not accepted |
 
@@ -124,6 +127,10 @@ Bearer responses:
 - missing, invalid or expired token: 401 with `WWW-Authenticate: Bearer error="invalid_token"`;
 - missing scope: 403 with `error="insufficient_scope"`;
 - IdP keys unreachable with an unknown `kid`: 503.
+
+*(Amended.)* Reserve takes `{service, units, idempotencyKey}` (`units` 1 to the service's `maxUnits`, default 1) and
+charges `credits × units` from `PORTAL_BILLING_FILE`; settle takes `{service, reservationId, outcome}`. Reserve is
+rate-limited to 60 a minute per account.
 
 The existing same-origin checks on non-GET cookie requests are unchanged.
 
@@ -179,7 +186,8 @@ resource scopes they need.
 **Added settings:**
 - `AUTH_ISSUER`, `PORTAL_CLIENT_ID`, `PORTAL_CLIENT_SECRET`;
 - `PORTAL_API_AUDIENCE` (default `https://api.agora.build`);
-- `PORTAL_BILLING_CLIENTS`.
+- `PORTAL_BILLING_FILE` *(amended: replaces `PORTAL_BILLING_CLIENTS`; a JSON price registry per billing client and
+  service)*.
 
 **Docs:**
 - `docs/platform.md` is rewritten: identity → the IdP; the contract for apps (IdP tokens, scopes, billing clients).
@@ -242,7 +250,9 @@ resource scopes they need.
 
 **Browser smoke** (`scripts/browser-smoke.mjs`, opt-in, playwright-core like Auth's): a real Chromium clicks "Sign
 in" on the local deployment, completes the IdP page with the dev upstream, returns to the Portal signed in, then
-signs out.
+signs out. *(Amended: it runs on the e2e stack, the real IdP with Auth's stand-in GitHub, because the local deployment's real
+GitHub and Google sign-in can't be automated; it also checks guests, the account page and a failing
+`/api/auth/config`, at desktop and mobile sizes.)*
 
 **Local deployment check:** `portal-local` against `auth-local` (the existing local containers), with the Portal
 client registered in the local clients file. The secret values are filled in by the owner.

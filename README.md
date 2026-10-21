@@ -4,7 +4,7 @@ A boundaryless community workspace for builders of real-time communication, voic
 
 ## Run the house
 
-Requires Node.js 20.12 or newer. Install the pinned Agora SDK, OAuth, PostgreSQL, and Stripe dependencies first.
+Requires Node.js 20.12 or newer. Install the pinned Agora SDK, OpenID Connect, PostgreSQL, and Stripe dependencies first.
 
 ```sh
 npm ci
@@ -14,6 +14,7 @@ npm run dev -- --port 4173
 npm test
 npm run build
 npm run preview
+npm run test:e2e        # against a real auth.agora.build; see docs/platform.md#verification
 ```
 
 To deploy, copy `dist/` to a Node host, run `npm ci --omit=dev`, and run `node scripts/serve.mjs` inside it. Configure `HOST` and `PORT` as needed. The app requires its Node API server; static hosting cannot provide profiles, rooms, or model services. Google Fonts are optional; fallback fonts work offline.
@@ -39,13 +40,14 @@ Without `DATABASE_URL`, state is stored in `/app/.data`. Mount a volume there so
 - `services.html` / `services.js`: language-model and text-to-speech playgrounds, plus verified offers.
 - `account.html` / `account.js`: shared identity, credits, membership plans, purchases, and Agora Console connections.
 
-The portal now owns the shared account, credit ledger, and subscription platform.
-See [platform setup and integration](docs/platform.md) for application registration,
-the server-side client, PostgreSQL storage, Stripe subscription/credit purchases,
-and encrypted Agora resources. Vox and Astation integration is the next phase;
-their current accounts, balances, and subscription state are not changed here.
+Sign-in comes from auth.agora.build; the portal owns the account's credit ledger,
+subscription, and Agora Console connection. See [platform setup and integration](docs/platform.md)
+for the IdP registration, the API contract for apps (IdP access tokens, scopes,
+billing clients), PostgreSQL storage, Stripe subscription/credit purchases, and
+encrypted Agora resources. Moving Vox and Astation onto the IdP is their teams'
+next phase; their current accounts, balances, and subscription state are not changed here.
 
-Shared navigation, dialogs, sign-in, and browser sessions live in `script.js`; styling lives in `styles.css`. The backend uses built-in Node modules in `scripts/serve.mjs`, `store.mjs`, `models.mjs`, and `activity.mjs`; `calls.mjs` uses the official Agora token builder, and `auth.mjs` uses `openid-client` and `jose`. The browser SDK is served locally at `/assets/agora-rtc.js` and loaded only when someone joins a call.
+Shared navigation, dialogs, sign-in, and browser sessions live in `script.js`; styling lives in `styles.css`. The backend uses built-in Node modules in `scripts/serve.mjs`, `store.mjs`, `models.mjs`, and `activity.mjs`; `calls.mjs` uses the official Agora token builder, and `idp.mjs` (the auth.agora.build client) uses `openid-client` and `jose`. The browser SDK is served locally at `/assets/agora-rtc.js` and loaded only when someone joins a call.
 
 `data/people.json` contains a public GitHub contributor snapshot. GitHub checks on October 4, 2026 found one human contributor across all 16 public Agora-Build repositories. Public contributors are labeled separately from people who join the house; their intent and willingness to collaborate are not inferred. Project facts live in `data/projects.json`; refresh descriptions, activity, and directory markup together.
 
@@ -57,30 +59,29 @@ Joining the foundry and changing an intent also produce public activity entries.
 
 ## Profiles and ownership
 
-Joining requires a name, bio, skills, a public contact link, and a real intent. Profiles are public. Sign-in creates a private account first; nothing is published until the person supplies their intent and saves a profile. Returning to the same provider identity on another device restores the same profile, room ownership, and private radar.
+Joining requires a name, bio, skills, a public contact link, and a real intent. Profiles are public. Signing in creates a private account first; nothing is published until the person supplies their intent and saves a profile. Signing in with the same Agora Build account on another device restores the same profile, space ownership, and private radar.
 
-The sign-in dialog supports Google and GitHub OAuth, Sign in with Apple, and a configurable Agora OIDC identity service. Members can explicitly connect another provider to the same account. Signing in with a new provider whose verified email already belongs to an account does not create a second account: the browser is asked to sign in once with that account's existing login and then to confirm the connection, or to create a separate account instead. Unverified emails never match, and two accounts that already share an email are not merged. See [the platform guide](docs/platform.md) for the details. An existing browser-only profile can connect a login while preserving its ID and rooms; its old browser token is then invalidated. Accounts are never merged by email alone. Provider subjects and session hashes stay private. Account sessions last 30 days and logout revokes the current session. Removing a public profile also removes its radar and owned rooms, while the private login account remains available to start a new profile.
+The sign-in dialog has one "Sign in" button, which goes to auth.agora.build; GitHub, Google, and any later logins are chosen there, and linked logins, devices, and "sign out everywhere" are managed on the IdP's account page ("Manage sign-in"). The account ID is the IdP's `acct_…` ID, the same in every Agora Build app. A browser-only profile that signs in is kept by its account when the account has none yet. Account sessions last 30 days; signing out ends both the portal session and the IdP session, and the IdP's back-channel logout ends portal sessions too. Emails and session hashes stay private. Removing a public profile also removes its radar and owned spaces, while the private account remains available to start a new profile.
 
-Browser-only participation is still available. Its editing access belongs to that browser until a login is connected; clearing the cookie loses access. Public GitHub contributor snapshots are not authenticated accounts.
+"Continue with this browser" is still available for looking around: walking the Stoa, appearing on the radar, and keeping a public profile. Its editing access belongs to that browser; clearing the cookie loses access. Credits, services, billing, Agora Console, and owning spaces need a signed-in account. Public GitHub contributor snapshots are not authenticated accounts.
 
 Profiles, rooms, accounts, credits, billing, and private radar persist in PostgreSQL when `DATABASE_URL` is set, or `.data/community.json` for local development. Protect and back up this state. Deleting a profile removes its radar, rooms it created, and its entries on other room rosters, while preserving its private account and purchases. Public profile text may be sent to the model for directory search; disclose only information you intend to share.
 
-## Connect sign-in providers
+## Connect sign-in
 
-Set `SITE_URL` to the public HTTPS origin, such as `https://agora.build`. Google and GitHub can also use `http://localhost:3002` during development. Register the exact callback URLs below; credentials stay in the server's `.env`. Behind a proxy, preserve the public Host header. The configured HTTPS origin enables Secure cookies even when Node receives HTTP from the proxy.
+Set `SITE_URL` to the public HTTPS origin, such as `https://agora.build` (or `http://localhost:3002` in development), and register the portal as the `portal` client of auth.agora.build. Behind a proxy, preserve the public Host header. The configured HTTPS origin enables Secure `__Host-` cookies even when Node receives HTTP from the proxy.
 
-| Provider | Callback Path | Server Configuration |
+| Identity provider | Paths on `SITE_URL` registered at the IdP | Server configuration |
 | --- | --- | --- |
-| Google | `/auth/google/callback` | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` |
-| GitHub | `/auth/github/callback` | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` |
-| Apple | `/auth/apple/callback` | `APPLE_CLIENT_ID` (Services ID), `APPLE_TEAM_ID`, `APPLE_KEY_ID`, `APPLE_PRIVATE_KEY_FILE` |
-| Agora Identity | `/auth/agora/callback` | `AGORA_OIDC_ISSUER`, `AGORA_OIDC_CLIENT_ID`, `AGORA_OIDC_CLIENT_SECRET` |
+| auth.agora.build | redirect `/auth/callback`, post-logout `/`, back-channel logout `/auth/backchannel-logout` | `AUTH_ISSUER`, `PORTAL_CLIENT_ID` (default `portal`), `PORTAL_CLIENT_SECRET`, optional `PORTAL_API_AUDIENCE` (default `https://api.agora.build`) |
 
-Google and OIDC identity tokens are verified for signature, issuer, audience, expiry, and nonce. GitHub identities come from its authenticated `/user` API; a GitHub email counts only when `/user/emails` marks it primary and verified, and Google or Apple emails only when the token says `email_verified`. Flows use one-use browser-bound state, and PKCE where supported. Apple's name/email scope requires a `form_post` callback; its transaction cookie uses SameSite=None and Secure, and the server generates a short-lived client secret from the `.p8` key. Keep that private key outside the repository and deployment output. Apple requires a registered HTTPS domain and return URL; localhost does not work for it.
+The IdP's clients file holds the same secret through `secretEnv: "PORTAL_CLIENT_SECRET"`; the registration block is in [the platform guide](docs/platform.md#idp-registration). The portal no longer reads `GOOGLE_*`, `GITHUB_*`, `APPLE_*`, `AGORA_OIDC_*`, `IDENTITY_CLIENTS_FILE`, `VOX_IDENTITY_*`, or `ASTATION_IDENTITY_ENABLED`, and it no longer serves `/oauth/*`. Without `AUTH_ISSUER` and a valid secret, or while the IdP is unreachable, sign-in shows itself as temporarily unavailable and browser-only participation keeps working.
 
-Agora RTC App IDs and certificates authorize media channels, not account login. Use a registered Agora OIDC service or the existing Agora OAuth flow described in [the platform guide](docs/platform.md#agora-console-connections). Existing OAuth must provide a verified permanent user ID before it can create a portal user; callback login IDs and emails cannot replace it. Without configuration, each provider is visibly unavailable and browser-only participation continues to work. OAuth transactions last ten minutes and are held in process memory; use one Node process or sticky routing, and restart an interrupted sign-in if the server restarts.
+Connecting Agora Console is separate from signing in: it uses Agora's OAuth (`AGORA_OAUTH_*`) with the redirect URI `<SITE_URL>/connect/agora/callback`. See [Agora Console connections](docs/platform.md#agora-console-connections).
 
-Provider references: [Google OpenID metadata](https://accounts.google.com/.well-known/openid-configuration), [GitHub OAuth flow](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps), and [Apple OpenID metadata](https://appleid.apple.com/.well-known/openid-configuration).
+### Local deployment
+
+The local containers `portal-local` (`http://localhost:3080`) and `auth-local` (`http://auth.localhost:3090`) share the `portal-local` Docker network. Both the browser and the portal must reach the IdP at the same issuer URL, so `auth-local` needs the network alias `auth.localhost`; the IdP's back-channel logout reaches the portal at `http://portal.localhost:3002/auth/backchannel-logout`, so `portal-local` needs the alias `portal.localhost` (the IdP accepts plain http only for local host names). Register the `portal` client in the IdP's local clients file with those URLs and put the same `PORTAL_CLIENT_SECRET` in both deployments' settings.
 
 ## Connect models and web research
 
@@ -95,7 +96,7 @@ With no provider configured, people search uses explicit keyword matching and pl
 
 Radar runs manually or, for members who explicitly enable monitoring, checks every 15 minutes for scans due at `RADAR_INTERVAL_HOURS` (default 24). It sends intent and interests to the configured provider, persists results privately, and publishes only source URLs retrieved or cited by web search. Changing intent clears prior results. It never contacts anyone on a member's behalf. Monitoring requires a running server.
 
-Shared inference is limited to six calls per minute per client IP and `MODEL_REQUESTS_PER_HOUR` per house (default 60); automated radar uses the same hourly allowance. Chat and speech require a house profile. Review allowances against your provider budget before connecting it.
+Shared inference is limited to six calls per minute per client IP and `MODEL_REQUESTS_PER_HOUR` per house (default 60); automated radar uses the same hourly allowance. Chat and speech require a signed-in account. Review allowances against your provider budget before connecting it.
 
 ## Agora group calls
 
@@ -125,7 +126,7 @@ Demo days, hackathons, and whiteboard sessions are core community activities. Th
 
 ## Verification
 
-`npm test` uses the Node test runner with isolated temporary data and mocked providers. It covers public-file restrictions, profiles and ownership, cross-device sign-in, OAuth state/PKCE/JWT verification, Apple's POST callback, safe account linking, session expiry and logout, old meeting-link redirects, persistence, search, sourced research, service limits, Agora token signatures/renewal, provider migration, activity caching/deletion, and production output. For UI changes, check all pages on desktop and mobile, keyboard navigation, reduced motion, dialogs, empty states, filters, sourced activity, provider availability, and two browser sessions entering one room. With configured provider registrations, verify live logins and Agora media, token renewal, and device release on leave.
+`npm test` uses the Node test runner with isolated temporary data, a stand-in IdP, and mocked providers. It covers public-file restrictions, profiles and ownership, the sign-in callback (state, PKCE, nonce, ID token), sessions and logout, back-channel logout, IdP access tokens and scopes, key rotation, the billing allowlist, guests, Agora Console connect, the identity migration, old meeting-link redirects, persistence, search, sourced research, service limits, Agora token signatures/renewal, activity caching/deletion, and production output. `npm run test:e2e` runs the portal against the real auth.agora.build from an Agora-Build/Auth checkout, and `node scripts/browser-smoke.mjs` drives a real Chromium through the same stack; both are opt-in and described in [the platform guide](docs/platform.md#verification). For UI changes, check all pages on desktop and mobile, keyboard navigation, reduced motion, dialogs, empty states, filters, sourced activity, provider availability, and two browser sessions entering one room. With configured registrations, verify live sign-in through auth.agora.build, Agora Console connect, and Agora media, token renewal, and device release on leave.
 
 ## License
 
