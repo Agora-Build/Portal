@@ -21,16 +21,16 @@ async function setup(t, { plazaCapacity, before, admins = [] } = {}) {
   const clock = { now: 1800000000000 };
   const now = () => clock.now;
   const store = createStore(resolve(root, "data/people.json"), resolve(directory, "state.json"), { now });
-  const person = async (name) => { const { token } = await store.join(profile(name)); return { token, id: (await store.actor(token)).id }; };
+  const person = async (name) => { const { token } = await store.join(profile(name)); return { token, id: (await store.actor(token)).profile.id }; };
   const context = before ? await before(store, person) : {};
   const spaces = createSpaces({ store, worlds, secret, now, plazaCapacity, admins, signaling: createSignaling(signalingConfig(env), { now }), calls: createAgoraCalls(agoraConfig(env), { now }) });
   const events = [];
   spaces.onEvents((list) => events.push(...list));
   const account = async (name, subject) => {
-    const login = await store.login({ provider: "github", issuer: "https://github.com", subject: String(subject), name });
+    const login = await store.signIn({ sub: "acct_" + String(subject).padStart(26, "0"), sid: "sid-" + subject, name, idToken: "id-token" });
     await store.join(profile(name), login.token);
     const actor = await store.actor(login.token);
-    return { token: login.token, id: actor.id, accountId: actor.accountId, memberId: actor.memberId };
+    return { token: login.token, id: actor.account.id, accountId: actor.account.id, memberId: actor.profile.id };
   };
   return { store, spaces, events, clock, person, account, ...context };
 }
@@ -263,7 +263,7 @@ test("account-backed actors own, enter, sign tokens, and are blocked by both ids
   const admins = [];
   const { spaces, account } = await setup(t, { admins });
   const [owner, guest] = [await account("Acct Owner", 1), await account("Acct Guest", 2)];
-  assert.match(owner.id, /^account:/);
+  assert.match(owner.id, /^acct_[0-9A-HJKMNP-TV-Z]{26}$/);
   const space = await spaces.create(owner.token, { title: "Account room", access: "open" });
   assert.equal(space.ownerId, owner.id);
   assert.deepEqual(space.members, [owner.id]);
@@ -272,14 +272,26 @@ test("account-backed actors own, enter, sign tokens, and are blocked by both ids
   assert.equal((await spaces.get(owner.token, space.id)).occupants[0].id, owner.id);
   await spaces.enter(guest.token, space.id);
   const signed = await spaces.signalingToken(owner.token);
-  assert.match(signed.userId, /^a-/);
+  assert.equal(signed.userId, owner.id);
   assert.ok(signed.channels.some((channel) => channel.spaceId === space.id && channel.name === entered.channel));
   const rtc = await spaces.rtcToken(owner.token, space.id, {});
-  assert.ok(rtc.uid.startsWith(owner.id.replace(/^account:/, "") + "_"));
+  assert.ok(rtc.uid.startsWith(owner.id + "_"));
   const removed = await spaces.removePerson(owner.token, space.id, { actorId: guest.id });
   assert.deepEqual(removed.blocked, [guest.id, guest.memberId]);
   assert.notEqual(removed.channel, entered.channel);
   await assert.rejects(spaces.enter(guest.token, space.id), { status: 403 });
+});
+
+test("owners add and remove accounts by their auth.agora.build ID", async (t) => {
+  const { spaces, account } = await setup(t);
+  const [owner, friend] = [await account("Acct Owner", 1), await account("Acct Friend", 2)];
+  const space = await spaces.create(owner.token, { title: "Account members", visibility: "private" });
+  await spaces.addMember(owner.token, space.id, friend.id);
+  assert.ok((await spaces.get(owner.token, space.id)).members.includes(friend.id));
+  assert.equal((await spaces.get(friend.token, space.id)).id, space.id);
+  await spaces.removeMember(owner.token, space.id, friend.id);
+  assert.equal((await spaces.get(owner.token, space.id)).members.includes(friend.id), false);
+  await assert.rejects(spaces.addMember(owner.token, space.id, "account:72a639ba-3a45-4afe-936b-111111111111"), { status: 422 });
 });
 
 test("a platform admin sees and enters a private space", async (t) => {

@@ -236,3 +236,20 @@ test("public activity API returns the feed without exposing runtime files", asyn
     assert.equal((await request("/data/activity.json", { base: isolated.url })).status, 404);
   } finally { await close(isolated.instance); }
 });
+test("the Portal's own sign-in, linking and OAuth routes are gone; an account session signs out", async () => {
+  for (const path of ["/auth/github", "/auth/google/callback", "/oauth/authorize", "/oauth/userinfo", "/api/auth/pending-link", "/api/identity/accounts/account:11111111-1111-4111-8111-111111111111"]) assert.equal((await request(path)).status, 410, path);
+  for (const path of ["/oauth/token", "/api/auth/logout-all"]) assert.equal((await request(path, { method: "POST", data: {} })).status, 410, path);
+  assert.equal((await request("/api/me", { headers: { Authorization: "Bearer not-a-portal-token" } })).status, 401);
+  const store = createStore(resolve(root, "data/people.json"), resolve(temporary, "signout.json"), { log: () => {} });
+  const { instance, url } = await start({ store });
+  try {
+    const sub = "acct_" + "S".repeat(26);
+    const { token } = await store.signIn({ sub, sid: "sid", name: "Signed in", idToken: "id-token" });
+    const cookie = "house_session=" + token;
+    assert.equal((await (await request("/api/me", { base: url, cookie })).json()).account.id, sub);
+    const out = await request("/api/auth/logout", { base: url, cookie, method: "POST" });
+    assert.equal(out.status, 200);
+    assert.ok(!(await out.text()).includes("id-token"));
+    assert.equal((await (await request("/api/me", { base: url, cookie })).json()).account, null);
+  } finally { await close(instance); }
+});

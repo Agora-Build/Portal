@@ -203,3 +203,14 @@ test("your spaces needs sign-in and lists what you own", async () => {
     assert.deepEqual(mine.spaces.map((space) => [space.id, space.owner]), [[created.space.id, true]]);
   } finally { await close(instance); }
 });
+
+test("member routes take auth.agora.build account IDs", async () => {
+  const { handleSpaces } = await import("../scripts/spaces/routes.mjs");
+  const id = "11111111-1111-4111-8111-111111111111", member = "acct_" + "M".repeat(26);
+  const seen = [];
+  const spaces = { removeMember: async (...args) => { seen.push(args); return { removed: true }; } };
+  const call = (path) => handleSpaces({ path, method: "DELETE", url: new URL("http://localhost" + path), token: "t", read: async () => ({}), spaces, worlds: {}, themes: [], limit: () => {}, ip: "127.0.0.1" });
+  assert.deepEqual(await call("/api/spaces/" + id + "/members/" + member), { status: 200, body: { removed: true } });
+  assert.deepEqual(seen, [["t", id, member]]);
+  assert.equal(await call("/api/spaces/" + id + "/members/acct_" + "m".repeat(26)), null);
+});

@@ -66,7 +66,7 @@ export function createConnections(store, auth, config = connectionsConfig(), { r
       if (!tokens?.accessToken) throw new AppError(422, "Invalid Agora connection.");
       await store.transaction((state) => {
         const account = state.accounts.find((account) => account.id === userId);
-        if (!account?.identities.some((identity) => identity.provider === "agora")) throw new AppError(403, "Verify your Agora login before connecting Console resources.");
+        if (!account) throw new AppError(403, "Sign in before connecting Agora Console resources.");
         account.connections ||= {}; account.connections.agora = seal(tokens, userId);
       });
     },

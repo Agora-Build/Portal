@@ -15,6 +15,8 @@ test("limits are fixed", () => {
 test("Signaling user IDs map back to portal actors", () => {
   assert.equal(actorFromUser("a-" + uuid), "account:" + uuid);
   assert.equal(actorFromUser("m-" + uuid), "member:" + uuid);
+  assert.equal(actorFromUser("acct_" + "7".repeat(26)), "acct_" + "7".repeat(26), "an auth.agora.build account ID is its own Signaling user ID");
+  for (const other of ["acct_" + "7".repeat(25), "acct_" + "i".repeat(26), "acct_" + "U".repeat(26)]) assert.equal(actorFromUser(other), null, other);
   for (const other of ["g-0123456789abcdef", "a-nope", "x-" + uuid, "", null]) assert.equal(actorFromUser(other), null, String(other));
 });
 test("only well-formed messages are accepted", () => {

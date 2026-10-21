@@ -9,7 +9,6 @@ import { basicSearch, createModelClient, modelConfig } from "./models.mjs";
 import { createActivityFeed } from "./activity.mjs";
 import { createAgoraCalls } from "./calls.mjs";
 import { createAuth } from "./auth.mjs";
-import { createIdentity } from "./identity.mjs";
 import { createCredits } from "./credits.mjs";
 import { createLedger } from "./ledger.mjs";
 import { createBilling } from "./billing.mjs";
@@ -63,7 +62,6 @@ export function createAppServer(directory = root, options = {}) {
   const store = options.store || createStore(resolve(dataDirectory, "people.json"), options.storageFile || resolve(root, ".data/community.json"), { persistence });
   const calls = options.calls || createAgoraCalls();
   const auth = options.auth || createAuth();
-  const identity = options.identity || createIdentity(store);
   const ledger = createLedger(store);
   const credits = options.credits || createCredits(undefined, { ledger });
   const billing = options.billing || createBilling(store);
@@ -110,97 +108,17 @@ export function createAppServer(directory = root, options = {}) {
       const path = requestUrl.pathname;
       const bearer = request.headers.authorization?.startsWith("Bearer ") ? request.headers.authorization.slice(7) : "";
       const cookieToken = session(request);
-      const token = bearer || (cookieToken && await store.browserToken(cookieToken) ? cookieToken : "");
+      const token = cookieToken && await store.browserToken(cookieToken) ? cookieToken : "";
       const secure = auth.config.origin.startsWith("https:") || Boolean(request.socket.encrypted);
       const sessionCookie = (value, maxAge = 30 * 86400) => "house_session=" + value + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=" + maxAge + (secure ? "; Secure" : "");
-      // A login waiting to be connected by email. Over HTTPS the __Host- prefix stops a sibling subdomain from planting one.
-      const linkName = secure ? "__Host-house_link" : "house_link";
-      const linkCookie = (value, maxAge = 600) => linkName + "=" + value + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=" + maxAge + (secure ? "; Secure" : "");
       if (path === "/api/billing/webhook" && request.method === "POST") {
         let size = 0; const chunks = [];
         for await (const chunk of request) { size += chunk.length; if (size > 262144) throw new AppError(413, "Payment event too large."); chunks.push(chunk); }
         json(response, 200, await billing.apply(billing.verify(Buffer.concat(chunks), request.headers["stripe-signature"])));
         return;
       }
-      if (path === "/oauth/authorize" && request.method === "GET") {
-        limit("sso:" + request.socket.remoteAddress, 60, 60000);
-        const authorization = identity.authorization(requestUrl.searchParams);
-        if (!auth.config.origin) throw new AppError(503, "Configure the Agora.Build public origin before using shared sign-in.");
-        const current = await store.session(token);
-        if (current.account) {
-          const code = await store.authorize(token, authorization);
-          const next = new URL(authorization.redirectUri);
-          next.searchParams.set("code", code); next.searchParams.set("state", authorization.state);
-          redirect(response, next.href);
-        } else {
-          const escape = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
-          const back = "/oauth/authorize?" + requestUrl.searchParams;
-          const buttons = auth.providers().map((provider) => provider.ready ? '<a class="button button-primary" href="/auth/' + provider.id + '?returnTo=' + escape(encodeURIComponent(back)) + '">Continue with ' + escape(provider.name) + '</a>' : '<span class="button button-secondary" aria-disabled="true">' + escape(provider.name) + ' unavailable</span>').join("");
-          const failed = requestUrl.searchParams.get("signin") === "failed" ? "Sign-in could not be verified. Please try again." : "Choose a login to continue.";
-          response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "Content-Security-Policy": "default-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; frame-ancestors 'none'; base-uri 'none'" });
-          response.end('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in to ' + escape(authorization.client.name) + ' | Agora.Build</title><link rel="icon" href="/assets/favicon.svg"><link rel="stylesheet" href="/styles.css"></head><body><main class="platform-signin"><a class="wordmark" href="/">b_ Agora.Build</a><p class="kicker">ONE ACCOUNT. EVERY WORKBENCH.</p><h1>Continue to ' + escape(authorization.client.name) + '.</h1><p>Your Agora.Build identity and credits come with you.</p><div class="platform-providers">' + buttons + '</div><p role="status">' + escape(failed) + '</p><p class="form-note">This application receives your name and user ID' + (authorization.scopes.includes("credits") ? ', access to your shared credits' : '') + (authorization.scopes.includes("services") ? ', and access to builder services' : '') + '.</p></main></body></html>');
-        }
-        return;
-      }
-      if (["/oauth/token", "/oauth/revoke"].includes(path) && request.method === "POST") {
-        limit("tokens:" + request.socket.remoteAddress, 60, 60000);
-        const parameters = await formBody(request);
-        for (const [key] of parameters) if (parameters.getAll(key).length !== 1) throw new AppError(400, "Duplicate OAuth parameter.");
-        if (path === "/oauth/revoke") {
-          const client = identity.authenticate(parameters);
-          await store.revokeGrant(client.id, parameters.get("token") || "");
-          json(response, 200, {});
-        } else if (parameters.get("grant_type") === "urn:ietf:params:oauth:grant-type:token-exchange") {
-          const client = identity.authenticate(parameters);
-          if (!client.loopback || parameters.get("subject_token_type") !== "urn:ietf:params:oauth:token-type:access_token") throw new AppError(400, "This token exchange is not supported.");
-          const login = await store.login(await auth.agoraIdentity(parameters.get("subject_token")));
-          await connections.save(login.account.id, { accessToken: parameters.get("subject_token"), refreshToken: "", expiresAt: Date.now() + 300000 });
-          const grant = await store.grantForAccount(login.account.id, client.id, client.scopes);
-          await store.logout(login.token);
-          json(response, 200, grant);
-        } else json(response, 200, await identity.token(parameters));
-        return;
-      }
-      if (path === "/oauth/userinfo" && request.method === "GET") { json(response, 200, await store.access(bearer, "identity")); return; }
-      const loginRoute = /^\/auth\/(google|github|apple|agora)(\/callback)?$/.exec(path);
-      if (loginRoute) {
-        if (bearer) throw new AppError(403, "Provider login and account linking require a portal browser session.");
-        const id = loginRoute[1];
-        const cookieName = "foundry_oauth_" + id;
-        const transactionCookie = (value, maxAge = 600) => cookieName + "=" + value + "; HttpOnly; Path=/auth/; Max-Age=" + maxAge + "; SameSite=" + (id === "apple" ? "None" : "Lax") + (secure ? "; Secure" : "");
-        if (!loginRoute[2]) {
-          if (request.method !== "GET") throw new AppError(405, "Use a sign-in button to start this login.");
-          limit("login:" + request.socket.remoteAddress, 20, 60000);
-          const linking = requestUrl.searchParams.get("link") === "1";
-          const current = await store.session(token);
-          if (linking && !current.account && !current.profile) throw new AppError(401, "Sign in before connecting another login.");
-          const confirming = requestUrl.searchParams.get("confirmLink") === "1";
-          if (confirming && request.headers["sec-fetch-site"] && request.headers["sec-fetch-site"] !== "same-origin") throw new AppError(403, "Connect logins from the Agora.Build website.");
-          const pendingLink = confirming ? cookieValue(request, linkName) || undefined : undefined;
-          const result = await auth.begin(id, { returnTo: requestUrl.searchParams.get("returnTo"), linkToken: linking ? token : undefined, pendingLink });
-          redirect(response, result.url, [transactionCookie(result.state)]);
-        } else {
-          if (!["GET", "POST"].includes(request.method)) throw new AppError(405, "This login callback method is not supported.");
-          try {
-            const parameters = request.method === "POST" ? await formBody(request) : requestUrl.searchParams;
-            const result = await auth.complete(id, parameters, cookieValue(request, cookieName));
-            const account = await store.login(result.identity, { linkToken: result.linkToken, pendingLink: result.pendingLink });
-            const next = new URL(result.returnTo, "https://foundry.invalid");
-            if (account.pendingLink) {
-              // No session for the held login; the page asks this browser to confirm with the existing account.
-              next.searchParams.set("signin", "confirm-link");
-              redirect(response, next.pathname + next.search + next.hash, [linkCookie(account.pendingLink.token), transactionCookie("", 0)]);
-              return;
-            }
-            if (result.connection) await connections.save(account.account.id, result.connection);
-            next.searchParams.set("signin", account.linkReady ? "confirm-connect" : account.linkMismatch ? "link-mismatch" : account.linkExpired ? "link-expired" : "success");
-            redirect(response, next.pathname + next.search + next.hash, [sessionCookie(account.token), transactionCookie("", 0), ...(result.pendingLink && !account.linkReady ? [linkCookie("", 0)] : [])]);
-          } catch {
-            redirect(response, "/?signin=failed", [transactionCookie("", 0)]);
-          }
-        }
-        return;
-      }
+      // The Portal is no longer an identity provider or an OAuth server; sign-in comes from auth.agora.build.
+      if (path.startsWith("/oauth/") || /^\/auth\/(google|github|apple|agora)(\/callback)?$/.test(path)) throw new AppError(410, "Sign-in has moved to auth.agora.build.");
       if (path.startsWith("/api/")) {
         if (!["GET", "POST", "PUT", "DELETE"].includes(request.method)) throw new AppError(405, "This method is not supported.");
         if (request.method !== "GET" && request.headers.origin) {
@@ -209,14 +127,15 @@ export function createAppServer(directory = root, options = {}) {
           if (host !== request.headers.host) throw new AppError(403, "Use this feature from the house website.");
         }
         if (request.method !== "GET" && request.headers["sec-fetch-site"] === "cross-site") throw new AppError(403, "Use this feature from the Agora.Build website.");
-        if (bearer && !path.startsWith("/api/platform/") && !path.startsWith("/api/identity/") && !["/api/me", "/api/credits/balance", "/api/credits/statement", "/api/services/chat", "/api/services/tts", "/api/connections", "/api/connections/agora/projects", "/api/connections/agora/certificate"].includes(path)) throw new AppError(403, "This endpoint requires a portal browser session.");
+        // The Portal's own app tokens are gone; auth.agora.build access tokens are accepted once its routes are wired.
+        if (bearer) throw new AppError(401, "This access token is not accepted.");
+        if (path.startsWith("/api/identity/") || ["/api/auth/pending-link", "/api/auth/logout-all"].includes(path)) throw new AppError(410, "Logins and devices are managed on auth.agora.build.");
         const member = async () => {
           const person = await store.me(token);
           if (!person) throw new AppError(401, "Join the house to use this feature.");
           return person;
         };
-        const serviceUser = async (scope = "services") => {
-          if (bearer) await store.access(bearer, scope);
+        const serviceUser = async () => {
           const current = await store.session(token);
           if (!current.account && !current.profile) throw new AppError(401, "Sign in to use builder services.");
           return current.account?.id || null;
@@ -240,53 +159,24 @@ export function createAppServer(directory = root, options = {}) {
         }
         else if (path === "/api/billing/manage" && request.method === "POST") json(response, 200, await billing.manage(await portalUser()));
         else if (path === "/api/connections" && request.method === "GET") {
-          if (bearer) await store.access(bearer, "identity");
           json(response, 200, await connections.status(await portalUser()));
         }
         else if (path === "/api/connections/agora/projects" && request.method === "GET") {
-          if (bearer) await store.access(bearer, "agora:projects");
           json(response, 200, await connections.projects(await portalUser()));
         }
         else if (path === "/api/connections/agora/certificate" && request.method === "POST") {
-          if (bearer) await store.access(bearer, "agora:certificates");
           const userId = await portalUser(); limit("certificates:" + userId, 20, 60000);
           json(response, 200, await connections.certificate(userId, (await body(request)).projectId));
         }
         else if (path === "/api/connections/agora" && request.method === "DELETE") { await connections.disconnect(await portalUser()); json(response, 200, { disconnected: true }); }
-        else if (/^\/api\/identity\/accounts\/account:[a-f0-9-]{36}$/.test(path) && request.method === "GET") {
-          identity.serviceClient(request);
-          json(response, 200, await store.accountIdentity(path.split("/")[4]));
-        }
         else if (["/api/credits/balance", "/api/credits/statement"].includes(path) && request.method === "GET") {
-          const userId = await serviceUser("credits");
+          const userId = await serviceUser();
           if (!userId) throw new AppError(401, "Connect a login to use shared credits.");
           json(response, 200, path.endsWith("balance") ? await credits.balance(userId) : await credits.statement(userId, requestUrl.searchParams.get("cursor")));
         }
-        else if (["/api/platform/credits/reserve", "/api/platform/credits/settle"].includes(path) && request.method === "POST") {
-          const { client, user } = await identity.billingClient(request);
-          const input = await body(request);
-          if (!Object.hasOwn(client.rates, input.service)) throw new AppError(422, "This service has no registered price.");
-          const name = client.id + ":" + input.service;
-          if (path.endsWith("reserve")) {
-            if (!/^[A-Za-z0-9:_-]{16,120}$/.test(input.idempotencyKey || "")) throw new AppError(422, "Provide a valid idempotency key.");
-            json(response, 200, await credits.reserve(user.sub, name, client.rates[input.service], input.idempotencyKey));
-          } else {
-            if (!["capture", "release"].includes(input.outcome) || !/^[a-f0-9-]{36}$/.test(input.reservationId || "")) throw new AppError(422, "Invalid settlement.");
-            json(response, 200, await credits.settle(user.sub, input.reservationId, input.outcome, name));
-          }
-        }
-        else if (path === "/api/auth/logout-all" && request.method === "POST") {
-          await store.logoutEverywhere(token);
-          json(response, 200, { signedOut: true }, { "Set-Cookie": sessionCookie("", 0) });
-        }
-        else if (path === "/api/auth/pending-link" && request.method === "GET") json(response, 200, await store.pendingLink(cookieValue(request, linkName), token));
-        else if (path === "/api/auth/pending-link" && request.method === "POST") {
-          // Same-origin only: /api/ POSTs already refuse other origins and cross-site fetches.
-          const result = await store.resolvePendingLink(cookieValue(request, linkName), token, (await body(request))?.action);
-          json(response, 200, { linked: result.linked || null, separate: Boolean(result.token), account: result.account || null }, { "Set-Cookie": [linkCookie("", 0), ...(result.token ? [sessionCookie(result.token)] : [])] });
-        }
+        else if (["/api/platform/credits/reserve", "/api/platform/credits/settle"].includes(path) && request.method === "POST") throw new AppError(401, "Platform credit calls need an auth.agora.build access token.");
         else if (path === "/api/auth/logout" && request.method === "POST") {
-          await store.logout(token);
+          await store.endSession(token);
           json(response, 200, { signedOut: true }, { "Set-Cookie": sessionCookie("", 0) });
         }
         else if (path === "/api/profile" && request.method === "POST") {

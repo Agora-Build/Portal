@@ -15,11 +15,12 @@ test("two PostgreSQL-backed server instances preserve identities and serialize c
   const storeA = createStore(new URL("../data/people.json", import.meta.url), "unused", { persistence: persistenceA });
   const storeB = createStore(new URL("../data/people.json", import.meta.url), "unused", { persistence: persistenceB });
   try {
-    const identity = { provider: "github", issuer: "https://github.com", subject: "db-builder", name: "Database builder" };
+    const identity = { sub: "acct_" + "D".repeat(26), name: "Database builder", idToken: "database-id-token" };
     // Initialize before launching parallel creators; schema DDL is a deployment operation.
     await persistenceA.read(); await persistenceB.read();
-    const [loginA, loginB] = await Promise.all([storeA.login(identity), storeB.login(identity)]);
-    assert.equal(loginA.account.id, loginB.account.id);
+    const [signedA, signedB] = await Promise.all([storeA.signIn({ ...identity, sid: "a" }), storeB.signIn({ ...identity, sid: "b" })]);
+    const loginA = { ...signedA, account: { id: identity.sub } }, loginB = signedB;
+    assert.equal((await persistenceA.read()).accounts.filter((account) => account.id === identity.sub).length, 1, "one account for one subject across instances");
     const ledgerA = createLedger(storeA), ledgerB = createLedger(storeB);
     await Promise.all([ledgerA.deposit(loginA.account.id, 10, "Paid test credits", "paid-1"), ledgerB.deposit(loginA.account.id, 10, "Paid test credits", "paid-1")]);
     assert.equal((await ledgerA.balance(loginA.account.id)).credits, 10);

@@ -11,7 +11,7 @@ import { validateDecor } from "./decor.mjs";
 import { channelName, signalingUser, spaceKey } from "./signaling.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
-const ACTOR_ID = /^(member|account):[a-f0-9-]{36}$/;
+const ACTOR_ID = /^(?:member:[a-f0-9-]{36}|acct_[0-9A-HJKMNP-TV-Z]{26})$/;
 const notFound = () => new AppError(404, "This space was not found.");
 
 export function loadWorlds(directory) {
@@ -44,8 +44,11 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
     return result;
   }
   async function actorFor(token) {
-    const actor = token ? await store.actor(token) : null;
-    return actor && { ...actor, ids: [actor.accountId, actor.memberId].filter(Boolean), admin: Boolean(actor.accountId && admins.includes(actor.accountId)) };
+    const found = token ? await store.actor(token) : null;
+    if (!found?.kind) return null;
+    const { account = null, profile = null } = found;
+    const actor = { id: account?.id || profile.id, accountId: account?.id || null, memberId: profile?.id || null, name: profile?.name || account?.name || "Builder", avatar: profile?.avatar || account?.avatar || "", hasProfile: Boolean(profile), plan: account?.plan || "basic" };
+    return { ...actor, ids: [actor.accountId, actor.memberId].filter(Boolean), admin: Boolean(actor.accountId && admins.includes(actor.accountId)) };
   }
   const signedIn = (actor) => { if (!actor) throw new AppError(401, "Sign in to step into the Stoa."); return actor; };
   const find = (state, id) => { const space = state.spaces.find((entry) => entry.id === id); if (!space) throw notFound(); return space; };

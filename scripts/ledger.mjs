@@ -16,7 +16,7 @@ function transfer(book, from, to, credits, reason, ref) {
   const groupId = randomUUID();
   for (const [account, value] of [[from, -credits], [to, credits]]) {
     const balance = (book.balances[account] || 0) + value;
-    if (!Number.isSafeInteger(balance) || (account.startsWith("account:") && balance < 0)) throw new AppError(409, "Insufficient credits.");
+    if (!Number.isSafeInteger(balance) || (!account.startsWith("system:") && balance < 0)) throw new AppError(409, "Insufficient credits.");
     book.balances[account] = balance;
     book.entries.push({ id: book.entries.length + 1, account, amount: value, reason, ref, groupId, createdAt: new Date().toISOString() });
   }
