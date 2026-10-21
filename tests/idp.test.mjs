@@ -116,7 +116,7 @@ test("an unverified email is dropped", async () => {
 });
 
 test("callback validation: IdP error, state mismatch, expired transaction and failed exchange", async () => {
-  let clock = 5_000_000;
+  let clock = Date.now();
   const { fake, idp } = await setup({ now: () => clock });
   // The IdP returned an error.
   const started = await idp.beginLogin({ returnTo: "/" });
@@ -139,6 +139,18 @@ test("callback validation: IdP error, state mismatch, expired transaction and fa
   await rejectsLogin(idp.completeLogin(callback, fresh.transaction), "exchange");
   fake.tokenResponse(() => Response.json({ error: "invalid_grant" }, { status: 400 }));
   await rejectsLogin(signIn(fake, idp), "exchange");
+  // Malformed token-endpoint answers are exchange failures, not ID token failures.
+  for (const reply of [() => new Response("<html>", { status: 200 }), () => new Response("<html>", { status: 500 }), () => [], () => ({ access_token: "a", token_type: "mac" }), () => ({ access_token: "a", token_type: "Bearer", expires_in: "soon" })]) {
+    fake.tokenResponse(reply);
+    await rejectsLogin(signIn(fake, idp), "exchange");
+  }
+});
+
+test("ID token time checks use the injected clock", async () => {
+  const { fake, idp } = await setup({ now: () => Date.now() + 2 * 3600_000 });
+  await rejectsLogin(signIn(fake, idp), "id_token");
+  const behind = await setup({ now: () => Date.now() - 10 * 60_000 });
+  assert.ok((await signIn(behind.fake, behind.idp)).sub);
 });
 
 test("callback validation: the ID token's nonce, iss, aud, expiry, signature, alg and sub are all checked", async () => {
@@ -191,6 +203,12 @@ test("endSessionUrl points at the IdP end_session_endpoint with client_id, post_
   assert.equal(url.searchParams.get("client_id"), "portal");
   assert.equal(url.searchParams.get("post_logout_redirect_uri"), "https://portal.example/");
   assert.equal(url.searchParams.get("id_token_hint"), idToken);
+  const early = createIdp({ issuer, clientId: "portal", clientSecret, siteUrl, request: fake.request });
+  const before = new URL(early.endSessionUrl({ idToken }));
+  assert.equal(before.origin + before.pathname, issuer + "/logout", "built from the issuer before discovery");
+  assert.equal(before.searchParams.get("client_id"), "portal");
+  assert.equal(before.searchParams.get("post_logout_redirect_uri"), "https://portal.example/");
+  assert.equal(before.searchParams.get("id_token_hint"), idToken);
   const bare = new URL(idp.endSessionUrl({}));
   assert.equal(bare.searchParams.has("id_token_hint"), false);
   assert.equal(bare.searchParams.get("client_id"), "portal");
@@ -201,6 +219,7 @@ test("bearer: a valid at+jwt access token gives sub, client ID and scopes", asyn
   const sub = fake.accountId();
   const token = await fake.issueAccessToken({ sub, client_id: "vox", scope: "openid credits" });
   assert.deepEqual(await idp.verifyAccessToken(token), { sub, clientId: "vox", scopes: ["openid", "credits"] });
+  assert.deepEqual((await idp.verifyAccessToken(await fake.issueAccessToken({ sub }))).scopes, ["credits"]);
   const multi = await fake.issueAccessToken({ sub, aud: [audience, "https://other.example"], scope: undefined });
   assert.deepEqual(await idp.verifyAccessToken(multi), { sub, clientId: "portal", scopes: [] });
 });
@@ -250,6 +269,39 @@ test("bearer: key rotation refetches JWKS for an unknown kid", async () => {
   assert.equal(fake.counts.jwks, 2);
 });
 
+test("bearer: a key the IdP dropped is refused once the 60 s cache passes", async () => {
+  mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const { fake, idp } = await setup();
+  const old = await fake.issueAccessToken();
+  await idp.verifyAccessToken(old);
+  await fake.rotate({ drop: true });
+  mock.timers.tick(61_000);
+  await rejectsToken(idp.verifyAccessToken(old), 401);
+  assert.equal(fake.counts.jwks, 2);
+});
+
+test("bearer: cached keys are trusted for at most 1 h of outage, and a failed refetch backs off for 30 s", async () => {
+  mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const { fake, idp } = await setup();
+  await idp.verifyAccessToken(await fake.issueAccessToken());
+  fake.setDown(true);
+  mock.timers.tick(120_000);
+  const attempts = fake.counts.attempts;
+  await idp.verifyAccessToken(await fake.issueAccessToken());
+  assert.equal(fake.counts.attempts, attempts + 1, "the stale cache tries the network once");
+  await idp.verifyAccessToken(await fake.issueAccessToken());
+  await rejectsToken(idp.verifyAccessToken(await fake.issueAccessToken({}, { kid: "unknown-kid" })), 503);
+  assert.equal(fake.counts.attempts, attempts + 1, "no network attempt during the 30 s backoff");
+  mock.timers.tick(31_000);
+  await idp.verifyAccessToken(await fake.issueAccessToken());
+  assert.equal(fake.counts.attempts, attempts + 2, "retried after the backoff");
+  mock.timers.tick(3600_000);
+  await rejectsToken(idp.verifyAccessToken(await fake.issueAccessToken()), 503);
+  fake.setDown(false);
+  mock.timers.tick(31_000);
+  await idp.verifyAccessToken(await fake.issueAccessToken());
+});
+
 test("bearer: an unreachable IdP gives 503 for an unknown key, while cached keys keep working", async () => {
   mock.timers.enable({ apis: ["Date"], now: Date.now() });
   // Discovery never succeeded.
@@ -261,8 +313,10 @@ test("bearer: an unreachable IdP gives 503 for an unknown key, while cached keys
   assert.equal(await idp.available(), true);
   fake.setDown(true);
   await rejectsToken(idp.verifyAccessToken(await fake.issueAccessToken()), 503);
-  // Once keys are cached, an outage past the cache lifetime still accepts known keys, and gives 503 for new ones.
+  // The failed fetch backs off for 30 s. Once keys are cached, an outage past the cache lifetime still accepts known keys, and gives 503 for new ones.
   fake.setDown(false);
+  await rejectsToken(idp.verifyAccessToken(await fake.issueAccessToken()), 503);
+  mock.timers.tick(31_000);
   await idp.verifyAccessToken(await fake.issueAccessToken());
   fake.setDown(true);
   mock.timers.tick(120_000);
@@ -298,6 +352,7 @@ test("back-channel logout: forged, misaddressed, eventless, nonce-bearing and ot
     "nonce present": fake.issueLogoutToken({ nonce: "n" }),
     "neither sid nor sub": fake.issueLogoutToken({ sid: undefined, sub: undefined }),
     "no iat": fake.issueLogoutToken({}, { omit: ["iat"] }),
+    "no jti": fake.issueLogoutToken({}, { omit: ["jti"] }),
     "expired": fake.issueLogoutToken({ iat: now - 600, exp: now - 300 }),
     "stale iat": fake.issueLogoutToken({ iat: now - 3600 }, { omit: ["exp"] }),
     "HS256": fake.issueLogoutToken({}, { alg: "HS256" }),

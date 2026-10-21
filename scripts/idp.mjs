@@ -10,8 +10,12 @@ const ACCOUNT_ID = /^acct_[0-9A-HJKMNP-TV-Z]{26}$/;
 const TRANSACTION_LIFETIME = 600000;
 const DISCOVERY_RETRY = 30000;
 const SCOPE = "openid profile email";
-// Codes from openid-client/oauth4webapi meaning the token endpoint itself failed, as opposed to the ID token.
-const EXCHANGE_CODES = new Set(["OAUTH_RESPONSE_BODY_ERROR", "OAUTH_RESPONSE_IS_NOT_JSON", "OAUTH_RESPONSE_IS_NOT_CONFORM", "OAUTH_HTTP_REQUEST_FORBIDDEN", "OAUTH_WWW_AUTHENTICATE_CHALLENGE", "OAUTH_REQUEST_PROTOCOL_FORBIDDEN"]);
+const KEY_BACKOFF = 30000;
+const SNAPSHOT_LIFETIME = 3600000;
+// Codes from openid-client/oauth4webapi that mean the ID token failed validation. Anything else from the code
+// exchange is labelled "exchange". OAUTH_INVALID_RESPONSE covers both, so its detail decides (labels only; both fail).
+const ID_TOKEN_CODES = new Set(["OAUTH_JWT_CLAIM_COMPARISON_FAILED", "OAUTH_JWT_TIMESTAMP_CHECK_FAILED", "OAUTH_KEY_SELECTION_FAILED"]);
+const idTokenFailure = (error) => ID_TOKEN_CODES.has(error?.code) || (error?.code === "OAUTH_INVALID_RESPONSE" && /JWT|id_token|"alg"/.test(String(error.cause?.message || "")));
 
 export class LoginError extends Error {
   constructor(reason) {
@@ -76,18 +80,15 @@ export function createIdp({ issuer, clientId = "portal", clientSecret, siteUrl, 
     lastAttempt = now();
     pending = (async () => {
       try {
-        const client = await oidc.discovery(issuerUrl, clientId, { id_token_signed_response_alg: "ES256" }, oidc.ClientSecretBasic(clientSecret), {
+        const skew = clockSkew();
+        const client = setUp(await oidc.discovery(issuerUrl, clientId, clientMetadata(skew), oidc.ClientSecretBasic(clientSecret), {
           [oidc.customFetch]: clientRequest,
           timeout: 10,
           ...(insecure ? { execute: [oidc.allowInsecureRequests] } : {})
-        });
-        client[oidc.customFetch] = clientRequest;
-        client.timeout = 10;
-        oidc.enableNonRepudiationChecks(client);
+        }));
         const { jwks_uri: jwksUri } = client.serverMetadata();
         if (!jwksUri) throw new Error("no jwks_uri");
-        const remote = createRemoteJWKSet(new URL(jwksUri), { [customFetch]: request, cacheMaxAge: 60000, timeoutDuration: 5000 });
-        discovered = { client, keys: keysFrom(remote) };
+        discovered = { client, skew, keys: keysFrom(new URL(jwksUri)) };
         return discovered;
       } catch {
         return null;
@@ -98,20 +99,57 @@ export function createIdp({ issuer, clientId = "portal", clientSecret, siteUrl, 
     return pending;
   }
 
-  // Keys come from the IdP JWKS (cached, refetched on an unknown kid). If the IdP can't be reached, keys already
-  // seen still verify; an unknown key is reported as unavailable (503), never as a valid token.
-  function keysFrom(remote) {
+  // openid-client checks ID token times against Date.now() plus a fixed skew, so the injected clock becomes a skew.
+  // The client is rebuilt only when the skew changes (never, in production).
+  const clockSkew = () => Math.round((now() - Date.now()) / 1000);
+  const clientMetadata = (skew) => ({ id_token_signed_response_alg: "ES256", [oidc.clockSkew]: skew });
+  function setUp(client) {
+    client[oidc.customFetch] = clientRequest;
+    client.timeout = 10;
+    if (insecure) oidc.allowInsecureRequests(client);
+    oidc.enableNonRepudiationChecks(client);
+    return client;
+  }
+  function loginClient(state) {
+    const skew = clockSkew();
+    if (state.skew !== skew) Object.assign(state, { skew, client: setUp(new oidc.Configuration(state.client.serverMetadata(), clientId, clientMetadata(skew), oidc.ClientSecretBasic(clientSecret))) });
+    return state.client;
+  }
+
+  // Keys come from the IdP JWKS (cached 60 s, refetched on an unknown kid). If a fetch fails, the last good key set
+  // still verifies known keys, for at most 1 h after it was fetched, and the network is left alone for 30 s. An
+  // unknown key while the IdP is unreachable is reported as unavailable (503), never as a valid token.
+  function keysFrom(jwksUrl) {
+    let fetchedAt, failedAt, failures = 0, snapshot = { at: undefined, keys: null };
+    const jwksFetch = async (url, options) => {
+      try {
+        const response = await request(url, options);
+        const body = response.status === 200 ? await response.clone().json().catch(() => null) : null;
+        if (Array.isArray(body?.keys)) fetchedAt = now();
+        else { failedAt = now(); failures += 1; }
+        return response;
+      } catch (error) {
+        failedAt = now();
+        failures += 1;
+        throw error;
+      }
+    };
+    const remote = createRemoteJWKSet(jwksUrl, { [customFetch]: jwksFetch, cacheMaxAge: 60000, timeoutDuration: 5000 });
+    const cached = async (header, token) => {
+      const jwks = remote.jwks();
+      if (!jwks || fetchedAt === undefined || now() - fetchedAt > SNAPSHOT_LIFETIME) throw new KeysUnavailable();
+      if (snapshot.at !== fetchedAt) snapshot = { at: fetchedAt, keys: createLocalJWKSet(jwks) };
+      try { return await snapshot.keys(header, token); }
+      catch (error) { if (error instanceof errors.JWKSNoMatchingKey) throw new KeysUnavailable(); throw error; }
+    };
     return async (header, token) => {
+      if (failedAt !== undefined && now() - failedAt < KEY_BACKOFF) return cached(header, token);
+      const before = failures;
       try {
         return await remote(header, token);
       } catch (error) {
-        if (error instanceof errors.JWKSNoMatchingKey || error instanceof errors.JWKSMultipleMatchingKeys || error instanceof errors.JOSENotSupported) throw error;
-        const snapshot = remote.jwks();
-        if (snapshot) {
-          try { return await createLocalJWKSet(snapshot)(header, token); }
-          catch (inner) { if (!(inner instanceof errors.JWKSNoMatchingKey)) throw inner; }
-        }
-        throw new KeysUnavailable();
+        if (failures === before) throw error;
+        return cached(header, token);
       }
     };
   }
@@ -170,10 +208,9 @@ export function createIdp({ issuer, clientId = "portal", clientSecret, siteUrl, 
       current.search = parameters.toString();
       let tokens;
       try {
-        tokens = await oidc.authorizationCodeGrant(state.client, current, { pkceCodeVerifier: transaction.verifier, expectedState: transaction.state, expectedNonce: transaction.nonce, idTokenExpected: true });
+        tokens = await oidc.authorizationCodeGrant(loginClient(state), current, { pkceCodeVerifier: transaction.verifier, expectedState: transaction.state, expectedNonce: transaction.nonce, idTokenExpected: true });
       } catch (error) {
-        const exchange = error instanceof oidc.ResponseBodyError || error instanceof TypeError || error?.name === "TimeoutError" || error?.name === "AbortError" || EXCHANGE_CODES.has(error?.code);
-        throw new LoginError(exchange ? "exchange" : "id_token");
+        throw new LoginError(idTokenFailure(error) ? "id_token" : "exchange");
       }
       const claims = tokens.claims();
       if (!claims || typeof claims.sub !== "string" || !ACCOUNT_ID.test(claims.sub) || typeof tokens.id_token !== "string") throw new LoginError("id_token");
@@ -187,11 +224,15 @@ export function createIdp({ issuer, clientId = "portal", clientSecret, siteUrl, 
       };
     },
     endSessionUrl({ idToken } = {}) {
-      if (!discovered?.client.serverMetadata().end_session_endpoint) return config.postLogoutRedirectUri;
-      return oidc.buildEndSessionUrl(discovered.client, { post_logout_redirect_uri: config.postLogoutRedirectUri, ...(typeof idToken === "string" && idToken ? { id_token_hint: idToken } : {}) }).href;
+      const parameters = { post_logout_redirect_uri: config.postLogoutRedirectUri, ...(typeof idToken === "string" && idToken ? { id_token_hint: idToken } : {}) };
+      if (discovered?.client.serverMetadata().end_session_endpoint) return oidc.buildEndSessionUrl(discovered.client, parameters).href;
+      // Before discovery has succeeded, use Auth's fixed end-session route with the same parameters.
+      const url = new URL(issuer.replace(/\/$/, "") + "/logout");
+      url.search = new URLSearchParams({ client_id: clientId, ...parameters }).toString();
+      return url.href;
     },
     async verifyLogoutToken(token) {
-      const payload = await verify(token, { audience: clientId, typ: "logout+jwt", requiredClaims: ["iat"], maxTokenAge: 300 });
+      const payload = await verify(token, { audience: clientId, typ: "logout+jwt", requiredClaims: ["iat", "jti"], maxTokenAge: 300 });
       const event = payload.events?.[LOGOUT_EVENT];
       if (!payload.events || typeof payload.events !== "object" || !event || typeof event !== "object" || Array.isArray(event)) throw new TokenError(401, "events");
       if (payload.nonce !== undefined) throw new TokenError(401, "nonce");

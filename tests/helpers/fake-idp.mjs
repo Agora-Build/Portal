@@ -36,7 +36,7 @@ export async function createFakeIdp({ issuer = "https://auth.example", clientId 
   };
   const keys = [await newKey()];
   const codes = new Map();
-  const counts = { discovery: 0, jwks: 0, token: 0 };
+  const counts = { attempts: 0, discovery: 0, jwks: 0, token: 0 };
   let down = false;
   let customToken = null;
 
@@ -75,7 +75,7 @@ export async function createFakeIdp({ issuer = "https://auth.example", clientId 
     },
     issueAccessToken(claims = {}, opts = {}) {
       const now = seconds();
-      return sign({ typ: "typ" in opts ? opts.typ : "at+jwt" }, shape({ iss: issuer, sub: accountId(), aud: API_AUDIENCE, client_id: clientId, scope: "openid", iat: now, exp: now + 900, jti: randomUUID() }, claims, opts), opts);
+      return sign({ typ: "typ" in opts ? opts.typ : "at+jwt" }, shape({ iss: issuer, sub: accountId(), aud: API_AUDIENCE, client_id: clientId, scope: "credits", iat: now, exp: now + 900, jti: randomUUID() }, claims, opts), opts);
     },
     issueLogoutToken(claims = {}, opts = {}) {
       const now = seconds();
@@ -109,6 +109,7 @@ export async function createFakeIdp({ issuer = "https://auth.example", clientId 
       return callback.href;
     },
     async request(value, options = {}) {
+      counts.attempts += 1;
       if (down) throw new TypeError("fetch failed");
       const url = new URL(value);
       if (url.origin !== new URL(issuer).origin) throw new TypeError("fetch failed: unexpected host " + url.origin);
