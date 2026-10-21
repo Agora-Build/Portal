@@ -23,11 +23,12 @@ export function connectionsConfig(env = process.env) {
   // Agora's OAuth settings, used to connect an account to Agora Console and to renew that connection.
   const oauthBase = httpsEndpoint(env.AGORA_OAUTH_BASE_URL || "https://sso2.agora.io");
   const oauth = { clientId: env.AGORA_OAUTH_CLIENT_ID || "", secret: env.AGORA_OAUTH_CLIENT_SECRET || "", baseUrl: oauthBase, userinfo: env.AGORA_OAUTH_USERINFO_URL ? httpsEndpoint(env.AGORA_OAUTH_USERINFO_URL) : "" };
-  // The callback is on the Portal's public origin: https, or plain http on a loopback host for local development.
+  // The callback is on the Portal's public origin: https, or plain http on a loopback host (including *.localhost, as
+  // for sign-in) for local development.
   let redirectUri = "";
   try {
     const url = new URL(env.SITE_URL);
-    if (!url.username && !url.password && (url.protocol === "https:" || (url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)))) redirectUri = url.origin + "/connect/agora/callback";
+    if (!url.username && !url.password && (url.protocol === "https:" || (url.protocol === "http:" && (["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) || url.hostname.endsWith(".localhost"))))) redirectUri = url.origin + "/connect/agora/callback";
   } catch { /* Connect stays unavailable until a public origin is configured. */ }
   const ready = key.length === 32 && Boolean(bffUrl);
   // Setting names (never values) that keep the connect flow unavailable.

@@ -236,6 +236,8 @@ test("the connect settings name what is missing", () => {
   assert.deepEqual(connectionsConfig({}).connect.missing, ["AGORA_CONSOLE_ENCRYPTION_KEY", "AGORA_OAUTH_CLIENT_ID", "AGORA_OAUTH_CLIENT_SECRET", "SITE_URL"]);
   assert.deepEqual(connectionsConfig({ ...full, AGORA_OAUTH_BASE_URL: "http://sso.example" }).connect.missing, ["AGORA_OAUTH_BASE_URL"]);
   assert.deepEqual(connectionsConfig({ ...full, SITE_URL: "http://portal.example" }).connect.missing, ["SITE_URL"], "plain http only on localhost");
+  assert.equal(connectionsConfig({ ...full, SITE_URL: "http://portal.localhost:3080" }).connect.redirectUri, "http://portal.localhost:3080/connect/agora/callback", "*.localhost is loopback, as for sign-in");
+  assert.deepEqual(connectionsConfig({ ...full, SITE_URL: "http://localhost.example" }).connect.missing, ["SITE_URL"]);
   assert.equal(connectionsConfig({ ...full, AGORA_OAUTH_USERINFO_URL: "http://sso.example/userinfo" }).connect.ready, true, "the optional userinfo URL is ignored when invalid");
 });
 
