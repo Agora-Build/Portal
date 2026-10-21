@@ -80,12 +80,13 @@ function renderSignIn() {
   signOut.hidden = !account;
   accountLink.hidden = !account;
   signInButton.hidden = Boolean(account);
+  signInButton.href = "/auth/login?returnTo=" + encodeURIComponent(location.pathname + location.search);
   signInButton.setAttribute("aria-disabled", String(!available));
   signInButton.classList.toggle("is-disabled", !available);
   loginStatus.textContent = account ? "Signed in as " + (account.name || "your account") + "." : !state.authConfig ? "Checking sign-in..." : !available ? "Sign-in is temporarily unavailable." + (state.profile ? "" : " You can start with this browser.") : state.profile ? "Sign in to keep this profile and its rooms across devices." : "Sign in, or start with this browser.";
 }
 export function openSignIn() { renderSignIn(); loginDialog.showModal(); }
-api("/api/auth/config").then((result) => { state.authConfig = result; renderSignIn(); document.dispatchEvent(new CustomEvent("house:authconfig", { detail: result })); }).catch(() => { state.authConfig = { issuer: null, accountUrl: null }; renderSignIn(); });
+export const authConfigReady = api("/api/auth/config").catch(() => ({ issuer: null, accountUrl: null })).then((result) => { state.authConfig = result; renderSignIn(); return result; });
 
 export function openJoin(callback, browserOnly = false) {
   afterJoin = typeof callback === "function" ? callback : null;

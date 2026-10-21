@@ -33,3 +33,11 @@ test("guests are told to sign in for credits, services, and creating spaces", as
   assert.match(await read("services.js"), /Sign in to use credits\./);
   assert.match(await read("stoa.js"), /state\.account \? spacesUi\.openCreate/);
 });
+test("the account page never waits on an event: a failed auth config still settles", async () => {
+  const script = await read("script.js");
+  assert.match(script, /export const authConfigReady = api\("\/api\/auth\/config"\)\.catch\(\(\) => \(\{ issuer: null, accountUrl: null \}\)\)/);
+  const account = await read("account.js");
+  assert.match(account, /await authConfigReady;/);
+  assert.doesNotMatch(account + script, /house:authconfig/);
+  assert.match(script, /signInButton\.href = "\/auth\/login\?returnTo=" \+ encodeURIComponent/);
+});

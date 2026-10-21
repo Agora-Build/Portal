@@ -1,4 +1,4 @@
-import { api, el, avatar, state, notify, openSignIn, refreshSession, sessionReady, requestKey } from "./script.js";
+import { api, el, avatar, authConfigReady, state, notify, openSignIn, refreshSession, sessionReady, requestKey } from "./script.js";
 
 const status = document.querySelector("#account-status");
 const purchaseStatus = document.querySelector("#purchase-status");
@@ -86,7 +86,7 @@ async function loadProjects(version) {
 async function loadAccount() {
   const version = ++renderVersion;
   const account = state.account;
-  status.textContent = account ? "Signed in as " + account.name : "Sign in to manage your account, membership, and credits.";
+  status.textContent = account ? "Signed in as " + (account.name || "your account") : "Sign in to manage your account, membership, and credits.";
   document.querySelector("#account-identity").replaceChildren(account ? el("div", { class: "account-person" }, [avatar({ name: account.name || "Account", avatar: account.avatar }), el("div", {}, [el("h3", { text: account.name || "Your account" }), el("p", { class: "account-user-id mono", text: account.id }), ...(account.email ? [el("p", { class: "muted", text: "Email (private): " + account.email })] : [])])]) : el("p", { text: "Your private account is separate from your public community profile. Sign in to use credits, membership, and connections." }));
   document.querySelector("#account-login").hidden = Boolean(account);
   document.querySelector("#account-logout").hidden = !account;
@@ -147,7 +147,7 @@ document.querySelector("#account-logout").addEventListener("click", async () => 
 });
 document.querySelector("#more-statement").addEventListener("click", () => statement(true).catch((error) => notify(error.message)));
 await sessionReady;
-await new Promise((done) => { if (state.authConfig) done(); else document.addEventListener("house:authconfig", done, { once: true }); });
+await authConfigReady;
 try { catalog = await api("/api/billing/catalog"); }
 catch (error) { purchaseStatus.textContent = error.message; }
 await loadAccount();
