@@ -351,10 +351,27 @@ test("signIn with a guest token adopts that browser's guest profile when the acc
   const again = await store.signIn({ sub: sub(12), sid: "s2", idToken: "t", guestToken: other.token });
   assert.equal((await store.actor(again.token)).profile.id, guest.person.id);
   assert.deepEqual(await store.actor(other.token), { kind: null }, "the browser's guest token stops working");
+  assert.equal((await store.snapshot()).people.some((person) => person.id === other.person.id), false, "the unadopted guest profile is removed");
   // A previous account session in the same browser is replaced, and unknown guest tokens change nothing.
   const replaced = await store.signIn({ sub: sub(13), sid: "s3", idToken: "t", guestToken: again.token });
   assert.equal(await store.browserToken(again.token), false);
   assert.equal((await store.actor(replaced.token)).profile, null);
   await store.signIn({ sub: sub(14), idToken: "t", guestToken: "no-such-token" });
   assert.equal(await store.accountProfile(sub(14)), null);
+});
+
+test("removing a profile also drops the spaces it owns and its memberships and leases elsewhere", async () => {
+  const store = createStore(seed, file(), { log: silent });
+  const guest = await store.join(profile("Space guest"));
+  const id = guest.person.id;
+  await store.transaction((state) => {
+    state.spaces.push({ id: "11111111-1111-4111-8111-000000000001", ownerId: id, members: [id], blocked: [], invitations: [] });
+    state.spaces.push({ id: "11111111-1111-4111-8111-000000000002", ownerId: sub(30), hostId: id, members: [sub(30), id], blocked: [id], invitations: [{ createdBy: id }, { createdBy: sub(30) }] });
+    state.spaceLeases.push({ spaceId: "11111111-1111-4111-8111-000000000001", actorId: id, ids: [id] }, { spaceId: "11111111-1111-4111-8111-000000000002", actorId: id, ids: [id] }, { spaceId: "11111111-1111-4111-8111-000000000002", actorId: sub(30), ids: [sub(30)] });
+  });
+  await store.remove(guest.token);
+  const state = await store.snapshot();
+  assert.deepEqual(state.spaces.map((space) => space.id), ["11111111-1111-4111-8111-000000000002"]);
+  assert.deepEqual([state.spaces[0].hostId, state.spaces[0].members, state.spaces[0].blocked, state.spaces[0].invitations], [null, [sub(30)], [], [{ createdBy: sub(30) }]]);
+  assert.deepEqual(state.spaceLeases.map((lease) => lease.actorId), [sub(30)]);
 });

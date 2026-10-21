@@ -43,6 +43,31 @@ function fields(input) {
   };
 }
 
+// Removes profiles or accounts (by ID) from everything that names them: the directory, rooms they own and their
+// rosters, activity, the radar, spaces they own (with those spaces' leases), and other spaces' members, blocked
+// lists, invitations, hosts and leases. Shared by profile removal, an unadopted guest profile, and the migration.
+export function removeParticipants(state, ids) {
+  const gone = (id) => typeof id === "string" && ids.has(id);
+  if (state.people) state.people = state.people.filter((person) => !gone(person.id));
+  for (const account of state.accounts || []) if (gone(account.profileId)) account.profileId = null;
+  const ownedRooms = new Set((state.rooms || []).filter((room) => gone(room.ownerId)).map((room) => room.id));
+  if (state.rooms) state.rooms = state.rooms.filter((room) => !ownedRooms.has(room.id));
+  for (const room of state.rooms || []) if (Array.isArray(room.participants)) room.participants = room.participants.filter((id) => !gone(id));
+  if (state.activity) state.activity = state.activity.filter((entry) => !gone(entry.actorId) && !ownedRooms.has(entry.roomId));
+  if (state.radar) for (const id of ids) delete state.radar[id];
+  const spaces = state.spaces || [];
+  const dropped = new Set(spaces.filter((space) => gone(space.ownerId)).map((space) => space.id));
+  if (state.spaces) state.spaces = spaces.filter((space) => !dropped.has(space.id));
+  for (const space of state.spaces || []) {
+    if (Array.isArray(space.members)) space.members = space.members.filter((id) => !gone(id));
+    if (Array.isArray(space.blocked)) space.blocked = space.blocked.filter((id) => !gone(id));
+    if (Array.isArray(space.invitations)) space.invitations = space.invitations.filter((invitation) => !gone(invitation.createdBy));
+    if (gone(space.hostId)) space.hostId = null;
+  }
+  if (state.spaceLeases) state.spaceLeases = state.spaceLeases.filter((lease) => !dropped.has(lease.spaceId) && !gone(lease.actorId) && !(lease.ids || []).some(gone));
+  return { spaces: dropped.size };
+}
+
 const plural = (count, word) => count + " " + word + (count === 1 ? "" : "s");
 // Version 2 starts empty: the Portal's own provider accounts, sessions, OAuth codes and grants, and pending links go,
 // with every ledger, billing and space row of those accounts. Guests' profiles, rooms and the radar stay.
@@ -57,23 +82,8 @@ export function migrateState(state) {
   for (const account of state.accounts) { delete account.identities; delete account.sessionEpoch; delete account.contact; }
   state.sessions = [];
   delete state.authorizationCodes; delete state.grants; delete state.pendingLinks;
-  if (state.people) state.people = state.people.filter((person) => !orphans.has(person.id));
-  const ownedRooms = new Set((state.rooms || []).filter((room) => orphans.has(room.ownerId)).map((room) => room.id));
-  if (state.rooms) state.rooms = state.rooms.filter((room) => !ownedRooms.has(room.id));
-  for (const room of state.rooms || []) if (Array.isArray(room.participants)) room.participants = room.participants.filter((id) => !orphans.has(id));
-  if (state.activity) state.activity = state.activity.filter((entry) => !orphans.has(entry.actorId) && !ownedRooms.has(entry.roomId));
-  for (const id of orphans) if (state.radar) delete state.radar[id];
-  const spaces = state.spaces || [];
-  const dropped = new Set(spaces.filter((space) => gone(space.ownerId)).map((space) => space.id));
-  counts.spaces = dropped.size;
-  state.spaces = spaces.filter((space) => !dropped.has(space.id));
-  for (const space of state.spaces) {
-    if (Array.isArray(space.members)) space.members = space.members.filter((id) => !gone(id));
-    if (Array.isArray(space.blocked)) space.blocked = space.blocked.filter((id) => !gone(id));
-    if (Array.isArray(space.invitations)) space.invitations = space.invitations.filter((invitation) => !gone(invitation.createdBy));
-    if (gone(space.hostId)) space.hostId = null;
-  }
-  state.spaceLeases = (state.spaceLeases || []).filter((lease) => !dropped.has(lease.spaceId) && !gone(lease.actorId) && !(lease.ids || []).some(gone));
+  state.spaces ||= []; state.spaceLeases ||= [];
+  counts.spaces = removeParticipants(state, new Set([...removed, ...orphans])).spaces;
   const orders = state.orders || [];
   const refs = new Set(orders.filter((order) => gone(order.userId)).map((order) => order.id));
   counts.orders = refs.size;
@@ -231,14 +241,15 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
         if (typeof guestToken === "string" && guestToken) {
           const previous = hash(guestToken);
           state.sessions = state.sessions.filter((entry) => entry.hash !== previous);
-          // The browser's guest token stops working either way: adopted, or replaced by the account session.
+          // The account adopts the browser's guest profile if it has none; otherwise the guest profile, which could no
+          // longer be edited by anyone, is removed. Either way the guest token stops working.
           const guest = state.people.find((person) => person.sessionHash === previous && !person.accountId);
-          if (guest) delete guest.sessionHash;
           if (guest && !state.people.some((person) => person.id === account.profileId)) {
+            delete guest.sessionHash;
             guest.accountId = account.id;
             guest.avatar ||= account.avatar;
             account.profileId = guest.id;
-          }
+          } else if (guest) removeParticipants(state, new Set([guest.id]));
         }
         addSession(state, account, token, { sid: typeof sid === "string" && sid ? sid : null, idToken: typeof idToken === "string" && idToken ? idToken : null });
         return { token };
@@ -310,14 +321,7 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
     },
     async remove(token) {
       return update((state) => {
-        const person = owner(state, token);
-        const ownedRooms = new Set(state.rooms.filter((room) => room.ownerId === person.id).map((room) => room.id));
-        state.people = state.people.filter((entry) => entry.id !== person.id);
-        for (const account of state.accounts) if (account.profileId === person.id) account.profileId = null;
-        state.rooms = state.rooms.filter((room) => room.ownerId !== person.id);
-        for (const room of state.rooms) room.participants = room.participants.filter((id) => id !== person.id);
-        state.activity = (state.activity || []).filter((entry) => entry.actorId !== person.id && !ownedRooms.has(entry.roomId));
-        delete state.radar[person.id];
+        removeParticipants(state, new Set([owner(state, token).id]));
       });
     },
     async rooms() { return (await read()).rooms.map(publicRoom); },

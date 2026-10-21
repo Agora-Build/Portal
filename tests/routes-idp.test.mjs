@@ -499,3 +499,23 @@ test("a store error during the callback still clears the transaction cookie and 
   assert.equal(response.headers.get("location"), "/?signin=failed");
   assert.match(cookieNamed(response, "portal_auth"), /Max-Age=0/);
 });
+
+test("a guest profile the account can't adopt is removed with its room and radar; the account's profile is untouched", async (t) => {
+  const app = await start(t);
+  const first = await guest(app, "Adopted guest");
+  const signedIn = await browserSignIn(app, { cookie: first });
+  const own = (await (await call(app.base, "/api/me", { cookie: signedIn.cookie })).json());
+  const second = await guest(app, "Abandoned guest");
+  const abandoned = (await (await call(app.base, "/api/me", { cookie: second })).json()).profile;
+  const room = await app.store.createRoom(second.split("=")[1], { title: "Abandoned room", intent: "Leave nothing behind." });
+  await app.store.saveRadar(abandoned.id, { items: [{ title: "Old match" }] }, abandoned.intent);
+  await browserSignIn(app, { cookie: second, claims: { sub: own.account.id } });
+  const people = (await (await call(app.base, "/api/people")).json()).people;
+  assert.equal(people.some((person) => person.id === abandoned.id), false, "the abandoned guest profile is gone from /api/people");
+  assert.ok(people.some((person) => person.id === own.profile.id && person.name === "Adopted guest"), "the account's own profile is untouched");
+  const state = await app.store.snapshot();
+  assert.equal(state.rooms.some((entry) => entry.id === room.id), false);
+  assert.equal(abandoned.id in state.radar, false);
+  assert.equal((state.activity || []).some((entry) => entry.actorId === abandoned.id), false);
+  assert.equal(state.accounts.find((account) => account.id === own.account.id).profileId, own.profile.id);
+});
