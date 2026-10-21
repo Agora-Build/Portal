@@ -277,7 +277,7 @@ test("listed channels are public names; unlisted and private names and keys need
   assert.notEqual(spaceKey(secret, { ...hidden, channelEpoch: 1 }), key);
 });
 test("Signaling user IDs come from the account, the profile, or a random guest ID", () => {
-  assert.equal(signalingUser({ id: "account:72a639ba-3a45-4afe-936b-111111111111" }), "a-72a639ba-3a45-4afe-936b-111111111111");
+  assert.equal(signalingUser({ id: "acct_01HZX3K7M9P2Q4R6S8T0V1W2Y3" }), "acct_01HZX3K7M9P2Q4R6S8T0V1W2Y3", "an account ID is its own Signaling user ID");
   assert.equal(signalingUser({ id: "member:72a639ba-3a45-4afe-936b-111111111111" }), "m-72a639ba-3a45-4afe-936b-111111111111");
   assert.match(signalingUser(null), /^g-[a-f0-9]{16}$/);
   assert.notEqual(signalingUser(null), signalingUser(null));

@@ -10,8 +10,8 @@ const DIRS = Object.keys(STEP);
 const isTile = (value) => Boolean(value) && Number.isInteger(value.x) && Number.isInteger(value.y);
 const copy = ({ x, y }) => ({ x, y });
 
-// Accounts are auth.agora.build subjects (acct_…), used as Signaling user IDs unchanged; a- is the earlier account form.
-export const actorFromUser = (userId) => /^acct_[0-9A-HJKMNP-TV-Z]{26}$/.test(userId || "") ? userId : /^a-[a-f0-9-]{36}$/.test(userId || "") ? "account:" + userId.slice(2) : /^m-[a-f0-9-]{36}$/.test(userId || "") ? "member:" + userId.slice(2) : null;
+// Accounts are auth.agora.build subjects (acct_…), used as Signaling user IDs unchanged; guest members are m-<uuid>.
+export const actorFromUser = (userId) => /^acct_[0-9A-HJKMNP-TV-Z]{26}$/.test(userId || "") ? userId : /^m-[a-f0-9-]{36}$/.test(userId || "") ? "member:" + userId.slice(2) : null;
 
 export function readMessage(text, map) {
   if (typeof text !== "string" || text.length > MESSAGE_LIMIT) return null;
