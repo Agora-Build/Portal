@@ -264,11 +264,12 @@ export function createAppServer(directory = root, options = {}) {
             if (error.status === 503) throw new AppError(503, "Access tokens can't be checked right now. Try again shortly.");
             throw invalidToken();
           }
-          caller.account = await store.ensureAccount(caller.sub);
         }
         const token = caller ? "" : browserToken;
         const route = request.method + " " + path;
         if (caller && !publicRoutes.has(route) && !bearerRoutes.has(route)) throw browserRoute(route, path) ? browserOnly() : new AppError(404, "This page or service was not found.");
+        // Only after the route gate, so a token that reaches a 404, browser-only or public route creates nothing.
+        if (caller && bearerRoutes.has(route)) caller.account = await store.ensureAccount(caller.sub);
         const scoped = (scope) => { if (!caller.scopes.includes(scope)) throw insufficientScope(scope); return caller.sub; };
         const member = async () => {
           const person = await store.me(token);

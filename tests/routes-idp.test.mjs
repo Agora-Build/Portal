@@ -575,3 +575,15 @@ test("a failed startup warm-up is logged by reason and doesn't stop the server",
   assert.deepEqual(warmLogs(), ["auth.agora.build warm-up failed: discovery."]);
   assert.equal((await call(app.base, "/api/auth/config")).status, 200);
 });
+test("only routes that accept access tokens create the caller's account; 404, browser-only and public reads don't", async (t) => {
+  const app = await start(t);
+  const sub = app.fake.accountId();
+  const token = await bearerToken(app, { sub, scope: "credits" });
+  const known = async () => (await app.store.snapshot()).accounts.some((account) => account.id === sub);
+  assert.equal((await call(app.base, "/api/nothing-here", { bearer: token })).status, 404);
+  assert.equal((await call(app.base, "/api/billing/account", { bearer: token })).status, 403);
+  assert.equal((await call(app.base, "/api/people", { bearer: token })).status, 200);
+  assert.equal(await known(), false, "no account for a token that only reached a gated or public route");
+  assert.equal((await call(app.base, "/api/me", { bearer: token })).status, 200);
+  assert.equal(await known(), true);
+});
