@@ -321,3 +321,31 @@ test("removing a public profile keeps the account signed in and deletes the prof
   assert.equal((await store.session(member.token)).profile, null);
   assert.equal((await store.rooms()).length, 0);
 });
+
+test("signIn with a guest token adopts that browser's guest profile when the account has none", async () => {
+  const store = createStore(seed, file(), { log: silent });
+  const guest = await store.join(profile("Guest adopter"));
+  const { token } = await store.signIn({ sub: sub(12), sid: "s", name: "Jo", picture: "https://example.com/jo.png", idToken: "t", guestToken: guest.token });
+  const actor = await store.actor(token);
+  assert.equal(actor.kind, "account");
+  assert.equal(actor.profile.id, guest.person.id);
+  assert.equal(actor.profile.avatar, "https://example.com/jo.png", "an empty guest avatar takes the account picture");
+  assert.equal(await store.browserToken(guest.token), false, "the guest token stops working");
+  const state = await store.snapshot();
+  assert.equal(state.accounts.find((account) => account.id === sub(12)).profileId, guest.person.id);
+  const person = state.people.find((entry) => entry.id === guest.person.id);
+  assert.equal(person.accountId, sub(12));
+  assert.equal("sessionHash" in person, false);
+  assert.equal(await store.accountProfile(sub(12)).then((value) => value?.id), guest.person.id);
+  // The account now has a profile, so a second guest stays a guest.
+  const other = await store.join(profile("Other guest"));
+  const again = await store.signIn({ sub: sub(12), sid: "s2", idToken: "t", guestToken: other.token });
+  assert.equal((await store.actor(again.token)).profile.id, guest.person.id);
+  assert.equal((await store.actor(other.token)).kind, "guest");
+  // A previous account session in the same browser is replaced, and unknown guest tokens change nothing.
+  const replaced = await store.signIn({ sub: sub(13), sid: "s3", idToken: "t", guestToken: again.token });
+  assert.equal(await store.browserToken(again.token), false);
+  assert.equal((await store.actor(replaced.token)).profile, null);
+  await store.signIn({ sub: sub(14), idToken: "t", guestToken: "no-such-token" });
+  assert.equal(await store.accountProfile(sub(14)), null);
+});

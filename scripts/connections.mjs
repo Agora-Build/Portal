@@ -9,10 +9,17 @@ export function connectionsConfig(env = process.env) {
     const url = new URL(env.AGORA_BFF_URL || "https://agora-cli.agora.io");
     if (url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash) bffUrl = url.href.replace(/\/$/, "");
   } catch { /* Invalid endpoints cannot receive credentials. */ }
-  return { key, bffUrl, ready: key.length === 32 && Boolean(bffUrl) };
+  // Agora's OAuth settings, used here only to renew a Console connection.
+  let oauthBase = "";
+  try {
+    const url = new URL(env.AGORA_OAUTH_BASE_URL || "https://sso2.agora.io");
+    if (url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash) oauthBase = url.href.replace(/\/$/, "");
+  } catch { /* An invalid endpoint cannot receive refresh tokens. */ }
+  const oauth = { clientId: env.AGORA_OAUTH_CLIENT_ID || "", secret: env.AGORA_OAUTH_CLIENT_SECRET || "", baseUrl: oauthBase };
+  return { key, bffUrl, oauth, ready: key.length === 32 && Boolean(bffUrl) };
 }
 
-export function createConnections(store, auth, config = connectionsConfig(), { request = fetch, now = Date.now } = {}) {
+export function createConnections(store, config = connectionsConfig(), { request = fetch, now = Date.now } = {}) {
   const seal = (value, userId) => {
     const iv = randomBytes(12), cipher = createCipheriv("aes-256-gcm", config.key, iv);
     cipher.setAAD(Buffer.from("agora:" + userId));
@@ -35,12 +42,12 @@ export function createConnections(store, auth, config = connectionsConfig(), { r
       if (!connection) throw new AppError(403, "Connect your Agora account to access its projects.");
       const tokens = open(connection, userId);
       if (tokens.expiresAt < now() + 60000) {
-        const provider = auth.config.providers.agora;
-        if (!tokens.refreshToken || provider.mode !== "oauth") throw new AppError(401, "Reconnect Agora to renew its Console access.");
-        const parameters = new URLSearchParams({ grant_type: "refresh_token", client_id: provider.clientId, refresh_token: tokens.refreshToken });
-        if (provider.secret) parameters.set("client_secret", provider.secret);
+        const { oauth } = config;
+        if (!tokens.refreshToken || !oauth?.clientId || !oauth.baseUrl) throw new AppError(401, "Reconnect Agora to renew its Console access.");
+        const parameters = new URLSearchParams({ grant_type: "refresh_token", client_id: oauth.clientId, refresh_token: tokens.refreshToken });
+        if (oauth.secret) parameters.set("client_secret", oauth.secret);
         let response;
-        try { response = await request(provider.issuer.replace(/\/$/, "") + "/api/v0/oauth/token", { method: "POST", body: parameters, headers: { Accept: "application/json" }, signal: AbortSignal.timeout(10000), redirect: "error" }); }
+        try { response = await request(oauth.baseUrl + "/api/v0/oauth/token", { method: "POST", body: parameters, headers: { Accept: "application/json" }, signal: AbortSignal.timeout(10000), redirect: "error" }); }
         catch { throw new AppError(503, "Agora could not renew this connection."); }
         if (!response.ok) throw new AppError(401, "Reconnect Agora to renew its Console access.");
         const result = await response.json();

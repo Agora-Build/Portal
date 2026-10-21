@@ -51,6 +51,9 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
     return { ...actor, ids: [actor.accountId, actor.memberId].filter(Boolean), admin: Boolean(actor.accountId && admins.includes(actor.accountId)) };
   }
   const signedIn = (actor) => { if (!actor) throw new AppError(401, "Sign in to step into the Stoa."); return actor; };
+  // Guests can walk the Stoa; creating and owning spaces needs a signed-in account.
+  const accountHolder = (actor) => { if (!signedIn(actor).accountId) throw new AppError(401, "Sign in to create and own spaces."); return actor; };
+  const canCreate = (state, actor) => Boolean(actor.accountId) && owned(state, actor).length < entitlements(actor.plan).spaces;
   const find = (state, id) => { const space = state.spaces.find((entry) => entry.id === id); if (!space) throw notFound(); return space; };
   const system = (space) => Boolean(space.lot) || space.id === PLAZA_ID;
   const invitationFor = (space, invite) => typeof invite === "string" && invite ? space.invitations.find((entry) => entry.tokenHash === hash(invite) && entry.expiresAt > now() && entry.usesLeft > 0) || null : null;
@@ -66,7 +69,7 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
     return manage ? { ...result, roster: roster(state, space.members), blockedRoster: roster(state, space.blocked) } : result;
   };
   const owned = (state, actor) => state.spaces.filter((space) => !system(space) && actor.ids.includes(space.ownerId));
-  const offerFor = (state, actor) => ({ spaces: state.spaces.filter((space) => !system(space) && space.members.some((id) => actor.ids.includes(id))).map((space) => ({ id: space.id, title: space.title, visibility: space.visibility, path: "/stoa/s/" + space.id })), canCreate: owned(state, actor).length < entitlements(actor.plan).spaces });
+  const offerFor = (state, actor) => ({ spaces: state.spaces.filter((space) => !system(space) && space.members.some((id) => actor.ids.includes(id))).map((space) => ({ id: space.id, title: space.title, visibility: space.visibility, path: "/stoa/s/" + space.id })), canCreate: canCreate(state, actor) });
   const access = (space) => ({ channel: channelName(secret, space), key: spaceKey(secret, space), blocked: space.blocked, hostId: space.hostId });
   const requirePresent = (state, space, actor) => { if (!present(state, space, actor)) throw new AppError(403, "Step into this space first."); };
 
@@ -89,7 +92,7 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
       return { plaza: { capacity: plaza.capacity, occupancy: leasesFor(state, PLAZA_ID, now()).length, blocked: plaza.blocked }, rooms };
     },
     async create(token, input) {
-      const actor = signedIn(await actorFor(token));
+      const actor = accountHolder(await actorFor(token));
       const fields = spaceInput(input || {});
       return mutate((state) => {
         if (owned(state, actor).length >= entitlements(actor.plan).spaces) throw new AppError(409, "You have reached your plan's space limit.", { offer: offerFor(state, actor) });
@@ -104,7 +107,7 @@ export function createSpaces({ store, worlds, signaling, calls, secret = "", adm
       const state = await store.snapshot();
       const list = state.spaces.filter((space) => !system(space) && space.members.some((id) => actor.ids.includes(id))).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       const owns = owned(state, actor).length, limit = entitlements(actor.plan).spaces;
-      return { spaces: list.map((space) => ({ id: space.id, title: space.title, purpose: space.purpose, visibility: space.visibility, access: space.access, capacity: space.capacity, themeId: space.themeId, owner: actor.ids.includes(space.ownerId), occupancy: leasesFor(state, space.id, now()).length, path: "/stoa/s/" + space.id })), owned: owns, limit, canCreate: owns < limit };
+      return { spaces: list.map((space) => ({ id: space.id, title: space.title, purpose: space.purpose, visibility: space.visibility, access: space.access, capacity: space.capacity, themeId: space.themeId, owner: actor.ids.includes(space.ownerId), occupancy: leasesFor(state, space.id, now()).length, path: "/stoa/s/" + space.id })), owned: owns, limit, canCreate: canCreate(state, actor) };
     },
     async get(token, id, invite) {
       await ready();

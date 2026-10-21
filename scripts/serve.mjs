@@ -8,7 +8,8 @@ import { AppError, createStore, text } from "./store.mjs";
 import { basicSearch, createModelClient, modelConfig } from "./models.mjs";
 import { createActivityFeed } from "./activity.mjs";
 import { createAgoraCalls } from "./calls.mjs";
-import { createAuth } from "./auth.mjs";
+import { createIdp, LoginError, TokenError } from "./idp.mjs";
+import { returnPath, withSignin } from "./return-path.mjs";
 import { createCredits } from "./credits.mjs";
 import { createLedger } from "./ledger.mjs";
 import { createBilling } from "./billing.mjs";
@@ -43,17 +44,31 @@ async function body(request) {
     return data;
   } catch { throw new AppError(400, "This request is not valid JSON."); }
 }
-const session = (request) => request.headers.cookie?.split(";").map((part) => part.trim()).find((part) => part.startsWith("house_session="))?.slice(14) || "";
 const cookieValue = (request, name) => request.headers.cookie?.split(";").map((part) => part.trim()).find((part) => part.startsWith(name + "="))?.slice(name.length + 1) || "";
 const redirect = (response, location, cookies = []) => { response.writeHead(303, { Location: location, "Cache-Control": "no-store", ...(cookies.length ? { "Set-Cookie": cookies } : {}) }); response.end(); };
 async function formBody(request) {
-  if (!request.headers["content-type"]?.startsWith("application/x-www-form-urlencoded")) throw new AppError(415, "This callback requires form data.");
+  if (!request.headers["content-type"]?.startsWith("application/x-www-form-urlencoded")) throw new AppError(400, "This request requires form data.");
   let content = "";
   for await (const chunk of request) {
     content += chunk;
-    if (Buffer.byteLength(content) > 16384) throw new AppError(413, "This callback is too large.");
+    if (Buffer.byteLength(content) > 16384) throw new AppError(413, "This request is too large.");
   }
   return new URLSearchParams(content);
+}
+// Bearer failures carry RFC 6750 WWW-Authenticate headers.
+const invalidToken = (message = "A valid auth.agora.build access token is required.") => Object.assign(new AppError(401, message), { headers: { "WWW-Authenticate": 'Bearer error="invalid_token"' } });
+const insufficientScope = (scope) => Object.assign(new AppError(403, "This access token needs the " + scope + " scope."), { headers: { "WWW-Authenticate": 'Bearer error="insufficient_scope", scope="' + scope + '"' } });
+const browserOnly = () => new AppError(403, "This feature needs a browser session on the Agora.Build website; access tokens are not accepted here.");
+// Reads that need no caller; a valid access token is allowed on them but changes nothing.
+const publicRoutes = new Set(["GET /api/people", "GET /api/activity", "GET /api/projects", "GET /api/services", "GET /api/billing/catalog", "GET /api/auth/config", "POST /api/people/search", "GET /api/themes"]);
+// The auth.agora.build client from the environment, or null (logged once, by setting name) when its settings are missing or invalid.
+export function idpFromEnv(env = process.env, log = (line) => console.log(line)) {
+  try {
+    return createIdp({ issuer: env.AUTH_ISSUER, clientId: env.PORTAL_CLIENT_ID || "portal", clientSecret: env.PORTAL_CLIENT_SECRET, siteUrl: env.SITE_URL, audience: env.PORTAL_API_AUDIENCE || undefined });
+  } catch (error) {
+    log("Sign-in through auth.agora.build is unavailable: " + (error instanceof TypeError ? error.message : "its settings are invalid") + ".");
+    return null;
+  }
 }
 
 export function createAppServer(directory = root, options = {}) {
@@ -61,11 +76,14 @@ export function createAppServer(directory = root, options = {}) {
   const persistence = !options.store && !options.storageFile && process.env.DATABASE_URL ? createPostgresPersistence(process.env.DATABASE_URL) : null;
   const store = options.store || createStore(resolve(dataDirectory, "people.json"), options.storageFile || resolve(root, ".data/community.json"), { persistence });
   const calls = options.calls || createAgoraCalls();
-  const auth = options.auth || createAuth();
+  const log = options.log || ((line) => console.log(line));
+  const idp = "idp" in options ? options.idp : idpFromEnv(process.env, log);
+  const siteUrl = options.siteUrl ?? process.env.SITE_URL ?? "";
+  const billingClients = new Set(String(options.billingClients ?? process.env.PORTAL_BILLING_CLIENTS ?? "").split(",").map((id) => id.trim()).filter(Boolean));
   const ledger = createLedger(store);
   const credits = options.credits || createCredits(undefined, { ledger });
   const billing = options.billing || createBilling(store);
-  const connections = options.connections || createConnections(store, auth);
+  const connections = options.connections || createConnections(store);
   const models = options.models || createModelClient(modelConfig());
   const activity = options.activity || createActivityFeed({ store, projectsFile: resolve(dataDirectory, "projects.json"), snapshotFile: resolve(dataDirectory, "activity.json") });
   const worlds = options.worlds || loadWorlds(directory);
@@ -106,19 +124,64 @@ export function createAppServer(directory = root, options = {}) {
     try {
       const requestUrl = new URL(request.url, "http://localhost");
       const path = requestUrl.pathname;
-      const bearer = request.headers.authorization?.startsWith("Bearer ") ? request.headers.authorization.slice(7) : "";
-      const cookieToken = session(request);
-      const token = cookieToken && await store.browserToken(cookieToken) ? cookieToken : "";
-      const secure = auth.config.origin.startsWith("https:") || Boolean(request.socket.encrypted);
+      const bearer = request.headers.authorization?.startsWith("Bearer ") ? request.headers.authorization.slice(7).trim() : "";
+      const cookieToken = cookieValue(request, "house_session");
+      const browserToken = cookieToken && await store.browserToken(cookieToken) ? cookieToken : "";
+      const secure = siteUrl.startsWith("https:") || Boolean(request.socket.encrypted);
       const sessionCookie = (value, maxAge = 30 * 86400) => "house_session=" + value + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=" + maxAge + (secure ? "; Secure" : "");
+      const transactionName = secure ? "__Host-portal_auth" : "portal_auth";
+      const transactionCookie = (value, maxAge = 600) => transactionName + "=" + value + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=" + maxAge + (secure ? "; Secure" : "");
       if (path === "/api/billing/webhook" && request.method === "POST") {
         let size = 0; const chunks = [];
         for await (const chunk of request) { size += chunk.length; if (size > 262144) throw new AppError(413, "Payment event too large."); chunks.push(chunk); }
         json(response, 200, await billing.apply(billing.verify(Buffer.concat(chunks), request.headers["stripe-signature"])));
         return;
       }
-      // The Portal is no longer an identity provider or an OAuth server; sign-in comes from auth.agora.build.
-      if (path.startsWith("/oauth/") || /^\/auth\/(google|github|apple|agora)(\/callback)?$/.test(path)) throw new AppError(410, "Sign-in has moved to auth.agora.build.");
+      if (path === "/auth/login" && request.method === "GET") {
+        limit("login:" + request.socket.remoteAddress, 20, 60000);
+        const returnTo = returnPath(requestUrl.searchParams.get("returnTo") || "/");
+        let started = null;
+        if (idp && await idp.available()) {
+          try { started = await idp.beginLogin({ returnTo }); }
+          catch (error) { if (!(error instanceof LoginError)) throw error; }
+        }
+        if (!started) { redirect(response, withSignin(returnTo, "unavailable")); return; }
+        await store.saveAuthTransaction(started.transaction);
+        redirect(response, started.url, [transactionCookie(started.transaction.id)]);
+        return;
+      }
+      if (path === "/auth/callback" && request.method === "GET") {
+        // The transaction is consumed whatever happens next, and its cookie is cleared on every path.
+        const transaction = await store.takeAuthTransaction(cookieValue(request, transactionName));
+        const clear = transactionCookie("", 0);
+        try {
+          if (!idp) throw new LoginError("unavailable");
+          const result = await idp.completeLogin(request.url, transaction);
+          const { token } = await store.signIn({ sub: result.sub, sid: result.sid, name: result.name, picture: result.picture ?? undefined, email: result.email, idToken: result.idToken, guestToken: cookieToken || undefined });
+          redirect(response, withSignin(transaction.returnTo, "success"), [clear, sessionCookie(token)]);
+        } catch (error) {
+          log("Sign-in failed: " + (error instanceof LoginError ? error.reason : "error") + ".");
+          redirect(response, withSignin(transaction?.returnTo || "/", "failed"), [clear]);
+        }
+        return;
+      }
+      if (path === "/auth/backchannel-logout") {
+        // A server-to-server POST from the IdP, so it is the one exemption from the same-origin checks below.
+        if (request.method !== "POST") { response.writeHead(405, { Allow: "POST" }).end("Method not allowed"); return; }
+        let status = 200;
+        try {
+          if (!idp) throw new TokenError(503, "unavailable");
+          const { sid, sub } = await idp.verifyLogoutToken((await formBody(request)).get("logout_token"));
+          if (sid) await store.endSessionsBySid(sid);
+          else await store.endSessionsBySub(sub);
+        } catch (error) {
+          if (!(error instanceof TokenError || error.status)) throw error;
+          status = error.status === 503 ? 503 : 400;
+          log("Back-channel logout refused: " + (error instanceof TokenError ? error.reason : "request") + ".");
+        }
+        response.writeHead(status, { "Cache-Control": "no-store" }).end();
+        return;
+      }
       if (path.startsWith("/api/")) {
         if (!["GET", "POST", "PUT", "DELETE"].includes(request.method)) throw new AppError(405, "This method is not supported.");
         if (request.method !== "GET" && request.headers.origin) {
@@ -127,57 +190,89 @@ export function createAppServer(directory = root, options = {}) {
           if (host !== request.headers.host) throw new AppError(403, "Use this feature from the house website.");
         }
         if (request.method !== "GET" && request.headers["sec-fetch-site"] === "cross-site") throw new AppError(403, "Use this feature from the Agora.Build website.");
-        // The Portal's own app tokens are gone; auth.agora.build access tokens are accepted once its routes are wired.
-        if (bearer) throw new AppError(401, "This access token is not accepted.");
-        if (path.startsWith("/api/identity/") || ["/api/auth/pending-link", "/api/auth/logout-all"].includes(path)) throw new AppError(410, "Logins and devices are managed on auth.agora.build.");
+        // An access token from auth.agora.build; a request that carries one never falls back to the browser cookie.
+        let caller = null;
+        if (request.headers.authorization?.startsWith("Bearer ")) {
+          if (!idp) throw new AppError(503, "Access tokens can't be checked right now. Try again shortly.");
+          try { caller = await idp.verifyAccessToken(bearer); }
+          catch (error) {
+            if (!(error instanceof TokenError)) throw error;
+            if (error.status === 503) throw new AppError(503, "Access tokens can't be checked right now. Try again shortly.");
+            throw invalidToken();
+          }
+          caller.account = await store.ensureAccount(caller.sub);
+        }
+        const token = caller ? "" : browserToken;
+        const route = request.method + " " + path;
+        if (caller && !publicRoutes.has(route) && !["GET /api/me", "GET /api/credits/balance", "GET /api/credits/statement", "POST /api/services/chat", "POST /api/services/tts", "GET /api/connections", "GET /api/connections/agora/projects", "POST /api/connections/agora/certificate", "DELETE /api/connections/agora", "POST /api/platform/credits/reserve", "POST /api/platform/credits/settle"].includes(route)) throw browserOnly();
+        const scoped = (scope) => { if (!caller.scopes.includes(scope)) throw insufficientScope(scope); return caller.sub; };
         const member = async () => {
           const person = await store.me(token);
           if (!person) throw new AppError(401, "Join the house to use this feature.");
           return person;
         };
-        const serviceUser = async () => {
+        // A browser account session; guests are refused.
+        const portalUser = async (message = "Sign in to manage your Agora.Build account.") => {
           const current = await store.session(token);
-          if (!current.account && !current.profile) throw new AppError(401, "Sign in to use builder services.");
-          return current.account?.id || null;
-        };
-        const portalUser = async () => {
-          const current = await store.session(token);
-          if (!current.account) throw new AppError(401, "Sign in to manage your Agora.Build account.");
+          if (!current.account) throw new AppError(401, message);
           return current.account.id;
         };
+        // A browser account session, or a bearer token with the scope.
+        const accountUser = (scope, message) => caller ? scoped(scope) : portalUser(message);
+        const browserUser = (message) => { if (caller) throw browserOnly(); return portalUser(message); };
 
         if (path === "/api/people" && request.method === "GET") json(response, 200, { people: await store.people(), smartSearch: models.config.language.ready });
         else if (path === "/api/activity" && request.method === "GET") json(response, 200, await activity.get());
-        else if (path === "/api/me" && request.method === "GET") json(response, 200, await store.session(token));
-        else if (path === "/api/auth/providers" && request.method === "GET") json(response, 200, { providers: auth.providers() });
+        else if (path === "/api/me" && request.method === "GET") {
+          // The email is shown only to the browser session; bearer callers get the account without it.
+          if (caller) { const { email, ...account } = caller.account; json(response, 200, { profile: await store.accountProfile(caller.sub), account }); }
+          else json(response, 200, await store.session(token));
+        }
+        else if (path === "/api/auth/config" && request.method === "GET") json(response, 200, { issuer: idp?.config.issuer || null, accountUrl: idp?.config.accountUrl || null });
         else if (path === "/api/billing/catalog" && request.method === "GET") json(response, 200, await billing.catalog());
-        else if (path === "/api/billing/account" && request.method === "GET") json(response, 200, await billing.account(await portalUser()));
+        else if (path === "/api/billing/account" && request.method === "GET") json(response, 200, await billing.account(await browserUser()));
         else if (path === "/api/billing/checkout" && request.method === "POST") {
-          const userId = await portalUser(); limit("checkout:" + userId, 10, 60000);
+          const userId = await browserUser(); limit("checkout:" + userId, 10, 60000);
           const input = await body(request);
           json(response, 200, await billing.checkout(userId, input.productId, request.headers["idempotency-key"]));
         }
-        else if (path === "/api/billing/manage" && request.method === "POST") json(response, 200, await billing.manage(await portalUser()));
+        else if (path === "/api/billing/manage" && request.method === "POST") json(response, 200, await billing.manage(await browserUser()));
         else if (path === "/api/connections" && request.method === "GET") {
-          json(response, 200, await connections.status(await portalUser()));
+          json(response, 200, await connections.status(await accountUser("agora:projects")));
         }
         else if (path === "/api/connections/agora/projects" && request.method === "GET") {
-          json(response, 200, await connections.projects(await portalUser()));
+          json(response, 200, await connections.projects(await accountUser("agora:projects")));
         }
         else if (path === "/api/connections/agora/certificate" && request.method === "POST") {
-          const userId = await portalUser(); limit("certificates:" + userId, 20, 60000);
+          const userId = await accountUser("agora:certificates"); limit("certificates:" + userId, 20, 60000);
           json(response, 200, await connections.certificate(userId, (await body(request)).projectId));
         }
-        else if (path === "/api/connections/agora" && request.method === "DELETE") { await connections.disconnect(await portalUser()); json(response, 200, { disconnected: true }); }
+        else if (path === "/api/connections/agora" && request.method === "DELETE") { await connections.disconnect(await accountUser("agora:projects")); json(response, 200, { disconnected: true }); }
         else if (["/api/credits/balance", "/api/credits/statement"].includes(path) && request.method === "GET") {
-          const userId = await serviceUser();
-          if (!userId) throw new AppError(401, "Connect a login to use shared credits.");
+          const userId = await accountUser("credits", "Sign in to use shared credits.");
           json(response, 200, path.endsWith("balance") ? await credits.balance(userId) : await credits.statement(userId, requestUrl.searchParams.get("cursor")));
         }
-        else if (["/api/platform/credits/reserve", "/api/platform/credits/settle"].includes(path) && request.method === "POST") throw new AppError(401, "Platform credit calls need an auth.agora.build access token.");
+        else if (["/api/platform/credits/reserve", "/api/platform/credits/settle"].includes(path) && request.method === "POST") {
+          // Only an allowlisted billing client's access token, with the credits scope, can hold or settle credits.
+          if (!caller) throw invalidToken("Platform credit calls need an auth.agora.build access token.");
+          const userId = scoped("credits");
+          if (!billingClients.has(caller.clientId)) throw new AppError(403, "This application is not allowed to charge credits.");
+          const input = await body(request);
+          if (typeof input.service !== "string" || !/^[a-z][a-z0-9-]{1,40}$/.test(input.service)) throw new AppError(422, "Name the service in lower-case letters, digits and dashes.");
+          const name = caller.clientId + ":" + input.service;
+          if (path.endsWith("reserve")) {
+            if (!/^[A-Za-z0-9:_-]{16,120}$/.test(input.idempotencyKey || "")) throw new AppError(422, "Provide a valid idempotency key.");
+            json(response, 200, await credits.reserve(userId, name, input.credits, input.idempotencyKey));
+          } else {
+            if (!["capture", "release"].includes(input.outcome) || !/^[a-f0-9-]{36}$/.test(input.reservationId || "")) throw new AppError(422, "Invalid settlement.");
+            json(response, 200, await credits.settle(userId, input.reservationId, input.outcome, name));
+          }
+        }
         else if (path === "/api/auth/logout" && request.method === "POST") {
-          await store.endSession(token);
-          json(response, 200, { signedOut: true }, { "Set-Cookie": sessionCookie("", 0) });
+          // A guest has no IdP session, so only an account gets the IdP's end-session URL to follow.
+          const signedIn = (await store.actor(token)).kind === "account";
+          const { idToken } = await store.endSession(token);
+          json(response, 200, { signedOut: true, endSessionUrl: signedIn && idp ? idp.endSessionUrl({ idToken }) : null }, { "Set-Cookie": sessionCookie("", 0) });
         }
         else if (path === "/api/profile" && request.method === "POST") {
           if (await store.me(token)) throw new AppError(409, "You already have a profile. Edit it instead.");
@@ -206,12 +301,11 @@ export function createAppServer(directory = root, options = {}) {
         } else if (["/api/services/chat", "/api/services/tts"].includes(path) && request.method === "POST") {
           const speech = path.endsWith("tts");
           if (!(speech ? models.config.speech.ready : models.config.language.ready)) throw new AppError(503, "This service is not available yet. A provider connection is needed.");
-          const userId = await serviceUser();
+          const userId = await accountUser("credits", "Sign in to use builder services.");
           const data = await body(request);
           const input = text(data, speech ? "text" : "message", speech ? 1200 : 3000);
           allowance(request);
           const service = speech ? "tts" : "chat";
-          if (credits.config.costs[service] && !userId) throw new AppError(401, "Connect a login to pay with shared credits.");
           const run = (action) => credits.run(userId, service, request.headers["idempotency-key"], action);
           if (speech) {
             const audio = await run(() => models.speak(input, typeof data.voice === "string" ? data.voice : "coral"));
@@ -241,7 +335,7 @@ export function createAppServer(directory = root, options = {}) {
       if (meeting) { response.writeHead(308, { Location: "/stoa/s/" + meeting[1] + requestUrl.search }).end(); return; }
       if (path === "/meetings.html") { const room = requestUrl.searchParams.get("room"); response.writeHead(308, { Location: /^[a-f0-9-]{36}$/.test(room || "") ? "/stoa/s/" + room : "/stoa/" }).end(); return; }
       const stoa = /^\/stoa(?:\/|\/room\/([a-z0-9-]{2,40})|\/s\/([a-f0-9-]{36}))$/.exec(path);
-      if (stoa && ((stoa[1] && !worlds.plaza.map.lots.some((lot) => lot.slug === stoa[1])) || (stoa[2] && !(await spaces.visible(token, stoa[2], requestUrl.searchParams.get("invite")))))) { response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("This space was not found."); return; }
+      if (stoa && ((stoa[1] && !worlds.plaza.map.lots.some((lot) => lot.slug === stoa[1])) || (stoa[2] && !(await spaces.visible(browserToken, stoa[2], requestUrl.searchParams.get("invite")))))) { response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("This space was not found."); return; }
       const filename = stoa ? "stoa.html" : path === "/" ? "index.html" : path.slice(1);
       if (!publicFiles.has(filename)) { response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found"); return; }
       const file = resolve(directory, filename);
@@ -250,7 +344,7 @@ export function createAppServer(directory = root, options = {}) {
       response.end(request.method === "HEAD" ? undefined : content);
     } catch (error) {
       if (response.headersSent) { response.end(); return; }
-      json(response, error.code === "ENOENT" ? 404 : error.status || 500, { error: error.code === "ENOENT" ? "This page was not found." : error.status ? error.message : "The house could not complete this request. Please try again.", ...(error.status && error.details ? error.details : {}) });
+      json(response, error.code === "ENOENT" ? 404 : error.status || 500, { error: error.code === "ENOENT" ? "This page was not found." : error.status ? error.message : "The house could not complete this request. Please try again.", ...(error.status && error.details ? error.details : {}) }, error.status && error.headers ? error.headers : {});
     }
   });
 

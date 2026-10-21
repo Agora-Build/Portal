@@ -3,13 +3,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { createStore } from "../scripts/store.mjs";
-import { createIdentity, identityConfig } from "../scripts/identity.mjs";
 import { createLedger } from "../scripts/ledger.mjs";
 import { createCredits, creditsConfig } from "../scripts/credits.mjs";
 import { createConnections, connectionsConfig } from "../scripts/connections.mjs";
-import { authConfig, createAuth } from "../scripts/auth.mjs";
 import { effectivePlan, entitlements } from "../scripts/plans.mjs";
 
 let temp;
@@ -19,27 +17,6 @@ const newStore = (options) => createStore(new URL("../data/people.json", import.
 const subjects = { "stable-builder": "acct_" + "1".repeat(26), other: "acct_" + "2".repeat(26), "without-agora": "acct_" + "3".repeat(26), "other-agora": "acct_" + "4".repeat(26) };
 // Signs in an auth.agora.build subject; the result keeps the old { token, account: { id } } shape these tests read.
 const signIn = async (store, subject = "stable-builder") => ({ ...(await store.signIn({ sub: subjects[subject], sid: "sid-" + subject, name: "Builder", idToken: "id-token" })), account: { id: subjects[subject] } });
-const clientSecret = "test-client-credential-" + "x".repeat(32);
-const registry = () => ({ clients: [
-  { id: "vox", name: "Vox", secret: clientSecret, redirects: ["https://vox.agora.build/callback"], scopes: ["identity", "credits", "services"], identityLookup: true, rates: { evaluation: 4 } },
-  { id: "other", name: "Other app", secret: clientSecret, redirects: ["https://other.agora.build/callback"], scopes: ["identity", "credits"], rates: { analysis: 2 } },
-  { id: "astation", name: "Astation", loopback: true, scopes: ["identity", "credits", "services", "agora:projects"] }
-] });
-function parameters(extra = {}) {
-  const verifier = randomBytes(32).toString("base64url");
-  return { verifier, params: new URLSearchParams({ client_id: "vox", redirect_uri: "https://vox.agora.build/callback", response_type: "code", state: randomBytes(24).toString("base64url"), code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256", scope: "identity credits services", ...extra }) };
-}
-test("registered redirects, strong credentials, native loopbacks and scopes prevent an arbitrary app from requesting access", () => {
-  const store = newStore(), hub = createIdentity(store, registry());
-  for (const change of [{ client_id: "unregistered" }, { redirect_uri: "https://vox.agora.build.evil.example/callback" }, { redirect_uri: "https://vox.agora.build/callback/extra" }, { code_challenge_method: "plain" }, { state: "short" }, { scope: "identity agora:certificates" }]) assert.throws(() => hub.authorization(parameters(change).params), { status: 400 });
-  const native = parameters({ client_id: "astation", redirect_uri: "http://127.0.0.1:45123/oauth/callback", scope: "identity credits" });
-  assert.equal(hub.authorization(native.params).clientId, "astation");
-  for (const redirect_uri of ["http://localhost:45123/oauth/callback", "http://127.0.0.1:45123/other", "http://127.0.0.1:45123/oauth/callback?extra=1", "https://127.0.0.1:45123/oauth/callback"]) assert.throws(() => hub.authorization(parameters({ client_id: "astation", redirect_uri }).params));
-  const duplicate = parameters().params; duplicate.append("state", "another");
-  assert.throws(() => hub.authorization(duplicate), { status: 400 });
-  assert.throws(() => identityConfig({ VOX_IDENTITY_CLIENT_SECRET: "short", VOX_IDENTITY_REDIRECT_URI: "https://vox.agora.build/callback" }));
-});
-
 test("credit reservations serialize competing spends, preserve double-entry balance and reject parameter changes or another owner", async () => {
   const store = newStore(), ledger = createLedger(store), login = await signIn(store), other = await signIn(store, "other");
   await ledger.deposit(login.account.id, 10, "Test purchase", "purchase-1");
@@ -90,16 +67,16 @@ test("Vox-compatible entitlements depend on verified subscription state and peri
   assert.equal(entitlements("fellow").publishMainline, true);
 });
 
-test("Agora OAuth refuses changing loginId and email as identities; verified access binds encrypted owner-only Console resources", async () => {
-  const config = authConfig({ SITE_URL: "https://agora.build", AGORA_OAUTH_CLIENT_ID: "portal-test", AGORA_OAUTH_USERINFO_URL: "https://sso.agora.io/userinfo", AGORA_OAUTH_BASE_URL: "https://sso.agora.io" });
-  const bad = createAuth(config, { request: async () => Response.json({ loginId: "changes-each-time", email: "builder@example.com" }) });
-  await assert.rejects(bad.agoraIdentity("upstream-token"), { status: 401 });
-  const auth = createAuth(config, { request: async () => Response.json({ sub: "permanent-agora-user", name: "Agora builder" }) });
+test("Agora Console connections are encrypted, owner-only, and renewed with the AGORA_OAUTH_* settings", async () => {
   const store = newStore(), login = await signIn(store);
-  const connectionConfig = connectionsConfig({ AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64") });
+  const connectionConfig = connectionsConfig({ AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64"), AGORA_OAUTH_CLIENT_ID: "portal-test", AGORA_OAUTH_CLIENT_SECRET: "test-only-agora-client-value", AGORA_OAUTH_BASE_URL: "https://sso.agora.io" });
   let refreshes = 0;
-  const resources = createConnections(store, auth, connectionConfig, { request: async (url, options) => {
-    if (url.endsWith("/token")) { refreshes++; return Response.json({ access_token: "renewed-upstream-token", refresh_token: "rotated-upstream-refresh", expires_in: 7200 }); }
+  const resources = createConnections(store, connectionConfig, { request: async (url, options) => {
+    if (url.endsWith("/token")) {
+      refreshes++;
+      assert.equal(url, "https://sso.agora.io/api/v0/oauth/token");
+      assert.deepEqual([options.body.get("grant_type"), options.body.get("client_id"), options.body.get("refresh_token")], ["refresh_token", "portal-test", "upstream-refresh"]);
+      return Response.json({ access_token: "renewed-upstream-token", refresh_token: "rotated-upstream-refresh", expires_in: 7200 }); }
     assert.match(options.headers.Authorization, /upstream-token/);
     return Response.json({ items: [{ projectId: "project-1", name: "Private project", appId: "agora-app-id", signKey: "private-test-certificate", status: "active" }] });
   } });
@@ -124,36 +101,17 @@ test("Agora OAuth refuses changing loginId and email as identities; verified acc
   await assert.rejects(resources.projects(login.account.id), { status: 403 });
 });
 
-test("the existing Agora OAuth code flow validates PKCE/state and returns a separate Console connection for encryption", async () => {
-  const config = authConfig({ SITE_URL: "https://agora.build", AGORA_OAUTH_CLIENT_ID: "portal-test", AGORA_OAUTH_USERINFO_URL: "https://sso.agora.io/userinfo", AGORA_OAUTH_BASE_URL: "https://sso.agora.io" });
-  let challenge;
-  const auth = createAuth(config, { request: async (url, options) => {
-    if (new URL(url).pathname.endsWith("/token")) {
-      const fields = new URLSearchParams(options.body);
-      assert.equal(fields.get("client_id"), "portal-test");
-      assert.equal(fields.get("grant_type"), "authorization_code");
-      assert.equal(createHash("sha256").update(fields.get("code_verifier")).digest("base64url"), challenge);
-      return Response.json({ token_type: "Bearer", access_token: "verified-console-access", refresh_token: "verified-console-refresh", expires_in: 7200 });
-    }
-    assert.equal(options.headers.Authorization, "Bearer verified-console-access");
-    return Response.json({ sub: "agora-permanent-subject", name: "Agora builder" });
-  } });
-  const started = await auth.begin("agora", { returnTo: "/account.html" });
-  const url = new URL(started.url); challenge = url.searchParams.get("code_challenge");
-  assert.equal(url.pathname, "/api/v0/oauth/authorize");
-  assert.equal(url.searchParams.get("scope"), "basic_info,console");
-  assert.equal(url.searchParams.has("nonce"), false);
-  const result = await auth.complete("agora", new URLSearchParams({ code: "verified-code", state: started.state }), started.state);
-  assert.equal(result.identity.subject, "agora-permanent-subject");
-  assert.equal(result.returnTo, "/account.html");
-  assert.equal(result.connection.accessToken, "verified-console-access");
-  assert.equal(result.connection.refreshToken, "verified-console-refresh");
-});
-
 test("the Agora Console key is read under its new name, with the old name as a fallback", () => {
   const key = randomBytes(32).toString("base64"), other = randomBytes(32).toString("base64");
   assert.equal(connectionsConfig({ AGORA_CONSOLE_ENCRYPTION_KEY: key }).key.toString("base64"), key);
   assert.equal(connectionsConfig({ CONNECTION_ENCRYPTION_KEY: key }).key.toString("base64"), key);
   assert.equal(connectionsConfig({ AGORA_CONSOLE_ENCRYPTION_KEY: key, CONNECTION_ENCRYPTION_KEY: other }).key.toString("base64"), key, "the new name wins");
   assert.equal(connectionsConfig({}).ready, false);
+});
+
+test("without the AGORA_OAUTH_* settings an expired Console connection asks to reconnect", async () => {
+  const store = newStore(), login = await signIn(store);
+  const resources = createConnections(store, connectionsConfig({ AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64") }), { request: async () => { throw new Error("no request expected"); } });
+  await resources.save(login.account.id, { accessToken: "upstream-token", refreshToken: "upstream-refresh", expiresAt: Date.now() - 1 });
+  await assert.rejects(resources.projects(login.account.id), { status: 401 });
 });

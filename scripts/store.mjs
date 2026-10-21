@@ -215,7 +215,9 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
         return { id, ...tx };
       });
     },
-    async signIn({ sub, sid = null, name = null, picture, email = null, idToken = null } = {}) {
+    // guestToken is the browser's previous house_session token: a guest profile there is adopted by an account that has
+    // none, and a previous Portal session there is replaced.
+    async signIn({ sub, sid = null, name = null, picture, email = null, idToken = null, guestToken } = {}) {
       validSub(sub);
       const token = randomBytes(32).toString("base64url");
       return update((state) => {
@@ -226,9 +228,26 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
         // The IdP client passes an email only when it is verified.
         account.email = typeof email === "string" && email ? email.toLowerCase() : null;
         account.updatedAt = new Date(now()).toISOString();
+        if (typeof guestToken === "string" && guestToken) {
+          const previous = hash(guestToken);
+          state.sessions = state.sessions.filter((entry) => entry.hash !== previous);
+          const guest = state.people.find((person) => person.sessionHash === previous && !person.accountId);
+          if (guest && !state.people.some((person) => person.id === account.profileId)) {
+            guest.accountId = account.id;
+            delete guest.sessionHash;
+            guest.avatar ||= account.avatar;
+            account.profileId = guest.id;
+          }
+        }
         addSession(state, account, token, { sid: typeof sid === "string" && sid ? sid : null, idToken: typeof idToken === "string" && idToken ? idToken : null });
         return { token };
       });
+    },
+    async accountProfile(sub) {
+      const state = await read();
+      const account = state.accounts.find((entry) => entry.id === sub);
+      const person = account?.profileId && state.people.find((entry) => entry.id === account.profileId);
+      return person ? publicProfile(person) : null;
     },
     // The first access token for a subject gives it a minimal account, so app users get a wallet.
     async ensureAccount(sub) {
