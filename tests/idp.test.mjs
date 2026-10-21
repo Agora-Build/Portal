@@ -436,3 +436,22 @@ test("back-channel logout: forged, misaddressed, eventless, nonce-bearing and ot
     }, name);
   }
 });
+test("warm-up fetches discovery and the JWKS, so the first logout token is verified without network calls", async () => {
+  const { fake, idp } = await setup();
+  assert.equal(await idp.warm(), null, "a successful warm-up reports no failure");
+  assert.deepEqual([fake.counts.discovery, fake.counts.jwks], [1, 1]);
+  const attempts = fake.counts.attempts;
+  const logout = await idp.verifyLogoutToken(await fake.issueLogoutToken());
+  assert.match(logout.sub, /^acct_/);
+  assert.equal(fake.counts.attempts, attempts, "no discovery or JWKS request while verifying");
+});
+test("a failed warm-up reports its reason only", async () => {
+  const { fake, idp } = await setup();
+  fake.setDown(true);
+  assert.equal(await idp.warm(), "discovery");
+  fake.setDown(false);
+  const { fake: other, idp: keyless } = await setup();
+  await keyless.available();
+  other.setDown(true);
+  assert.equal(await keyless.warm(), "jwks");
+});

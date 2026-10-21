@@ -84,6 +84,9 @@ export function createAppServer(directory = root, options = {}) {
   const calls = options.calls || createAgoraCalls();
   const log = options.log || ((line) => console.log(line));
   const idp = "idp" in options ? options.idp : idpFromEnv(process.env, log);
+  // Discovery and the JWKS are fetched now, without blocking startup, so a back-channel logout (one POST with a 2.5 s
+  // timeout, never retried) doesn't wait for a cold fetch. Failures are logged by reason only.
+  idp?.warm?.().then((reason) => { if (reason) log("auth.agora.build warm-up failed: " + reason + "."); }, () => log("auth.agora.build warm-up failed: error."));
   const siteUrl = options.siteUrl ?? process.env.SITE_URL ?? "";
   // Platform billing clients and their server-side prices; null turns platform billing off.
   const billingClients = "billingClients" in options ? (options.billingClients && parseBillingClients(options.billingClients)) : loadBillingClients(process.env.PORTAL_BILLING_FILE, log);

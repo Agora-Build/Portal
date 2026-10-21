@@ -519,3 +519,21 @@ test("a guest profile the account can't adopt is removed with its room and radar
   assert.equal((state.activity || []).some((entry) => entry.actorId === abandoned.id), false);
   assert.equal(state.accounts.find((account) => account.id === own.account.id).profileId, own.profile.id);
 });
+test("startup warms discovery and the JWKS, so the first back-channel logout makes no network call", async (t) => {
+  const app = await start(t);
+  for (let tries = 0; app.fake.counts.jwks < 1 && tries < 100; tries += 1) await new Promise((done) => setTimeout(done, 10));
+  assert.deepEqual([app.fake.counts.discovery, app.fake.counts.jwks], [1, 1], "warmed at startup without a request");
+  const attempts = app.fake.counts.attempts;
+  const response = await fetch(app.base + "/auth/backchannel-logout", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ logout_token: await app.fake.issueLogoutToken() }) });
+  assert.equal(response.status, 200);
+  assert.equal(app.fake.counts.attempts, attempts, "no discovery or JWKS fetch on the first logout");
+});
+test("a failed startup warm-up is logged by reason and doesn't stop the server", async (t) => {
+  const fake = await createFakeIdp({ issuer, clientId: "portal", clientSecret });
+  fake.setDown(true);
+  const app = await start(t, { fake });
+  const warmLogs = () => app.logs.filter((line) => line.startsWith("auth.agora.build"));
+  for (let tries = 0; !warmLogs().length && tries < 100; tries += 1) await new Promise((done) => setTimeout(done, 10));
+  assert.deepEqual(warmLogs(), ["auth.agora.build warm-up failed: discovery."]);
+  assert.equal((await call(app.base, "/api/auth/config")).status, 200);
+});

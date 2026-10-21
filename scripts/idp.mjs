@@ -153,7 +153,7 @@ export function createIdp({ issuer, clientId = "portal", clientSecret, siteUrl, 
       try { return await snapshot.keys(header, token); }
       catch (error) { if (error instanceof errors.JWKSNoMatchingKey) throw new KeysUnavailable(); throw error; }
     };
-    return async (header, token) => {
+    const keys = async (header, token) => {
       if (failedAt !== undefined && now() - failedAt < KEY_BACKOFF) return cached(header, token);
       const before = failures;
       try {
@@ -163,6 +163,9 @@ export function createIdp({ issuer, clientId = "portal", clientSecret, siteUrl, 
         return cached(header, token);
       }
     };
+    // Fetches the key set now (used at startup), so the first token doesn't wait for a cold JWKS fetch.
+    keys.warm = async () => { await remote.reload(); if (fetchedAt === undefined) throw new Error("no keys"); };
+    return keys;
   }
 
   // Fetches the discovery document (at most 2 s). On success the cached metadata is refreshed if it changed; on
@@ -208,6 +211,13 @@ export function createIdp({ issuer, clientId = "portal", clientSecret, siteUrl, 
 
   return {
     config,
+    // Discovery and the JWKS, fetched at startup without blocking it, so the first back-channel logout or access
+    // token doesn't wait for a cold 10 s discovery or 5 s JWKS fetch. Resolves to null, or a failure reason.
+    async warm() {
+      const state = await discover();
+      if (!state) return "discovery";
+      try { await state.keys.warm(); return null; } catch { return "jwks"; }
+    },
     // Whether sign-in can start. Once discovery has succeeded, the IdP is probed again only when it hasn't answered
     // for 30 s, so a healthy IdP costs nothing here and a stopped one makes sign-in report itself unavailable.
     async available() {

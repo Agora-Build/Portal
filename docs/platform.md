@@ -141,7 +141,15 @@ server-to-server POST. Answers carry `Cache-Control: no-store`:
 | --- | --- |
 | 200 | Verified and applied |
 | 400 | The token is missing or invalid |
-| 503 | The IdP's keys can't be fetched (the IdP is unreachable, or sign-in isn't configured), so the token can't be checked yet; the IdP retries a non-2xx answer, so the logout is not silently lost |
+| 503 | The IdP's keys can't be fetched (the IdP is unreachable, or sign-in isn't configured), so the token can't be checked yet |
+
+Auth sends each back-channel logout once, as one POST with a 2.5 second timeout,
+and never retries. A missed logout (any non-2xx answer, or a timeout) leaves the
+Portal session in place until the person signs out of the Portal or the session
+reaches its 30-day expiry. To make misses rarer, the Portal fetches the IdP's
+discovery document and JWKS at startup, without blocking it (a failure is logged
+by reason only), so the first logout token doesn't wait for a cold discovery
+(10 seconds) or JWKS fetch (5 seconds).
 
 The IdP must be able to reach the back-channel URI. Locally it posts across the
 Docker network, so the Portal container needs a host name the IdP accepts for

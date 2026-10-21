@@ -77,7 +77,10 @@ The ID token is kept with the session for `id_token_hint`, and deleted with it.
 - Deletes Portal sessions matching `sid`, or every session of `sub` when no `sid` is given.
 - Answers 200 with `Cache-Control: no-store`, or 400 if the token is invalid.
 - *(Amended.)* Answers 503 when the IdP's keys can't be fetched (or sign-in isn't configured), so the token can't be
-  checked yet: the IdP retries a non-2xx answer, so a logout isn't lost while the keys are briefly unreachable.
+  checked yet. Auth sends one POST with a 2.5 s timeout and never retries, so a missed back-channel logout leaves the
+  Portal session in place until a local sign-out or its 30-day expiry; the 503 is kept because it is harmless and
+  honest. To make misses rarer, the Portal warms discovery and the JWKS at startup (without blocking it; failures
+  are logged by reason only), so the first verification doesn't wait for a cold 10 s discovery or 5 s JWKS fetch.
 - It is exempt from the same-origin check, because it is a server-to-server POST.
 
 **Access tokens.** `verifyAccessToken(token)` uses `jose.createRemoteJWKSet(jwks_uri)`, which caches keys and
