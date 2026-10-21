@@ -37,13 +37,17 @@ function v1() {
       { id: "member:guest", name: "Guest", bio: "Guest bio here.", intent: "Guest intent here.", skills: ["Rust"], contact: "https://example.com/guest", source: "community", avatar: "", username: "", projects: [], joinedAt: at, sessionHash: hash(guestToken) },
       { id: "member:linked", name: "Linked", bio: "Linked bio here.", intent: "Linked intent here.", skills: ["Go"], contact: "https://example.com/linked", source: "community", avatar: "", username: "", projects: [], joinedAt: at, accountId: OLD }
     ],
-    rooms: [{ id: "22222222-2222-4222-8222-222222222222", title: "A room", intent: "Talk", ownerId: "member:guest", participants: ["member:guest"], createdAt: at }],
-    radar: { "member:guest": { items: [{ title: "A lead" }], intent: "Guest intent here.", checkedAt: at } },
+    rooms: [
+      { id: "22222222-2222-4222-8222-222222222222", title: "A room", intent: "Talk", ownerId: "member:guest", participants: ["member:guest", "member:linked"], createdAt: at },
+      { id: "33333333-3333-4333-8333-333333333333", title: "Linked room", intent: "Gone", ownerId: "member:linked", participants: ["member:linked", "member:guest"], createdAt: at }
+    ],
+    radar: { "member:guest": { items: [{ title: "A lead" }], intent: "Guest intent here.", checkedAt: at }, "member:linked": { items: [], intent: "Linked intent here.", checkedAt: at } },
     spaces: [
       { id: "plaza", type: "stoa", worldId: "plaza", ownerId: null, members: [], hostId: OLD, title: "The plaza" },
       { id: "space-old", type: "stoa", worldId: "room", ownerId: OLD, members: [OLD, "member:guest"], hostId: OLD, title: "Old's space" },
       { id: "space-guest", type: "stoa", worldId: "room", ownerId: "member:guest", members: ["member:guest", OLD, KEPT], hostId: null, title: "Guest's space" },
-      { id: "space-kept", type: "stoa", worldId: "room", ownerId: KEPT, members: [KEPT], hostId: null, title: "Kept's space" }
+      { id: "space-kept", type: "stoa", worldId: "room", ownerId: KEPT, members: [KEPT, "member:linked"], hostId: null, title: "Kept's space" },
+      { id: "space-linked", type: "stoa", worldId: "room", ownerId: "member:linked", members: ["member:linked"], hostId: null, title: "Linked's space" }
     ],
     spaceLeases: [
       { spaceId: "space-old", actorId: OLD, ids: [OLD, "member:linked"], name: "Old", enteredAt: 0, expiresAt: Date.now() + 60000 },
@@ -70,7 +74,11 @@ function v1() {
     },
     orders: [{ id: "o1", userId: OLD, status: "paid", credits: 10 }, { id: "o2", userId: KEPT, status: "pending", credits: 5 }],
     billingEvents: { evt_1: "checkout.session.completed" },
-    activity: [{ id: "house:1", source: "community", actorId: "member:guest", actorName: "Guest", kind: "member", action: "took a seat in", subject: "the foundry", createdAt: at }]
+    activity: [
+      { id: "house:1", source: "community", actorId: "member:guest", actorName: "Guest", kind: "member", action: "took a seat in", subject: "the foundry", createdAt: at },
+      { id: "house:2", source: "community", actorId: "member:linked", actorName: "Linked", kind: "member", action: "took a seat in", subject: "the foundry", createdAt: at },
+      { id: "house:3", source: "community", actorId: "member:guest", actorName: "Guest", kind: "room-join", action: "joined the roster for", subject: "Linked room", roomId: "33333333-3333-4333-8333-333333333333", createdAt: at }
+    ]
   };
 }
 
@@ -81,13 +89,13 @@ function checkMigrated(state, fixture) {
   assert.equal("sessionEpoch" in state.accounts[0], false);
   assert.deepEqual(state.sessions, []);
   for (const key of ["authorizationCodes", "grants", "pendingLinks"]) assert.equal(key in state, false, key + " is gone");
-  assert.equal(state.people.length, 2, "people are kept");
-  assert.equal(state.people.find((person) => person.id === "member:guest").sessionHash, hash(guestToken));
-  assert.equal("accountId" in state.people.find((person) => person.id === "member:linked"), false);
-  assert.deepEqual(state.rooms, fixture.rooms);
-  assert.deepEqual(state.radar, fixture.radar);
-  assert.deepEqual(state.activity, fixture.activity);
+  assert.deepEqual(state.people.map((person) => person.id), ["member:guest"], "guest profiles stay; a removed account's profile goes");
+  assert.equal(state.people[0].sessionHash, hash(guestToken));
+  assert.deepEqual(state.rooms, [{ ...fixture.rooms[0], participants: ["member:guest"] }], "the profile's rooms and room places go");
+  assert.deepEqual(state.radar, { "member:guest": fixture.radar["member:guest"] });
+  assert.deepEqual(state.activity, [fixture.activity[0]], "its activity and activity about its rooms go");
   assert.deepEqual(state.spaces.map((space) => space.id), ["plaza", "space-guest", "space-kept"]);
+  assert.deepEqual(state.spaces.find((space) => space.id === "space-kept").members, [KEPT]);
   assert.deepEqual(state.spaces.find((space) => space.id === "space-guest").members, ["member:guest", KEPT]);
   assert.equal(state.spaces.find((space) => space.id === "plaza").hostId, null);
   assert.deepEqual(state.spaceLeases.map((lease) => lease.spaceId), ["space-guest"]);
@@ -105,6 +113,7 @@ function checkMigrated(state, fixture) {
   assert.deepEqual(state.orders.map((order) => order.id), ["o2"]);
   assert.deepEqual(state.billingEvents, fixture.billingEvents);
   assert.ok(!JSON.stringify(state).includes(OLD), "nothing refers to a removed account");
+  assert.ok(!JSON.stringify(state).includes("member:linked"), "nothing refers to its profile");
 }
 
 test("a version 1 state file starts empty: old accounts and their data go, guests, rooms and the radar stay", async () => {
@@ -116,8 +125,9 @@ test("a version 1 state file starts empty: old accounts and their data go, guest
   assert.equal(lines.length, 1, "the migration logs once");
   assert.match(lines[0], /1 account/);
   assert.match(lines[0], /2 sessions/);
-  assert.match(lines[0], /1 space\b/);
-  for (const secret of [OLD, "member:", "old@example.com", hash(guestToken), "cus_old"]) assert.ok(!lines[0].includes(secret), "the log has counts only");
+  assert.match(lines[0], /1 account profile\b/);
+  assert.match(lines[0], /2 spaces/, "the account's space and its profile's space");
+  for (const secret of [OLD, "member:", "Linked", "old@example.com", hash(guestToken), "cus_old"]) assert.ok(!lines[0].includes(secret), "the log has counts only");
   assert.equal((await store.me(guestToken)).id, "member:guest", "a guest's browser session keeps working");
   assert.equal(await store.browserToken("kept-account-session"), false, "old account sessions end");
 
@@ -172,7 +182,10 @@ test("signIn keys the account by sub, refreshes its name, picture and email, and
   assert.equal(account.email, "ada@example.com");
   assert.equal(account.plan, "basic");
   assert.equal("identities" in account || "providers" in account, false);
+  await store.signIn({ sub: sub(1), sid: "sid-1b", name: "Ada", email: "ada@example.com", idToken: "id-token-1b" });
+  assert.equal((await store.snapshot()).accounts[0].avatar, "https://example.com/ada.png", "a sign-in without a picture keeps the avatar");
   const second = await store.signIn({ sub: sub(1), sid: "sid-2", name: "Ada L.", picture: null, email: null, idToken: "id-token-two" });
+  assert.equal((await store.snapshot()).accounts[0].avatar, "", "a sign-in whose picture is null clears it");
   const state = await store.snapshot();
   assert.equal(state.accounts.length, 1);
   assert.equal(state.accounts[0].name, "Ada L.");
@@ -285,6 +298,9 @@ test("actor resolves an account session, a guest profile session, or nothing", a
   assert.equal(asAccount.account.id, sub(10));
   assert.equal(asAccount.profile, null);
   const joined = await store.join(profile("Hal"), token);
+  assert.notEqual(joined.token, token);
+  assert.equal(await store.browserToken(token), false, "joining replaces the account session, so the old token stops working");
+  assert.deepEqual(await store.actor(token), { kind: null });
   const withProfile = await store.actor(joined.token);
   assert.equal(withProfile.kind, "account");
   assert.equal(withProfile.profile.name, "Hal");

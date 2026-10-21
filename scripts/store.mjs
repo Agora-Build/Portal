@@ -48,13 +48,21 @@ const plural = (count, word) => count + " " + word + (count === 1 ? "" : "s");
 // with every ledger, billing and space row of those accounts. Guests' profiles, rooms and the radar stay.
 export function migrateState(state) {
   const removed = new Set((state.accounts || []).filter((account) => !ACCOUNT_ID.test(account?.id || "")).map((account) => account?.id));
-  const gone = (id) => typeof id === "string" && removed.has(id);
-  const counts = { accounts: removed.size, sessions: (state.sessions || []).length, codes: (state.authorizationCodes || []).length, grants: (state.grants || []).length, links: (state.pendingLinks || []).length, spaces: 0, orders: 0, entries: 0 };
+  const isRemoved = (id) => typeof id === "string" && removed.has(id);
+  // A removed account's public profile can no longer be signed in to, so it goes the way store.remove() takes a profile.
+  const orphans = new Set((state.people || []).filter((person) => isRemoved(person.accountId)).map((person) => person.id));
+  const gone = (id) => typeof id === "string" && (removed.has(id) || orphans.has(id));
+  const counts = { accounts: removed.size, profiles: orphans.size, sessions: (state.sessions || []).length, codes: (state.authorizationCodes || []).length, grants: (state.grants || []).length, links: (state.pendingLinks || []).length, spaces: 0, orders: 0, entries: 0 };
   state.accounts = (state.accounts || []).filter((account) => !gone(account?.id));
   for (const account of state.accounts) { delete account.identities; delete account.sessionEpoch; delete account.contact; }
   state.sessions = [];
   delete state.authorizationCodes; delete state.grants; delete state.pendingLinks;
-  for (const person of state.people || []) if (gone(person.accountId)) delete person.accountId;
+  if (state.people) state.people = state.people.filter((person) => !orphans.has(person.id));
+  const ownedRooms = new Set((state.rooms || []).filter((room) => orphans.has(room.ownerId)).map((room) => room.id));
+  if (state.rooms) state.rooms = state.rooms.filter((room) => !ownedRooms.has(room.id));
+  for (const room of state.rooms || []) if (Array.isArray(room.participants)) room.participants = room.participants.filter((id) => !orphans.has(id));
+  if (state.activity) state.activity = state.activity.filter((entry) => !orphans.has(entry.actorId) && !ownedRooms.has(entry.roomId));
+  for (const id of orphans) if (state.radar) delete state.radar[id];
   const spaces = state.spaces || [];
   const dropped = new Set(spaces.filter((space) => gone(space.ownerId)).map((space) => space.id));
   counts.spaces = dropped.size;
@@ -98,7 +106,7 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
     if (state.version !== STATE_VERSION) {
       const used = Object.keys(state).length > 0;
       const counts = migrateState(state);
-      if (used) log("Portal state moved to version 2 (sign-in through auth.agora.build): removed " + plural(counts.accounts, "account") + ", " + plural(counts.sessions, "session") + ", " + plural(counts.codes, "authorization code") + ", " + plural(counts.grants, "grant") + ", " + plural(counts.links, "pending link") + ", " + plural(counts.spaces, "space") + ", " + plural(counts.orders, "order") + " and " + counts.entries + (counts.entries === 1 ? " ledger entry" : " ledger entries") + "; kept " + plural((state.people || []).length, "profile") + " and " + plural((state.rooms || []).length, "room") + ".");
+      if (used) log("Portal state moved to version 2 (sign-in through auth.agora.build): removed " + plural(counts.accounts, "account") + ", " + plural(counts.profiles, "account profile") + ", " + plural(counts.sessions, "session") + ", " + plural(counts.codes, "authorization code") + ", " + plural(counts.grants, "grant") + ", " + plural(counts.links, "pending link") + ", " + plural(counts.spaces, "space") + ", " + plural(counts.orders, "order") + " and " + counts.entries + (counts.entries === 1 ? " ledger entry" : " ledger entries") + "; kept " + plural((state.people || []).length, "profile") + " and " + plural((state.rooms || []).length, "room") + ".");
     }
     state.accounts ||= []; state.sessions ||= []; state.authTransactions ||= [];
     state.people ||= []; state.rooms ||= []; state.radar ||= {}; state.spaces ||= []; state.spaceLeases ||= [];
@@ -207,7 +215,7 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
         return { id, ...tx };
       });
     },
-    async signIn({ sub, sid = null, name = null, picture = null, email = null, idToken = null } = {}) {
+    async signIn({ sub, sid = null, name = null, picture, email = null, idToken = null } = {}) {
       validSub(sub);
       const token = randomBytes(32).toString("base64url");
       return update((state) => {
@@ -258,6 +266,8 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
           person.avatar = account.avatar;
           delete person.sessionHash;
           account.profileId = person.id;
+          // The new session replaces the one that joined, so the old token stops working.
+          if (current) state.sessions = state.sessions.filter((session) => session !== current);
           addSession(state, account, token, { sid: current?.sid, idToken: current?.idToken });
         }
         state.people.unshift(person);

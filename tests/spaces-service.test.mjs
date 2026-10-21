@@ -28,9 +28,9 @@ async function setup(t, { plazaCapacity, before, admins = [] } = {}) {
   spaces.onEvents((list) => events.push(...list));
   const account = async (name, subject) => {
     const login = await store.signIn({ sub: "acct_" + String(subject).padStart(26, "0"), sid: "sid-" + subject, name, idToken: "id-token" });
-    await store.join(profile(name), login.token);
-    const actor = await store.actor(login.token);
-    return { token: login.token, id: actor.account.id, accountId: actor.account.id, memberId: actor.profile.id };
+    const { token } = await store.join(profile(name), login.token);
+    const actor = await store.actor(token);
+    return { token, id: actor.account.id, accountId: actor.account.id, memberId: actor.profile.id };
   };
   return { store, spaces, events, clock, person, account, ...context };
 }
