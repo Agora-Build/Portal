@@ -32,7 +32,8 @@ the authority.
 - Never read or print `~/.config/agora-portal/local.env` or `~/.config/agora-auth/local.env`. Name settings only.
 
 **Cookies:**
-- `house_session`: HttpOnly; `SameSite=Lax`; `Path=/`; `Secure` on https; 30 days.
+- `__Host-house_session` on https (`house_session` over plain http): HttpOnly; `SameSite=Lax`; `Path=/`; `Secure`
+  on https; 30 days.
 - `__Host-portal_auth` (`portal_auth` over plain http): HttpOnly; `SameSite=Lax`; `Path=/`; 600 s.
 
 **Fixed values:**

@@ -80,8 +80,11 @@ the API resource and its scopes. The secret is named, never written there:
 }
 ```
 
-Put the same `PORTAL_CLIENT_SECRET` value in the IdP's environment and the
-Portal's. Locally the URIs are `http://localhost:3080/...` against
+The production IdP's `https://api.agora.build` resource must include
+`agora:certificates` as well as `credits` and `agora:projects`; without it no
+token can carry that scope, and `POST /api/connections/agora/certificate`
+answers 403 to every app. Put the same `PORTAL_CLIENT_SECRET` value in the IdP's
+environment and the Portal's. Locally the URIs are `http://localhost:3080/...` against
 `http://auth.localhost:3090`; the IdP accepts plain http only on local host
 names (`localhost`, `*.localhost`, `127.0.0.1`) and only with an http issuer.
 Vox, Atem and other apps are registered with the `https://api.agora.build`
@@ -170,6 +173,10 @@ seconds and refetched for an unknown key ID. The trade-offs:
   unknown key refetches the JWKS, at most once every five seconds.
 - After an emergency rotation that drops a key, tokens signed with the old key
   are still accepted for up to 60 seconds, until the cached JWKS expires.
+- While the JWKS is unreachable, keys from the last good fetch stay accepted
+  for up to one hour after that fetch (the network is retried at most every 30
+  seconds). A rotation that drops a key during an IdP outage therefore takes up
+  to an hour to reach the Portal.
 - If the JWKS can't be fetched for an unknown key, bearer calls answer 503 and
   back-channel logouts answer 503; they are never treated as valid.
 - A dead IdP is noticed by new sign-ins after at most 30 seconds without contact
@@ -219,7 +226,9 @@ server-side prices per client and service, shaped like
 ```
 
 A client may charge only if its `client_id` is listed, and only for its listed
-services. Each charge is `credits × units`, with whole `units` from 1 to
+services. List only confidential clients (web or server clients that
+authenticate to the IdP with a secret, such as Vox). A native client's ID (such
+as Atem's) is public, so any program can obtain tokens under it; never list one. Each charge is `credits × units`, with whole `units` from 1 to
 `maxUnits`. If the setting is unset, or the file is missing or invalid, platform
 billing is off (503) and the log says why.
 
