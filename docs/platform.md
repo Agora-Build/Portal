@@ -105,8 +105,14 @@ absolute lifetime and at most 20 sessions per account (the oldest are dropped).
 The server keeps only a hash of the session token, the IdP session ID (`sid`) and
 the ID token for `id_token_hint`; the ID token is not accepted as a credential by
 any API and is deleted with its session. Moving production to the
-`__Host-house_session` name signs everyone out once: the old `house_session`
-cookie is no longer read.
+`__Host-house_session` name doesn't strand guests: until 31 January 2027
+(`LEGACY_GUEST_COOKIE_UNTIL` in `scripts/serve.mjs`), an https request without
+`__Host-house_session` whose old `house_session` cookie is a guest profile's
+session is accepted once, and the same token is re-issued as
+`__Host-house_session` (Secure, HttpOnly, `SameSite=Lax`, `Path=/`) while the old
+cookie is cleared (`Max-Age=0`). An old cookie for an account session is never
+honoured (account sessions started empty with this change). After that date the
+old cookie is ignored.
 
 This change starts the Portal's identity data empty. At first load (state
 version 2) the Portal deletes old sessions, OAuth codes and grants, pending

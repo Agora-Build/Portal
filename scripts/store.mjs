@@ -190,6 +190,12 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
       const state = await read();
       return Boolean(sessionFor(state, token)) || state.people.some((person) => person.sessionHash === hash(token));
     },
+    // Whether the token is a guest's browser-profile session (people[].sessionHash), never an account session.
+    async guestToken(token) {
+      if (!token) return false;
+      const state = await read();
+      return !sessionFor(state, token) && state.people.some((person) => person.sessionHash === hash(token) && !person.accountId);
+    },
     async people() { return [...(await read()).people.map(publicProfile), ...JSON.parse(await readFile(seedFile, "utf8"))]; },
     async me(token) { const person = personFor(await read(), token); return person ? publicProfile(person) : null; },
     // A Portal session resolves to its account; a guest's browser profile session resolves to the guest.

@@ -5,7 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
-import { createAppServer } from "../scripts/serve.mjs";
+import { createAppServer, LEGACY_GUEST_COOKIE_UNTIL } from "../scripts/serve.mjs";
 import { createStore } from "../scripts/store.mjs";
 import { createLedger } from "../scripts/ledger.mjs";
 import { createModelClient, modelConfig } from "../scripts/models.mjs";
@@ -33,7 +33,7 @@ async function start(t, options = {}) {
   const store = options.store || createStore(resolve(root, "data/people.json"), resolve(temporary, randomBytes(8).toString("hex") + ".json"), { log: () => {} });
   const logs = [];
   const instance = createAppServer(root, {
-    monitor: false, store, idp, siteUrl: options.siteUrl || siteUrl, billingClients: "billingClients" in options ? options.billingClients : prices, log: (line) => logs.push(line),
+    monitor: false, store, idp, siteUrl: options.siteUrl || siteUrl, now: options.now, billingClients: "billingClients" in options ? options.billingClients : prices, log: (line) => logs.push(line),
     models: options.models || models, modelLimit: 1000, calls: createAgoraCalls(agoraConfig(env)), signaling: createSignaling(signalingConfig(env)), channelSecret: env.SPACES_SIGNALING_SECRET
   });
   await new Promise((done) => instance.listen(0, "127.0.0.1", done));
@@ -461,7 +461,45 @@ test("over https the session cookie is __Host-house_session", async (t) => {
   assert.match(line, /^__Host-house_session=[^;]+; HttpOnly; SameSite=Lax; Path=\/; Max-Age=2592000; Secure$/);
   assert.equal(cookieNamed(response, "house_session"), undefined);
   assert.equal((await (await call(app.base, "/api/me", { cookie: pair(line) })).json()).profile.name, "Secure guest");
-  assert.equal((await (await call(app.base, "/api/me", { cookie: "house_session=" + pair(line).split("=")[1] })).json()).profile, null, "the plain name is not read over https");
+  assert.equal(cookieNamed(await call(app.base, "/api/me", { cookie: pair(line) + "; house_session=" + pair(line).split("=")[1] }), "__Host-house_session"), undefined, "with the __Host- cookie present, nothing is upgraded");
+});
+
+// An https guest from before the __Host- rename still holds a plain house_session cookie.
+async function legacyGuest(app) {
+  const response = await call(app.base, "/api/profile", { method: "POST", data: profile("Legacy guest") });
+  return pair(cookieNamed(response, "__Host-house_session")).split("=")[1];
+}
+test("over https a legacy house_session guest cookie is upgraded once to __Host-house_session", async (t) => {
+  const app = await start(t, { siteUrl: "https://portal.example" });
+  const token = await legacyGuest(app);
+  const response = await call(app.base, "/api/me", { cookie: "house_session=" + token });
+  assert.equal((await response.json()).profile.name, "Legacy guest", "the guest is recognised on the upgrading request");
+  assert.equal(cookieNamed(response, "__Host-house_session"), "__Host-house_session=" + token + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000; Secure", "the same token is re-issued under the __Host- name");
+  assert.equal(cookieNamed(response, "house_session"), "house_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0; Secure", "the legacy cookie is cleared");
+  const page = await call(app.base, "/", { cookie: "house_session=" + token });
+  assert.equal(page.status, 200);
+  assert.ok(cookieNamed(page, "__Host-house_session"), "pages upgrade the cookie too");
+});
+test("a legacy house_session cookie for an account session is not honoured over https", async (t) => {
+  const app = await start(t, { siteUrl: "https://portal.example" });
+  const login = await call(app.base, "/auth/login?returnTo=%2F");
+  const callback = new URL(app.fake.authorize(login.headers.get("location"), {}));
+  const back = await call(app.base, callback.pathname + callback.search, { cookie: pair(cookieNamed(login, "__Host-portal_auth")) });
+  const token = pair(cookieNamed(back, "__Host-house_session")).split("=")[1];
+  assert.ok((await (await call(app.base, "/api/me", { cookie: "__Host-house_session=" + token })).json()).account, "the account session works under its own name");
+  const response = await call(app.base, "/api/me", { cookie: "house_session=" + token });
+  assert.equal((await response.json()).account, null);
+  assert.deepEqual(cookies(response), [], "nothing is re-issued for an account token");
+});
+test("after LEGACY_GUEST_COOKIE_UNTIL the legacy house_session cookie is no longer read over https", async (t) => {
+  let clock = Date.parse("2026-12-01T00:00:00Z");
+  const app = await start(t, { siteUrl: "https://portal.example", now: () => clock });
+  const token = await legacyGuest(app);
+  clock = LEGACY_GUEST_COOKIE_UNTIL;
+  const response = await call(app.base, "/api/me", { cookie: "house_session=" + token });
+  assert.equal((await response.json()).profile, null);
+  assert.deepEqual(cookies(response), []);
+  assert.equal(LEGACY_GUEST_COOKIE_UNTIL, Date.parse("2027-01-31T00:00:00Z"));
 });
 
 test("back-channel logout with sid and sub ends only that sub's session; without an IdP it answers 503", async (t) => {

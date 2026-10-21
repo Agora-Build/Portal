@@ -66,6 +66,10 @@ const publicRoutes = new Set(["GET /api/people", "GET /api/activity", "GET /api/
 const bearerRoutes = new Set(["GET /api/me", "GET /api/credits/balance", "GET /api/credits/statement", "POST /api/services/chat", "POST /api/services/tts", "GET /api/connections", "GET /api/connections/agora/projects", "POST /api/connections/agora/certificate", "DELETE /api/connections/agora", "POST /api/platform/credits/reserve", "POST /api/platform/credits/settle"]);
 // Routes that exist for the browser session only; a bearer token there gets 403, and on any other path 404.
 const browserRoutes = new Set(["GET /api/billing/account", "POST /api/billing/checkout", "POST /api/billing/manage", "POST /api/profile", "PUT /api/profile", "DELETE /api/profile", "GET /api/radar", "POST /api/radar", "POST /api/auth/logout", "POST /api/signaling/token"]);
+// Over https the session cookie was renamed from house_session to __Host-house_session. Until this date a guest's
+// legacy cookie (a guest browser-profile session, never an account session) is accepted once and re-issued under the
+// new name; after it, the legacy cookie is ignored. Accounts' sessions started empty with this change, so none exist.
+export const LEGACY_GUEST_COOKIE_UNTIL = Date.parse("2027-01-31T00:00:00Z");
 const browserRoute = (route, path) => browserRoutes.has(route) || path === "/api/spaces" || path.startsWith("/api/spaces/") || path.startsWith("/api/worlds/");
 // The auth.agora.build client from the environment, or null (logged once, by setting name) when its settings are missing or invalid.
 export function idpFromEnv(env = process.env, log = (line) => console.log(line)) {
@@ -88,6 +92,7 @@ export function createAppServer(directory = root, options = {}) {
   // timeout, never retried) doesn't wait for a cold fetch. Failures are logged by reason only.
   idp?.warm?.().then((reason) => { if (reason) log("auth.agora.build warm-up failed: " + reason + "."); }, () => log("auth.agora.build warm-up failed: error."));
   const siteUrl = options.siteUrl ?? process.env.SITE_URL ?? "";
+  const clock = options.now || Date.now;
   // Platform billing clients and their server-side prices; null turns platform billing off.
   const billingClients = "billingClients" in options ? (options.billingClients && parseBillingClients(options.billingClients)) : loadBillingClients(process.env.PORTAL_BILLING_FILE, log);
   const ledger = createLedger(store);
@@ -139,9 +144,19 @@ export function createAppServer(directory = root, options = {}) {
       const bearer = request.headers.authorization?.startsWith("Bearer ") ? request.headers.authorization.slice(7).trim() : "";
       const secure = siteUrl.startsWith("https:") || Boolean(request.socket.encrypted);
       const sessionName = secure ? "__Host-house_session" : "house_session";
-      const cookieToken = cookieValue(request, sessionName);
-      const browserToken = cookieToken && await store.browserToken(cookieToken) ? cookieToken : "";
+      let cookieToken = cookieValue(request, sessionName);
       const sessionCookie = (value, maxAge = 30 * 86400) => sessionName + "=" + value + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=" + maxAge + (secure ? "; Secure" : "");
+      if (secure && !cookieToken && clock() < LEGACY_GUEST_COOKIE_UNTIL) {
+        const legacy = cookieValue(request, "house_session");
+        if (legacy && await store.guestToken(legacy)) {
+          cookieToken = legacy;
+          // The upgrade cookies go first, so a cookie the route sets for the same name wins.
+          const upgrade = [sessionCookie(legacy), "house_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0; Secure"];
+          const writeHead = response.writeHead.bind(response);
+          response.writeHead = (status, headers = {}) => writeHead(status, { ...headers, "Set-Cookie": [...upgrade, ...[].concat(headers["Set-Cookie"] || [])] });
+        }
+      }
+      const browserToken = cookieToken && await store.browserToken(cookieToken) ? cookieToken : "";
       const transactionName = secure ? "__Host-portal_auth" : "portal_auth";
       const transactionCookie = (value, maxAge = 600) => transactionName + "=" + value + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=" + maxAge + (secure ? "; Secure" : "");
       // A connect in progress has its own cookie, so it never collides with a sign-in in progress.
