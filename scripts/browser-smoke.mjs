@@ -52,7 +52,8 @@ const ACCOUNT_ID = /^acct_[0-9A-HJKMNP-TV-Z]{26}$/;
 
 const lib = await loadAuth();
 const stack = await startStack(lib);
-const browser = await chromium.launch({ executablePath: chromiumPath, headless: true });
+// Launched inside the try below, so a failed launch still stops the stack.
+let browser = null;
 console.log("        Portal " + stack.site + ", IdP " + stack.issuer);
 
 // A browser context that reaches only the Portal and the IdP; any other origin (GitHub, fonts, avatars) is refused.
@@ -213,13 +214,14 @@ async function guestFlow(viewport) {
 }
 
 try {
+  browser = await chromium.launch({ executablePath: chromiumPath, headless: true });
   for (const viewport of VIEWPORTS) {
     console.log("-- " + viewport.name + " " + viewport.width + "×" + viewport.height);
     await signInFlow(viewport);
     await guestFlow(viewport);
   }
 } finally {
-  await browser.close();
+  await browser?.close();
   await stack.close();
 }
 
