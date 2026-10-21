@@ -215,8 +215,8 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
         return { id, ...tx };
       });
     },
-    // guestToken is the browser's previous house_session token: a guest profile there is adopted by an account that has
-    // none, and a previous Portal session there is replaced.
+    // guestToken is the browser's previous session-cookie token: a guest profile there is adopted by an account that has
+    // none (its token stops working either way), and a previous Portal session there is replaced.
     async signIn({ sub, sid = null, name = null, picture, email = null, idToken = null, guestToken } = {}) {
       validSub(sub);
       const token = randomBytes(32).toString("base64url");
@@ -231,10 +231,11 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
         if (typeof guestToken === "string" && guestToken) {
           const previous = hash(guestToken);
           state.sessions = state.sessions.filter((entry) => entry.hash !== previous);
+          // The browser's guest token stops working either way: adopted, or replaced by the account session.
           const guest = state.people.find((person) => person.sessionHash === previous && !person.accountId);
+          if (guest) delete guest.sessionHash;
           if (guest && !state.people.some((person) => person.id === account.profileId)) {
             guest.accountId = account.id;
-            delete guest.sessionHash;
             guest.avatar ||= account.avatar;
             account.profileId = guest.id;
           }
@@ -270,7 +271,8 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
         return { idToken: session?.idToken || null };
       });
     },
-    endSessionsBySid(sid) { return typeof sid === "string" && sid ? endWhere((session) => session.sid === sid) : Promise.resolve({ ended: 0 }); },
+    // With a sub as well, only that account's sessions with the sid end.
+    endSessionsBySid(sid, sub) { return typeof sid === "string" && sid ? endWhere((session) => session.sid === sid && (sub === undefined || session.accountId === sub)) : Promise.resolve({ ended: 0 }); },
     endSessionsBySub(sub) { return typeof sub === "string" && sub ? endWhere((session) => session.accountId === sub) : Promise.resolve({ ended: 0 }); },
     async join(input, currentToken) {
       const token = randomBytes(32).toString("base64url");

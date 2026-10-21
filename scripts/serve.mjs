@@ -10,6 +10,7 @@ import { createActivityFeed } from "./activity.mjs";
 import { createAgoraCalls } from "./calls.mjs";
 import { createIdp, LoginError, TokenError } from "./idp.mjs";
 import { returnPath, withSignin } from "./return-path.mjs";
+import { billingClients as parseBillingClients, loadBillingClients, priceFor } from "./billing-clients.mjs";
 import { createCredits } from "./credits.mjs";
 import { createLedger } from "./ledger.mjs";
 import { createBilling } from "./billing.mjs";
@@ -61,6 +62,11 @@ const insufficientScope = (scope) => Object.assign(new AppError(403, "This acces
 const browserOnly = () => new AppError(403, "This feature needs a browser session on the Agora.Build website; access tokens are not accepted here.");
 // Reads that need no caller; a valid access token is allowed on them but changes nothing.
 const publicRoutes = new Set(["GET /api/people", "GET /api/activity", "GET /api/projects", "GET /api/services", "GET /api/billing/catalog", "GET /api/auth/config", "POST /api/people/search", "GET /api/themes"]);
+// Routes that accept an auth.agora.build access token (each checks its own scope).
+const bearerRoutes = new Set(["GET /api/me", "GET /api/credits/balance", "GET /api/credits/statement", "POST /api/services/chat", "POST /api/services/tts", "GET /api/connections", "GET /api/connections/agora/projects", "POST /api/connections/agora/certificate", "DELETE /api/connections/agora", "POST /api/platform/credits/reserve", "POST /api/platform/credits/settle"]);
+// Routes that exist for the browser session only; a bearer token there gets 403, and on any other path 404.
+const browserRoutes = new Set(["GET /api/billing/account", "POST /api/billing/checkout", "POST /api/billing/manage", "POST /api/profile", "PUT /api/profile", "DELETE /api/profile", "GET /api/radar", "POST /api/radar", "POST /api/auth/logout", "POST /api/signaling/token"]);
+const browserRoute = (route, path) => browserRoutes.has(route) || path === "/api/spaces" || path.startsWith("/api/spaces/") || path.startsWith("/api/worlds/");
 // The auth.agora.build client from the environment, or null (logged once, by setting name) when its settings are missing or invalid.
 export function idpFromEnv(env = process.env, log = (line) => console.log(line)) {
   try {
@@ -79,7 +85,8 @@ export function createAppServer(directory = root, options = {}) {
   const log = options.log || ((line) => console.log(line));
   const idp = "idp" in options ? options.idp : idpFromEnv(process.env, log);
   const siteUrl = options.siteUrl ?? process.env.SITE_URL ?? "";
-  const billingClients = new Set(String(options.billingClients ?? process.env.PORTAL_BILLING_CLIENTS ?? "").split(",").map((id) => id.trim()).filter(Boolean));
+  // Platform billing clients and their server-side prices; null turns platform billing off.
+  const billingClients = "billingClients" in options ? (options.billingClients && parseBillingClients(options.billingClients)) : loadBillingClients(process.env.PORTAL_BILLING_FILE, log);
   const ledger = createLedger(store);
   const credits = options.credits || createCredits(undefined, { ledger });
   const billing = options.billing || createBilling(store);
@@ -125,10 +132,11 @@ export function createAppServer(directory = root, options = {}) {
       const requestUrl = new URL(request.url, "http://localhost");
       const path = requestUrl.pathname;
       const bearer = request.headers.authorization?.startsWith("Bearer ") ? request.headers.authorization.slice(7).trim() : "";
-      const cookieToken = cookieValue(request, "house_session");
-      const browserToken = cookieToken && await store.browserToken(cookieToken) ? cookieToken : "";
       const secure = siteUrl.startsWith("https:") || Boolean(request.socket.encrypted);
-      const sessionCookie = (value, maxAge = 30 * 86400) => "house_session=" + value + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=" + maxAge + (secure ? "; Secure" : "");
+      const sessionName = secure ? "__Host-house_session" : "house_session";
+      const cookieToken = cookieValue(request, sessionName);
+      const browserToken = cookieToken && await store.browserToken(cookieToken) ? cookieToken : "";
+      const sessionCookie = (value, maxAge = 30 * 86400) => sessionName + "=" + value + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=" + maxAge + (secure ? "; Secure" : "");
       const transactionName = secure ? "__Host-portal_auth" : "portal_auth";
       const transactionCookie = (value, maxAge = 600) => transactionName + "=" + value + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=" + maxAge + (secure ? "; Secure" : "");
       if (path === "/api/billing/webhook" && request.method === "POST") {
@@ -152,9 +160,10 @@ export function createAppServer(directory = root, options = {}) {
       }
       if (path === "/auth/callback" && request.method === "GET") {
         // The transaction is consumed whatever happens next, and its cookie is cleared on every path.
-        const transaction = await store.takeAuthTransaction(cookieValue(request, transactionName));
         const clear = transactionCookie("", 0);
+        let transaction = null;
         try {
+          transaction = await store.takeAuthTransaction(cookieValue(request, transactionName));
           if (!idp) throw new LoginError("unavailable");
           const result = await idp.completeLogin(request.url, transaction);
           const { token } = await store.signIn({ sub: result.sub, sid: result.sid, name: result.name, picture: result.picture ?? undefined, email: result.email, idToken: result.idToken, guestToken: cookieToken || undefined });
@@ -172,7 +181,7 @@ export function createAppServer(directory = root, options = {}) {
         try {
           if (!idp) throw new TokenError(503, "unavailable");
           const { sid, sub } = await idp.verifyLogoutToken((await formBody(request)).get("logout_token"));
-          if (sid) await store.endSessionsBySid(sid);
+          if (sid) await store.endSessionsBySid(sid, sub);
           else await store.endSessionsBySub(sub);
         } catch (error) {
           if (!(error instanceof TokenError || error.status)) throw error;
@@ -184,15 +193,17 @@ export function createAppServer(directory = root, options = {}) {
       }
       if (path.startsWith("/api/")) {
         if (!["GET", "POST", "PUT", "DELETE"].includes(request.method)) throw new AppError(405, "This method is not supported.");
-        if (request.method !== "GET" && request.headers.origin) {
+        // Bearer tokens are not ambient credentials, so only cookie requests need the same-origin checks.
+        const withBearer = Boolean(request.headers.authorization?.startsWith("Bearer "));
+        if (request.method !== "GET" && !withBearer && request.headers.origin) {
           let host;
           try { host = new URL(request.headers.origin).host; } catch { throw new AppError(403, "Use this feature from the house website."); }
           if (host !== request.headers.host) throw new AppError(403, "Use this feature from the house website.");
         }
-        if (request.method !== "GET" && request.headers["sec-fetch-site"] === "cross-site") throw new AppError(403, "Use this feature from the Agora.Build website.");
+        if (request.method !== "GET" && !withBearer && request.headers["sec-fetch-site"] === "cross-site") throw new AppError(403, "Use this feature from the Agora.Build website.");
         // An access token from auth.agora.build; a request that carries one never falls back to the browser cookie.
         let caller = null;
-        if (request.headers.authorization?.startsWith("Bearer ")) {
+        if (withBearer) {
           if (!idp) throw new AppError(503, "Access tokens can't be checked right now. Try again shortly.");
           try { caller = await idp.verifyAccessToken(bearer); }
           catch (error) {
@@ -204,7 +215,7 @@ export function createAppServer(directory = root, options = {}) {
         }
         const token = caller ? "" : browserToken;
         const route = request.method + " " + path;
-        if (caller && !publicRoutes.has(route) && !["GET /api/me", "GET /api/credits/balance", "GET /api/credits/statement", "POST /api/services/chat", "POST /api/services/tts", "GET /api/connections", "GET /api/connections/agora/projects", "POST /api/connections/agora/certificate", "DELETE /api/connections/agora", "POST /api/platform/credits/reserve", "POST /api/platform/credits/settle"].includes(route)) throw browserOnly();
+        if (caller && !publicRoutes.has(route) && !bearerRoutes.has(route)) throw browserRoute(route, path) ? browserOnly() : new AppError(404, "This page or service was not found.");
         const scoped = (scope) => { if (!caller.scopes.includes(scope)) throw insufficientScope(scope); return caller.sub; };
         const member = async () => {
           const person = await store.me(token);
@@ -254,15 +265,19 @@ export function createAppServer(directory = root, options = {}) {
         }
         else if (["/api/platform/credits/reserve", "/api/platform/credits/settle"].includes(path) && request.method === "POST") {
           // Only an allowlisted billing client's access token, with the credits scope, can hold or settle credits.
+          // Prices come from the server's billing file; the client names a service and a number of units, never a charge.
           if (!caller) throw invalidToken("Platform credit calls need an auth.agora.build access token.");
           const userId = scoped("credits");
+          if (!billingClients) throw new AppError(503, "Platform billing is not configured.");
           if (!billingClients.has(caller.clientId)) throw new AppError(403, "This application is not allowed to charge credits.");
+          const reserving = path.endsWith("reserve");
+          if (reserving) limit("reserve:" + userId, 60, 60000);
           const input = await body(request);
-          if (typeof input.service !== "string" || !/^[a-z][a-z0-9-]{1,40}$/.test(input.service)) throw new AppError(422, "Name the service in lower-case letters, digits and dashes.");
+          const charge = priceFor(billingClients, caller.clientId, input.service, reserving ? input.units : 1);
           const name = caller.clientId + ":" + input.service;
-          if (path.endsWith("reserve")) {
+          if (reserving) {
             if (!/^[A-Za-z0-9:_-]{16,120}$/.test(input.idempotencyKey || "")) throw new AppError(422, "Provide a valid idempotency key.");
-            json(response, 200, await credits.reserve(userId, name, input.credits, input.idempotencyKey));
+            json(response, 200, await credits.reserve(userId, name, charge, input.idempotencyKey));
           } else {
             if (!["capture", "release"].includes(input.outcome) || !/^[a-f0-9-]{36}$/.test(input.reservationId || "")) throw new AppError(422, "Invalid settlement.");
             json(response, 200, await credits.settle(userId, input.reservationId, input.outcome, name));

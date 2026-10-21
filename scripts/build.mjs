@@ -12,7 +12,7 @@ await copyFile(createRequire(import.meta.url).resolve("agora-rtc-sdk-ng"), new U
 await copyFile(createRequire(import.meta.url).resolve("agora-rtm-sdk"), new URL("assets/agora-rtm.js", output));
 await cp(new URL("data/", root), new URL("data/", output), { recursive: true });
 await mkdir(new URL("scripts/", output), { recursive: true });
-await Promise.all(["serve.mjs", "store.mjs", "models.mjs", "activity.mjs", "calls.mjs", "idp.mjs", "return-path.mjs", "credits.mjs", "ledger.mjs", "billing.mjs", "plans.mjs", "persistence.mjs", "connections.mjs", "platform-admin.mjs"].map((file) => copyFile(new URL("scripts/" + file, root), new URL("scripts/" + file, output))));
+await Promise.all(["serve.mjs", "store.mjs", "models.mjs", "activity.mjs", "calls.mjs", "idp.mjs", "return-path.mjs", "billing-clients.mjs", "credits.mjs", "ledger.mjs", "billing.mjs", "plans.mjs", "persistence.mjs", "connections.mjs", "platform-admin.mjs"].map((file) => copyFile(new URL("scripts/" + file, root), new URL("scripts/" + file, output))));
 await cp(new URL("scripts/spaces/", root), new URL("scripts/spaces/", output), { recursive: true });
 await cp(new URL("world/", root), new URL("world/", output), { recursive: true });
 await cp(new URL("stoa/", root), new URL("stoa/", output), { recursive: true });

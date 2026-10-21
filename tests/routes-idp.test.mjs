@@ -20,6 +20,7 @@ const clientSecret = "portal-route-test-secret-".padEnd(48, "x");
 const siteUrl = "http://localhost:3080";
 const env = { AGORA_APP_ID: "a".repeat(32), AGORA_APP_CERTIFICATE: "b".repeat(32), SPACES_SIGNALING_SECRET: "s".repeat(32) };
 const profile = (name = "Route tester") => ({ name, bio: "Building voice agents with Rust.", intent: "Build a language practice voice agent with natural interruptions.", lookingFor: "Audio engineers", skills: ["Rust", "Voice AI"], location: "Remote", contact: "https://example.com/builder", monitor: false });
+const prices = { vox: { services: { evaluation: { credits: 3, maxUnits: 5 } } }, "billing-two": { services: { analysis: { credits: 1, maxUnits: 1 } } } };
 const models = { config: modelConfig({ OPENAI_API_KEY: "test-only-route-key" }), chat: async () => "Mocked answer", speak: async () => Buffer.from("ID3-audio"), research: async () => ({ items: [] }), search: async (people) => people };
 let temporary;
 before(async () => { temporary = await mkdtemp(resolve(tmpdir(), "routes-idp-")); });
@@ -32,7 +33,7 @@ async function start(t, options = {}) {
   const store = options.store || createStore(resolve(root, "data/people.json"), resolve(temporary, randomBytes(8).toString("hex") + ".json"), { log: () => {} });
   const logs = [];
   const instance = createAppServer(root, {
-    monitor: false, store, idp, siteUrl: options.siteUrl || siteUrl, billingClients: options.billingClients ?? "vox, billing-two", log: (line) => logs.push(line),
+    monitor: false, store, idp, siteUrl: options.siteUrl || siteUrl, billingClients: "billingClients" in options ? options.billingClients : prices, log: (line) => logs.push(line),
     models: options.models || models, modelLimit: 1000, calls: createAgoraCalls(agoraConfig(env)), signaling: createSignaling(signalingConfig(env)), channelSecret: env.SPACES_SIGNALING_SECRET
   });
   await new Promise((done) => instance.listen(0, "127.0.0.1", done));
@@ -224,6 +225,7 @@ test("a browser's guest profile is adopted by its account at first sign-in", asy
   const second = await guest(app, "Guest second");
   const again = await browserSignIn(app, { cookie: second, claims: { sub: me.account.id } });
   assert.equal((await (await call(app.base, "/api/me", { cookie: again.cookie })).json()).profile.id, guestProfile.id);
+  assert.equal((await (await call(app.base, "/api/me", { cookie: second })).json()).profile, null, "the other guest token stops working too");
 });
 
 test("logout ends the Portal session and returns the IdP end-session URL; it keeps the same-origin check", async (t) => {
@@ -384,34 +386,97 @@ test("bearer tokens that are missing, invalid, expired or for another audience g
   assert.equal(unreachable.headers.get("www-authenticate"), null);
 });
 
-test("platform credits reserve/settle need a credits token from a client in PORTAL_BILLING_CLIENTS", async (t) => {
+test("platform credits are priced on the server, per client and service, for clients in the billing file", async (t) => {
   const app = await start(t);
   const sub = app.fake.accountId(), other = app.fake.accountId();
   const vox = await bearerToken(app, { sub, client_id: "vox", scope: "credits" });
   await app.store.ensureAccount(sub);
-  await createLedger(app.store).deposit(sub, 10, "Test grant", "grant-route-test");
+  await createLedger(app.store).deposit(sub, 30, "Test grant", "grant-route-test");
   const reserve = (bearer, data) => call(app.base, "/api/platform/credits/reserve", { bearer, method: "POST", data });
-  const held = await reserve(vox, { service: "evaluation", credits: 4, idempotencyKey: "route-reserve-000001" });
+  const balance = async () => (await (await call(app.base, "/api/credits/balance", { bearer: vox })).json()).credits;
+  const held = await reserve(vox, { service: "evaluation", units: 2, idempotencyKey: "route-reserve-000001" });
   assert.equal(held.status, 200);
   const hold = await held.json();
   assert.equal(hold.status, "reserved");
-  assert.equal((await (await call(app.base, "/api/credits/balance", { bearer: vox })).json()).credits, 6);
+  assert.equal(await balance(), 24, "2 units at 3 credits each");
+  assert.equal((await reserve(vox, { service: "evaluation", units: 3, idempotencyKey: "route-reserve-000001" })).status, 409, "a reused key with other units conflicts");
+  assert.equal((await reserve(vox, { service: "evaluation", credits: 1000, idempotencyKey: "route-reserve-000002" })).status, 200, "the client can't set the charge; units default to 1");
+  assert.equal(await balance(), 21);
+  for (const units of [0, 6, 1.5, "2"]) assert.equal((await reserve(vox, { service: "evaluation", units, idempotencyKey: "route-reserve-units-" + String(units).replace(".", "-") })).status, 422, "units " + units);
+  assert.equal((await reserve(vox, { service: "analysis", idempotencyKey: "route-reserve-000003" })).status, 422, "another client's service is unknown here");
+  assert.equal((await reserve(vox, { service: "nonexistent", idempotencyKey: "route-reserve-000004" })).status, 422);
+  assert.equal((await reserve(vox, { service: "evaluation", idempotencyKey: "short" })).status, 422);
   // Another account's token, even from the same client, cannot settle this hold.
   const stranger = await bearerToken(app, { sub: other, client_id: "vox", scope: "credits" });
   assert.equal((await call(app.base, "/api/platform/credits/settle", { bearer: stranger, method: "POST", data: { service: "evaluation", reservationId: hold.id, outcome: "capture" } })).status, 404);
-  const settled = await call(app.base, "/api/platform/credits/settle", { bearer: vox, method: "POST", data: { service: "evaluation", reservationId: hold.id, outcome: "capture" } });
-  assert.equal(settled.status, 200);
-  const notAllowed = await reserve(await bearerToken(app, { sub, client_id: "other-app", scope: "credits" }), { service: "evaluation", credits: 1, idempotencyKey: "route-reserve-000002" });
-  assert.equal(notAllowed.status, 403);
-  assert.match((await notAllowed.json()).error, /not allowed/);
-  await assertScope(await reserve(await bearerToken(app, { sub, client_id: "vox", scope: "openid" }), { service: "evaluation", credits: 1, idempotencyKey: "route-reserve-000003" }), "credits");
-  assert.equal((await reserve(vox, { service: "evaluation", credits: 0, idempotencyKey: "route-reserve-000004" })).status, 422);
-  assert.equal((await reserve(vox, { service: "Bad Service", credits: 1, idempotencyKey: "route-reserve-000005" })).status, 422);
-  assert.equal((await reserve(vox, { service: "evaluation", credits: 1, idempotencyKey: "short" })).status, 422);
-  // The second allowlisted client works too; with no allowlist, nobody can.
-  assert.equal((await reserve(await bearerToken(app, { sub, client_id: "billing-two", scope: "credits" }), { service: "evaluation", credits: 1, idempotencyKey: "route-reserve-000006" })).status, 200);
-  const closed = await start(t, { billingClients: "" });
-  assert.equal((await call(closed.base, "/api/platform/credits/reserve", { bearer: await bearerToken(closed, { client_id: "vox", scope: "credits" }), method: "POST", data: { service: "evaluation", credits: 1, idempotencyKey: "route-reserve-000007" } })).status, 403);
+  assert.equal((await call(app.base, "/api/platform/credits/settle", { bearer: vox, method: "POST", data: { service: "evaluation", reservationId: hold.id, outcome: "capture" } })).status, 200);
+  const notListed = await reserve(await bearerToken(app, { sub, client_id: "other-app", scope: "credits" }), { service: "evaluation", idempotencyKey: "route-reserve-000005" });
+  assert.equal(notListed.status, 403);
+  assert.match((await notListed.json()).error, /not allowed/);
+  await assertScope(await reserve(await bearerToken(app, { sub, client_id: "vox", scope: "openid" }), { service: "evaluation", idempotencyKey: "route-reserve-000006" }), "credits");
+  assert.equal((await reserve(await bearerToken(app, { sub, client_id: "billing-two", scope: "credits" }), { service: "analysis", idempotencyKey: "route-reserve-000007" })).status, 200);
+  // Without a billing file, platform billing is off.
+  const closed = await start(t, { billingClients: null });
+  const off = await call(closed.base, "/api/platform/credits/reserve", { bearer: await bearerToken(closed, { client_id: "vox", scope: "credits" }), method: "POST", data: { service: "evaluation", idempotencyKey: "route-reserve-000008" } });
+  assert.equal(off.status, 503);
+  assert.equal((await call(closed.base, "/api/platform/credits/settle", { bearer: await bearerToken(closed, { client_id: "vox", scope: "credits" }), method: "POST", data: {} })).status, 503);
+});
+
+test("reserves are rate-limited per account at 60 a minute", async (t) => {
+  const app = await start(t);
+  const sub = app.fake.accountId();
+  const vox = await bearerToken(app, { sub, client_id: "vox", scope: "credits" });
+  await app.store.ensureAccount(sub);
+  await createLedger(app.store).deposit(sub, 1000, "Test grant", "grant-rate-test");
+  for (let index = 0; index < 60; index++) assert.equal((await call(app.base, "/api/platform/credits/reserve", { bearer: vox, method: "POST", data: { service: "evaluation", idempotencyKey: "rate-limit-reserve-" + String(index).padStart(3, "0") } })).status, 200, "reserve " + index);
+  assert.equal((await call(app.base, "/api/platform/credits/reserve", { bearer: vox, method: "POST", data: { service: "evaluation", idempotencyKey: "rate-limit-reserve-over" } })).status, 429);
+});
+
+test("a bearer token reads its own account even with another account's cookie", async (t) => {
+  const app = await start(t);
+  const x = app.fake.accountId();
+  const browser = await browserSignIn(app);
+  const browserAccount = (await (await call(app.base, "/api/me", { cookie: browser.cookie })).json()).account.id;
+  await createLedger(app.store).deposit(browserAccount, 9, "Browser grant", "grant-browser-account");
+  await app.store.ensureAccount(x);
+  await createLedger(app.store).deposit(x, 4, "Token grant", "grant-token-account");
+  const response = await call(app.base, "/api/credits/balance", { cookie: browser.cookie, bearer: await bearerToken(app, { sub: x, scope: "credits" }) });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).credits, 4);
+});
+
+test("bearer requests skip the same-origin check; unknown /api paths are 404 for them", async (t) => {
+  const app = await start(t);
+  const token = await bearerToken(app, { scope: "credits" });
+  assert.equal((await call(app.base, "/api/services/chat", { bearer: token, method: "POST", data: { message: "Hi there" }, headers: { Origin: "https://app.example", "Sec-Fetch-Site": "cross-site" } })).status, 200);
+  const missing = await call(app.base, "/api/nothing-here", { bearer: token });
+  assert.equal(missing.status, 404);
+  assert.equal((await call(app.base, "/api/credits/balance", { bearer: token, method: "DELETE" })).status, 404);
+});
+
+test("over https the session cookie is __Host-house_session", async (t) => {
+  const app = await start(t, { siteUrl: "https://portal.example" });
+  const response = await call(app.base, "/api/profile", { method: "POST", data: profile("Secure guest") });
+  const line = cookieNamed(response, "__Host-house_session");
+  assert.match(line, /^__Host-house_session=[^;]+; HttpOnly; SameSite=Lax; Path=\/; Max-Age=2592000; Secure$/);
+  assert.equal(cookieNamed(response, "house_session"), undefined);
+  assert.equal((await (await call(app.base, "/api/me", { cookie: pair(line) })).json()).profile.name, "Secure guest");
+  assert.equal((await (await call(app.base, "/api/me", { cookie: "house_session=" + pair(line).split("=")[1] })).json()).profile, null, "the plain name is not read over https");
+});
+
+test("back-channel logout with sid and sub ends only that sub's session; without an IdP it answers 503", async (t) => {
+  const app = await start(t);
+  const a = app.fake.accountId(), b = app.fake.accountId();
+  const first = await browserSignIn(app, { claims: { sub: a, sid: "shared-sid" } });
+  const second = await browserSignIn(app, { claims: { sub: b, sid: "shared-sid" } });
+  const post = async (token) => fetch(app.base + "/auth/backchannel-logout", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ logout_token: token }) });
+  assert.equal((await post(await app.fake.issueLogoutToken({ sub: a, sid: "shared-sid" }))).status, 200);
+  assert.equal((await (await call(app.base, "/api/me", { cookie: first.cookie })).json()).account, null);
+  assert.equal((await (await call(app.base, "/api/me", { cookie: second.cookie })).json()).account.id, b);
+  const missing = await start(t, { idp: null });
+  const response = await fetch(missing.base + "/auth/backchannel-logout", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: "logout_token=x" });
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("cache-control"), "no-store");
 });
 
 test("auth config gives the front end the issuer and its account page", async (t) => {
@@ -423,4 +488,14 @@ test("the Portal's own provider sign-in, linking, OAuth server and identity look
   const app = await start(t);
   for (const path of ["/auth/github", "/auth/google/callback", "/auth/agora", "/oauth/authorize", "/oauth/userinfo", "/api/auth/providers", "/api/auth/pending-link", "/api/identity/accounts/account:11111111-1111-4111-8111-111111111111"]) assert.equal((await call(app.base, path)).status, 404, path);
   for (const path of ["/oauth/token", "/api/auth/logout-all", "/api/auth/pending-link"]) assert.ok([404, 405].includes((await call(app.base, path, { method: "POST", data: {} })).status), path);
+});
+
+test("a store error during the callback still clears the transaction cookie and fails the sign-in", async (t) => {
+  const store = createStore(resolve(root, "data/people.json"), resolve(temporary, "callback-error.json"), { log: () => {} });
+  store.takeAuthTransaction = async () => { throw new Error("storage unavailable"); };
+  const app = await start(t, { store });
+  const response = await call(app.base, "/auth/callback?code=c&state=s", { cookie: "portal_auth=some-transaction-id" });
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), "/?signin=failed");
+  assert.match(cookieNamed(response, "portal_auth"), /Max-Age=0/);
 });

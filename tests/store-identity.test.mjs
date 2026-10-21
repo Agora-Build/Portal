@@ -261,6 +261,15 @@ test("ensureAccount creates a minimal account once, without overwriting a signed
   for (const bad of ["account:11111111-1111-4111-8111-111111111111", "acct_", null]) await assert.rejects(store.ensureAccount(bad), { status: 422 });
 });
 
+test("endSessionsBySid with a sub ends only that sub's sessions with the sid", async () => {
+  const store = createStore(seed, file(), { log: silent });
+  const one = await store.signIn({ sub: sub(20), sid: "same", idToken: "t" });
+  const two = await store.signIn({ sub: sub(21), sid: "same", idToken: "t" });
+  assert.deepEqual(await store.endSessionsBySid("same", sub(20)), { ended: 1 });
+  assert.equal((await store.actor(one.token)).kind, null);
+  assert.equal((await store.actor(two.token)).kind, "account");
+});
+
 test("endSession returns the ID token; sessions end by sid or by sub", async () => {
   const store = createStore(seed, file(), { log: silent });
   const a1 = await store.signIn({ sub: sub(8), sid: "sid-a", name: "Fay", idToken: "id-a1" });
@@ -341,7 +350,7 @@ test("signIn with a guest token adopts that browser's guest profile when the acc
   const other = await store.join(profile("Other guest"));
   const again = await store.signIn({ sub: sub(12), sid: "s2", idToken: "t", guestToken: other.token });
   assert.equal((await store.actor(again.token)).profile.id, guest.person.id);
-  assert.equal((await store.actor(other.token)).kind, "guest");
+  assert.deepEqual(await store.actor(other.token), { kind: null }, "the browser's guest token stops working");
   // A previous account session in the same browser is replaced, and unknown guest tokens change nothing.
   const replaced = await store.signIn({ sub: sub(13), sid: "s3", idToken: "t", guestToken: again.token });
   assert.equal(await store.browserToken(again.token), false);
