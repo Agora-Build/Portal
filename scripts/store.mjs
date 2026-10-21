@@ -173,9 +173,10 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
   const record = (state, person, kind, action, subject, extra = {}) => {
     state.activity = [{ id: "house:" + randomUUID(), source: "community", actorId: person.id, actorName: person.name, kind, action, subject, createdAt: new Date().toISOString(), ...extra }, ...(state.activity || [])].slice(0, 100);
   };
-  const addSession = (state, account, token, { sid = null, idToken = null } = {}) => {
+  // expiresAt is given when a session replaces another, which keeps that session's absolute lifetime.
+  const addSession = (state, account, token, { sid = null, idToken = null, expiresAt = now() + SESSION_LIFETIME } = {}) => {
     const own = state.sessions.filter((entry) => entry.accountId === account.id).slice(-(SESSIONS_PER_ACCOUNT - 1));
-    state.sessions = [...state.sessions.filter((entry) => entry.accountId !== account.id), ...own, { hash: hash(token), accountId: account.id, sid, idToken, expiresAt: now() + SESSION_LIFETIME }];
+    state.sessions = [...state.sessions.filter((entry) => entry.accountId !== account.id), ...own, { hash: hash(token), accountId: account.id, sid, idToken, expiresAt }];
   };
   const endWhere = (match) => update((state) => {
     const before = state.sessions.length;
@@ -306,7 +307,7 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
           account.profileId = person.id;
           // The new session replaces the one that joined, so the old token stops working.
           if (current) state.sessions = state.sessions.filter((session) => session !== current);
-          addSession(state, account, token, { sid: current?.sid, idToken: current?.idToken });
+          addSession(state, account, token, { sid: current?.sid, idToken: current?.idToken, expiresAt: current?.expiresAt });
         }
         state.people.unshift(person);
         record(state, person, "member", "took a seat in", "the foundry", { url: "index.html#people" });

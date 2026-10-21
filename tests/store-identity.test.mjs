@@ -375,3 +375,15 @@ test("removing a profile also drops the spaces it owns and its memberships and l
   assert.deepEqual([state.spaces[0].hostId, state.spaces[0].members, state.spaces[0].blocked, state.spaces[0].invitations], [null, [sub(30)], [], [{ createdBy: sub(30) }]]);
   assert.deepEqual(state.spaceLeases.map((lease) => lease.actorId), [sub(30)]);
 });
+test("joining keeps the sign-in session's absolute expiry rather than renewing it", async () => {
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  const store = createStore(seed, file(), { now: () => clock, log: silent });
+  const { token } = await store.signIn({ sub: sub(12), sid: "s", name: "Jo", idToken: "t" });
+  const signedInUntil = (await store.snapshot()).sessions.find((session) => session.accountId === sub(12)).expiresAt;
+  clock += 20 * 86400000;
+  const joined = await store.join(profile("Jo"), token);
+  const sessions = (await store.snapshot()).sessions.filter((session) => session.accountId === sub(12));
+  assert.deepEqual(sessions.map((session) => session.expiresAt), [signedInUntil]);
+  clock = signedInUntil;
+  assert.deepEqual(await store.actor(joined.token), { kind: null }, "the joined session ends with the sign-in's 30 days");
+});
