@@ -58,7 +58,9 @@ const safePicture = (value) => {
 const verifiedEmail = (value, verified) => verified === true && typeof value === "string" && value.length <= 254 && /^[\x21-\x3f\x41-\x7e]+@[\x21-\x3f\x41-\x7e]+\.[\x21-\x3f\x41-\x7e]+$/.test(value) ? value.toLowerCase() : null;
 const plainString = (value, max = 255) => typeof value === "string" && value.length > 0 && value.length <= max;
 
-export function createIdp({ issuer, clientId = "portal", clientSecret, siteUrl, audience = DEFAULT_AUDIENCE, request = fetch, now = Date.now } = {}) {
+export function createIdp({ issuer: issuerSetting, clientId = "portal", clientSecret, siteUrl, audience = DEFAULT_AUDIENCE, request = fetch, now = Date.now } = {}) {
+  // A single trailing slash is dropped, so "https://auth.agora.build/" matches the IdP's exact issuer.
+  const issuer = typeof issuerSetting === "string" ? issuerSetting.replace(/\/$/, "") : issuerSetting;
   const issuerUrl = safeOrigin(issuer, "AUTH_ISSUER");
   if (!plainString(clientId, 200)) throw new TypeError("PORTAL_CLIENT_ID must be set");
   if (typeof clientSecret !== "string" || clientSecret.length < 32) throw new TypeError("PORTAL_CLIENT_SECRET must be at least 32 characters");

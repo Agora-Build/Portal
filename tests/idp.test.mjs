@@ -455,3 +455,10 @@ test("a failed warm-up reports its reason only", async () => {
   other.setDown(true);
   assert.equal(await keyless.warm(), "jwks");
 });
+test("a trailing slash on AUTH_ISSUER is stripped, so tokens from the IdP's exact issuer still verify", async () => {
+  const { fake, idp } = await setup({ issuer: issuer + "/" });
+  assert.equal(idp.config.issuer, issuer);
+  assert.equal(idp.config.accountUrl, issuer + "/account");
+  assert.equal(await idp.available(), true);
+  assert.match((await idp.verifyAccessToken(await fake.issueAccessToken())).sub, /^acct_/);
+});
