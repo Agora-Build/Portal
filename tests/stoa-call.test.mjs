@@ -34,3 +34,17 @@ test("screen shares come first, then people with video, then the rest; your own 
   const order = tileList({ ...snapshot, screen: false, peers: [quiet, snapshot.peers[0], snapshot.peers[1]] }, { people, self }).map((tile) => tile.name);
   assert.deepEqual(order, ["Ada's screen", "Me (you)", "Ada", "Builder"]);
 });
+test("account call identities (acct_…) map back to accounts, other tabs and avatars", () => {
+  const grace = "acct_01HZX3K7M9P2Q4R6S8T0V1W2Y3", mine = "acct_01HZX3K7M9P2Q4R6S8T0V1W2Y4";
+  const crowd = [{ id: grace, name: "Grace" }];
+  const me = { id: mine, ids: [mine, "member:72a639ba-3a45-4afe-936b-111111111111"], name: "Me" };
+  const call = { joined: true, uid: mine + "_aaaaaaaaaaaa", screenUid: mine + "_aaaaaaaaaaaa_screen", audio: true, video: false, screen: false, peers: [{ uid: grace + "_bbbbbbbbbbbb", audio: true, video: true, screen: false }, { uid: grace + "_bbbbbbbbbbbb_screen", audio: false, video: true, screen: true }] };
+  assert.equal(actorUuid(grace + "_bbbbbbbbbbbb"), grace);
+  assert.equal(actorUuid(grace + "_bbbbbbbbbbbb_screen"), grace);
+  assert.equal(nameFor(grace + "_bbbbbbbbbbbb", { people: crowd, self: me, snapshot: call }), "Grace");
+  assert.equal(nameFor(grace + "_bbbbbbbbbbbb_screen", { people: crowd, self: me, snapshot: call }), "Grace's screen");
+  assert.equal(nameFor(mine + "_dddddddddddd", { people: crowd, self: me, snapshot: call }), "Me (another tab)");
+  const frame = { tileSize: 32, camera: { x: 0, y: 0, zoom: 1 }, avatars: [{ id: mine, x: 1, y: 1, self: true }, { id: grace, x: 2, y: 3, self: false }] };
+  const graceTile = tileList(call, { people: crowd, self: me }).find((tile) => tile.name === "Grace");
+  assert.deepEqual(overAvatar(graceTile, frame), { left: 2.5 * 32, top: 3 * 32 });
+});
