@@ -1,4 +1,4 @@
-import { api, el, state, notify, openSignIn, refreshSession, sessionReady, requestKey } from "./script.js";
+import { api, el, avatar, state, notify, openSignIn, refreshSession, sessionReady, requestKey } from "./script.js";
 
 const status = document.querySelector("#account-status");
 const purchaseStatus = document.querySelector("#purchase-status");
@@ -87,8 +87,12 @@ async function loadAccount() {
   const version = ++renderVersion;
   const account = state.account;
   status.textContent = account ? "Signed in as " + account.name : "Sign in to manage your account, membership, and credits.";
-  document.querySelector("#account-identity").replaceChildren(account ? el("div", {}, [el("h3", { text: account.name }), el("p", { class: "account-user-id mono", text: account.id }), el("p", { text: "Logins: " + (account.providers.join(", ") || "Connected application") }), ...(account.emails?.length ? [el("p", { class: "muted", text: "Verified email" + (account.emails.length > 1 ? "s" : "") + " (private): " + account.emails.join(", ") })] : [])]) : el("p", { text: "Your private account is separate from your public community profile." }));
-  document.querySelector("#logout-everywhere").hidden = !account;
+  document.querySelector("#account-identity").replaceChildren(account ? el("div", { class: "account-person" }, [avatar({ name: account.name || "Account", avatar: account.avatar }), el("div", {}, [el("h3", { text: account.name || "Your account" }), el("p", { class: "account-user-id mono", text: account.id }), ...(account.email ? [el("p", { class: "muted", text: "Email (private): " + account.email })] : [])])]) : el("p", { text: "Your private account is separate from your public community profile. Sign in to use credits, membership, and connections." }));
+  document.querySelector("#account-login").hidden = Boolean(account);
+  document.querySelector("#account-logout").hidden = !account;
+  const manage = document.querySelector("#manage-signin");
+  manage.hidden = !account || !state.authConfig?.accountUrl;
+  if (state.authConfig?.accountUrl) manage.href = state.authConfig.accountUrl;
   renderPlans();
   if (!account) {
     document.querySelector("#credit-balance").textContent = "--";
@@ -96,6 +100,8 @@ async function loadAccount() {
     document.querySelector("#agora-projects").replaceChildren();
     document.querySelector("#manage-billing").hidden = true;
     document.querySelector("#disconnect-agora").hidden = true;
+    document.querySelector("#connect-agora").hidden = true;
+    document.querySelector("#agora-status").textContent = "Sign in to connect your Agora projects.";
     document.querySelector("#more-statement").hidden = true;
     document.querySelector("#subscription-status").textContent = "Basic starts with your account. Premium subscriptions are managed here.";
     return;
@@ -114,7 +120,8 @@ async function loadAccount() {
   }
   if (results[2].status === "fulfilled") {
     const agora = results[2].value.agora;
-    document.querySelector("#agora-status").textContent = agora.connected ? "Connected to your Agora account." : agora.ready ? "Connect Agora to access your projects and App IDs." : "Agora Console connections are not configured yet.";
+    document.querySelector("#agora-status").textContent = agora.connected ? "Connected to your Agora account" + (agora.name ? " (" + agora.name + ")" : "") + "." : agora.connect ? "Connect Agora to access your projects and App IDs." : "Agora Console connections are not available yet.";
+    document.querySelector("#connect-agora").hidden = !agora.connect;
     document.querySelector("#disconnect-agora").hidden = !agora.connected;
     document.querySelector("#connect-agora").textContent = agora.connected ? "Reconnect Agora" : "Connect Agora";
     if (agora.connected) await loadProjects(version);
@@ -131,12 +138,16 @@ document.querySelector("#manage-billing").addEventListener("click", async () => 
   try { location.assign((await api("/api/billing/manage", { method: "POST" })).url); }
   catch (error) { notify(error.message); }
 });
-document.querySelector("#logout-everywhere").addEventListener("click", async () => {
-  try { await api("/api/auth/logout-all", { method: "POST" }); await refreshSession(); notify("Your Agora.Build sessions are signed out across connected apps."); }
-  catch (error) { notify(error.message); }
+document.querySelector("#account-logout").addEventListener("click", async () => {
+  try {
+    const result = await api("/api/auth/logout", { method: "POST" });
+    if (result.endSessionUrl) { location.assign(result.endSessionUrl); return; }
+    await refreshSession(); notify("You are signed out.");
+  } catch (error) { notify(error.message); }
 });
 document.querySelector("#more-statement").addEventListener("click", () => statement(true).catch((error) => notify(error.message)));
 await sessionReady;
+await new Promise((done) => { if (state.authConfig) done(); else document.addEventListener("house:authconfig", done, { once: true }); });
 try { catalog = await api("/api/billing/catalog"); }
 catch (error) { purchaseStatus.textContent = error.message; }
 await loadAccount();
@@ -146,3 +157,11 @@ if (checkoutResult === "success") {
   purchaseStatus.textContent = "Checkout returned successfully. Your account updates after payment confirmation; refresh if it is still pending.";
   for (let attempt = 0; attempt < 5; attempt += 1) { await new Promise((done) => setTimeout(done, 2000)); await refreshSession(); }
 } else if (checkoutResult === "cancelled") purchaseStatus.textContent = "Checkout was cancelled. You can return to the same checkout or choose another purchase.";
+
+const connected = new URL(location.href).searchParams.get("connected");
+if (connected) {
+  const url = new URL(location.href);
+  url.searchParams.delete("connected");
+  history.replaceState(null, "", url.pathname + url.search + url.hash);
+  notify(connected === "agora" ? "Agora Console is connected." : connected === "unavailable" ? "Connecting Agora Console is unavailable right now." : "Connecting Agora Console didn't complete. Try again.");
+}

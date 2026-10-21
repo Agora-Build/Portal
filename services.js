@@ -20,7 +20,7 @@ if (config) {
 document.querySelector("#llm-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   await sessionReady;
-  if (!state.profile && !state.account) { openSignIn(); return; }
+  if (!state.account) { notify("Sign in to use credits."); openSignIn(); return; }
   const button = event.currentTarget.querySelector("[type=submit]");
   const output = document.querySelector("#llm-output");
   button.disabled = true;
@@ -33,7 +33,7 @@ let audioUrl;
 document.querySelector("#speech-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   await sessionReady;
-  if (!state.profile && !state.account) { openSignIn(); return; }
+  if (!state.account) { notify("Sign in to use credits."); openSignIn(); return; }
   const form = event.currentTarget;
   const button = form.querySelector("[type=submit]");
   button.disabled = true;
@@ -54,3 +54,14 @@ document.querySelector("#speech-form").addEventListener("submit", async (event) 
   } catch (error) { status.textContent = error.message; }
   finally { button.disabled = false; }
 });
+
+// Credits belong to an account, so a browser-only guest sees why the forms ask them to sign in.
+const guestNotice = async () => {
+  await sessionReady;
+  for (const note of document.querySelectorAll(".service-note")) {
+    note.dataset.base ??= note.textContent;
+    note.textContent = state.account ? note.dataset.base : "Sign in to use credits.";
+  }
+};
+guestNotice();
+document.addEventListener("house:session", guestNotice);

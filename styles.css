@@ -26,6 +26,7 @@
 .identity-card { border-top: 3px solid var(--green); }
 .credits-card { border-top: 3px solid var(--accent); }
 .account-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 17px; margin-top: 24px; }
+.account-person { display: flex; align-items: center; gap: 16px; }
 .account-user-id { overflow-wrap: anywhere; font-size: 11px; margin: 8px 0 15px; }
 .credit-balance { display: flex; align-items: baseline; flex-wrap: wrap; gap: 15px; margin: 16px 0; }
 .credit-balance > .mono { font-size: 52px; line-height: 1.1; letter-spacing: -3px; }
@@ -392,12 +393,8 @@ dialog::backdrop { background: #20282099; }
 .close-button:hover { color: var(--ink); background: #e9eddf; }
 dialog h2 { font-size: 30px; line-height: 1.25; font-weight: 500; letter-spacing: -1px; }
 .dialog-intro { font-size: 13px; color: var(--muted); margin-top: 12px; }
-.login-providers { display: grid; gap: 10px; margin-top: 25px; }
-.login-provider { display: flex; align-items: center; gap: 15px; min-height: 54px; padding: 12px 15px; border: 1px solid #cbd2bd; border-radius: 3px; background: var(--surface); color: var(--ink); text-align: left; font-size: 13px; }
-.login-provider:hover:not(:disabled) { border-color: var(--accent); background: #f3eee3; }
-.login-provider:disabled { opacity: .65; cursor: default; }
-.login-provider-mark { width: 28px; font-size: 18px; color: var(--green); }
-.login-provider small { margin-left: auto; color: var(--muted); font-size: 10px; }
+.login-start { margin-top: 25px; }
+.login-start.is-disabled { opacity: .65; cursor: default; pointer-events: none; }
 .login-status { margin: 18px 0; font-size: 12px; color: var(--muted); }
 .login-guest { padding: 9px 0; border-bottom: 1px solid var(--line); }
 .login-note { margin-top: 18px; }
