@@ -14,7 +14,7 @@ import { billingClients as parseBillingClients, loadBillingClients, priceFor } f
 import { createCredits } from "./credits.mjs";
 import { createLedger } from "./ledger.mjs";
 import { createBilling } from "./billing.mjs";
-import { createConnections } from "./connections.mjs";
+import { ConnectError, createConnections } from "./connections.mjs";
 import { createPostgresPersistence } from "./persistence.mjs";
 import { createSignaling, signalingConfig } from "./spaces/signaling.mjs";
 import { createSpaces, loadWorlds } from "./spaces/service.mjs";
@@ -91,6 +91,8 @@ export function createAppServer(directory = root, options = {}) {
   const credits = options.credits || createCredits(undefined, { ledger });
   const billing = options.billing || createBilling(store);
   const connections = options.connections || createConnections(store);
+  // Connecting Agora Console needs the AGORA_OAUTH_* settings; without them it is unavailable, logged by setting name only.
+  if (connections.config.connect && !connections.config.connect.ready) log("Agora Console connect is unavailable: set " + connections.config.connect.missing.join(", ") + ".");
   const models = options.models || createModelClient(modelConfig());
   const activity = options.activity || createActivityFeed({ store, projectsFile: resolve(dataDirectory, "projects.json"), snapshotFile: resolve(dataDirectory, "activity.json") });
   const worlds = options.worlds || loadWorlds(directory);
@@ -139,6 +141,9 @@ export function createAppServer(directory = root, options = {}) {
       const sessionCookie = (value, maxAge = 30 * 86400) => sessionName + "=" + value + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=" + maxAge + (secure ? "; Secure" : "");
       const transactionName = secure ? "__Host-portal_auth" : "portal_auth";
       const transactionCookie = (value, maxAge = 600) => transactionName + "=" + value + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=" + maxAge + (secure ? "; Secure" : "");
+      // A connect in progress has its own cookie, so it never collides with a sign-in in progress.
+      const connectName = secure ? "__Host-portal_connect" : "portal_connect";
+      const connectCookie = (value, maxAge = 600) => connectName + "=" + value + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=" + maxAge + (secure ? "; Secure" : "");
       if (path === "/api/billing/webhook" && request.method === "POST") {
         let size = 0; const chunks = [];
         for await (const chunk of request) { size += chunk.length; if (size > 262144) throw new AppError(413, "Payment event too large."); chunks.push(chunk); }
@@ -171,6 +176,32 @@ export function createAppServer(directory = root, options = {}) {
         } catch (error) {
           log("Sign-in failed: " + (error instanceof LoginError ? error.reason : "error") + ".");
           redirect(response, withSignin(transaction?.returnTo || "/", "failed"), [clear]);
+        }
+        return;
+      }
+      if (path === "/connect/agora" && request.method === "GET") {
+        // Authorises Console access for the signed-in account; it never signs anyone in. Browser account sessions only.
+        if (request.headers.authorization) throw browserOnly();
+        const accountId = (await store.session(browserToken)).account?.id;
+        if (!accountId) { redirect(response, "/auth/login?returnTo=%2Faccount.html"); return; }
+        limit("connect:" + accountId, 10, 60000);
+        if (!connections.config.connect?.ready) { redirect(response, "/account.html?connected=unavailable"); return; }
+        const started = connections.beginConnect(accountId);
+        await store.saveAuthTransaction(started.transaction);
+        redirect(response, started.url, [connectCookie(started.transaction.id)]);
+        return;
+      }
+      if (path === "/connect/agora/callback" && request.method === "GET") {
+        // The transaction is consumed whatever happens next, and its cookie is cleared on every path.
+        const clear = connectCookie("", 0);
+        try {
+          const transaction = await store.takeAuthTransaction(cookieValue(request, connectName));
+          const accountId = (await store.session(browserToken)).account?.id;
+          await connections.completeConnect(transaction, requestUrl.searchParams, accountId);
+          redirect(response, "/account.html?connected=agora", [clear]);
+        } catch (error) {
+          log("Agora connect failed: " + (error instanceof ConnectError ? error.reason : "error") + ".");
+          redirect(response, "/account.html?connected=failed", [clear]);
         }
         return;
       }

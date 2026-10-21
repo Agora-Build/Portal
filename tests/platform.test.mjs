@@ -81,6 +81,9 @@ test("Agora Console connections are encrypted, owner-only, and renewed with the 
     return Response.json({ items: [{ projectId: "project-1", name: "Private project", appId: "agora-app-id", signKey: "private-test-certificate", status: "active" }] });
   } });
   await resources.save(login.account.id, { accessToken: "upstream-token", refreshToken: "upstream-refresh", expiresAt: Date.now() - 1 });
+  // The connection needs no Agora identity on the account; without SITE_URL the connect flow itself is unavailable.
+  assert.deepEqual((await resources.status(login.account.id)).agora, { ready: true, connect: false, connected: true, name: null });
+  assert.deepEqual(connectionConfig.connect.missing, ["SITE_URL"]);
   const lists = await Promise.all([resources.projects(login.account.id), resources.projects(login.account.id)]);
   assert.equal(refreshes, 1);
   assert.ok(!JSON.stringify(lists).includes("private-test-certificate"));

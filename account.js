@@ -122,13 +122,7 @@ async function loadAccount() {
   for (const result of results) if (result.status === "rejected") notify(result.reason.message);
 }
 document.querySelector("#account-login").addEventListener("click", openSignIn);
-document.querySelector("#connect-agora").addEventListener("click", async () => {
-  try {
-    const { providers } = await api("/api/auth/providers");
-    if (!providers.find((provider) => provider.id === "agora")?.ready) { notify("Agora sign-in is not connected yet."); return; }
-    location.assign("/auth/agora?returnTo=%2Faccount.html" + (state.account ? "&link=1" : ""));
-  } catch (error) { notify(error.message); }
-});
+document.querySelector("#connect-agora").addEventListener("click", () => { location.assign("/connect/agora"); });
 document.querySelector("#disconnect-agora").addEventListener("click", async () => {
   try { await api("/api/connections/agora", { method: "DELETE" }); document.querySelector("#agora-projects").replaceChildren(); await refreshSession(); }
   catch (error) { notify(error.message); }
