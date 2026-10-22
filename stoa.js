@@ -103,7 +103,7 @@ panel.setPeople([], self.name);
 panel.canTalk(self.signedIn);
 let live = null, stage = null;
 const unavailable = "The Stoa view isn't available, so there's nothing to walk or talk in.";
-const startSpace = (prefill) => self.signedIn ? spacesUi.openCreate(prefill) : (panel.say("Sign in to start a space."), openSignIn());
+const startSpace = (prefill) => state.account ? spacesUi.openCreate(prefill) : (panel.say("Sign in to start a space."), openSignIn());
 // Controls work even without the canvas: Go to explains where the door is, Sign in and Start a space still do their jobs.
 panel.on({
   go: (target) => {

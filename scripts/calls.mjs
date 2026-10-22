@@ -22,7 +22,7 @@ export function createAgoraCalls(config = agoraConfig(), { now = Date.now } = {}
   return {
     ready: config.ready,
     issueSpace(space, actor, input = {}) {
-      return credentials("agora-build-space-" + space.id, actor.id.replace(/^(account|member):/, "") + "_", input);
+      return credentials("agora-build-space-" + space.id, actor.id.replace(/^member:/, "") + "_", input);
     }
   };
 }

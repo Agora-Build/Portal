@@ -8,7 +8,7 @@ import { outsideDoor } from "../stoa/stage.js";
 import { walkable } from "../world/map.js";
 
 const plaza = parseMap(JSON.parse(await readFile(new URL("../worlds/plaza/map.json", import.meta.url), "utf8")));
-const me = "a-72a639ba-3a45-4afe-936b-111111111111", ada = "a-72a639ba-3a45-4afe-936b-222222222222", bo = "m-72a639ba-3a45-4afe-936b-333333333333";
+const me = "acct_01HZX3K7M9P2Q4R6S8T0111111", ada = "acct_01HZX3K7M9P2Q4R6S8T0222222", bo = "m-72a639ba-3a45-4afe-936b-333333333333";
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const state = (x, y, name) => ({ x: String(x), y: String(y), dir: "down", name });
 
@@ -70,7 +70,7 @@ test("messages and presence from others reach the people list and the message lo
   assert.equal(seen.people[0].bubble.text, "Hi all");
   live.handlers.message(ada, JSON.stringify({ t: "refresh" }));
   assert.equal(seen.refreshed, 1);
-  assert.equal(seen.refreshedBy, "account:72a639ba-3a45-4afe-936b-222222222222", "the publisher is passed on so the caller can check they host the room");
+  assert.equal(seen.refreshedBy, "acct_01HZX3K7M9P2Q4R6S8T0222222", "the publisher is passed on so the caller can check they host the room");
   live.handlers.presence({ type: "state", userId: bo, states: state(20, 17, "Bo") });
   assert.deepEqual(seen.people.map((person) => person.name), ["Ada", "Bo"]);
   live.handlers.presence({ type: "leave", userId: ada });
@@ -100,7 +100,7 @@ test("guests only watch", async () => {
 });
 test("closing leaves the channel and stops publishing; blocked people are dropped", async () => {
   const { live, engine, place, seen } = await opened({ who: [{ userId: ada, states: state(22, 17, "Ada") }] });
-  place.setBlocked(["account:72a639ba-3a45-4afe-936b-222222222222"]);
+  place.setBlocked(["acct_01HZX3K7M9P2Q4R6S8T0222222"]);
   assert.deepEqual(seen.people, []);
   await place.close();
   assert.deepEqual(live.left, ["ab-stoa-plaza"]);
@@ -202,7 +202,7 @@ test("decor and rekey notices reach the caller with who sent them, and can be pu
   live.handlers.message(ada, JSON.stringify({ t: "decor", version: 2 }));
   live.handlers.message(ada, JSON.stringify({ t: "rekey" }));
   live.handlers.message(bo, JSON.stringify({ t: "rekey" }));
-  const adaId = "account:72a639ba-3a45-4afe-936b-222222222222";
+  const adaId = "acct_01HZX3K7M9P2Q4R6S8T0222222";
   assert.deepEqual(seen, [["decor", adaId, 2], ["rekey", adaId]], "people without presence are ignored");
   place.decorChanged(5);
   assert.equal(await place.rekey(), true);

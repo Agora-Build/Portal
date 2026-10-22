@@ -2,13 +2,17 @@ import { createRtcClient, isScreen } from "../world/rtc-client.js";
 import { loadAgora } from "../world/sdk.js";
 
 // Calls inside rooms: native controls in the panel, video tiles over the map in the layout the theme chooses.
-// RTC uids start with the person's actor UUID, so tiles are named and placed from presence.
-export const actorUuid = (uid) => String(uid).split("_")[0];
+// RTC uids start with the person's actor key (an account's acct_… ID, or a guest member's UUID), so tiles are named
+// and placed from presence.
+const ACCOUNT_UID = /^(acct_[0-9A-HJKMNP-TV-Z]{26})_/;
+export const actorUuid = (uid) => ACCOUNT_UID.exec(String(uid))?.[1] || String(uid).split("_")[0];
+// The same key from a presence or profile ID: accounts are acct_… as they are, members are member:<uuid>.
+const actorKey = (id) => String(id).startsWith("acct_") ? String(id) : String(id).split(":")[1];
 export function nameFor(uid, { people, self, snapshot }) {
   if (uid === snapshot.uid) return self.name + " (you)";
   if (uid === snapshot.screenUid) return "Your screen";
-  if ((self.ids || []).some((id) => String(id).split(":").pop() === actorUuid(uid))) return self.name + " (another tab)" + (isScreen(uid) ? "'s screen" : "");
-  const person = people.find((entry) => String(entry.id).split(":")[1] === actorUuid(uid));
+  if ((self.ids || []).some((id) => actorKey(id) === actorUuid(uid))) return self.name + " (another tab)" + (isScreen(uid) ? "'s screen" : "");
+  const person = people.find((entry) => actorKey(entry.id) === actorUuid(uid));
   return (person?.name || "Builder") + (isScreen(uid) ? "'s screen" : "");
 }
 // Screen shares lead, then your own camera, then people with video, then the rest, so what matters stays in view when tiles overflow.
@@ -21,7 +25,7 @@ export function tileList(snapshot, { people, self }) {
 // Where a tile floats in over-avatar layout: just above the person's head, in canvas pixels. Null when they aren't drawn.
 export function overAvatar(tile, frame) {
   if (tile.screen || !frame) return null;
-  const avatar = frame.avatars.find((entry) => tile.mine ? entry.self : String(entry.id).split(":")[1] === actorUuid(tile.uid));
+  const avatar = frame.avatars.find((entry) => tile.mine ? entry.self : actorKey(entry.id) === actorUuid(tile.uid));
   if (!avatar) return null;
   return { left: ((avatar.x + 0.5) * frame.tileSize - frame.camera.x) * frame.camera.zoom, top: (avatar.y * frame.tileSize - frame.camera.y) * frame.camera.zoom };
 }

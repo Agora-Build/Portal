@@ -184,7 +184,7 @@ test("a guest arriving on a door is asked to sign in without calling the API", a
   assert.deepEqual(paths, []);
 });
 
-const hostUser = "a-72a639ba-3a45-4afe-936b-222222222222", hostActor = "account:72a639ba-3a45-4afe-936b-222222222222", guestUser = "a-72a639ba-3a45-4afe-936b-333333333333";
+const hostUser = "acct_01HZX3K7M9P2Q4R6S8T0222222", hostActor = "acct_01HZX3K7M9P2Q4R6S8T0222222", guestUser = "acct_01HZX3K7M9P2Q4R6S8T0333333";
 const present = (userId, name) => ({ userId, states: { x: String(lot.entry.x), y: String(lot.entry.y), dir: "down", name } });
 
 test("many presence events in one frame update the engine and panel once", async () => {
@@ -194,7 +194,7 @@ test("many presence events in one frame update the engine and panel once", async
   flushFrames();
   const [othersBefore, peopleBefore] = [calls.others, calls.people];
   const handlers = calls.handlers["plaza-1"];
-  for (let index = 0; index < 50; index += 1) handlers.presence({ type: "state", userId: "a-72a639ba-3a45-4afe-936b-" + String(index).padStart(12, "0"), states: { x: String(lot.door.x), y: String(lot.door.y + 1), dir: "down", name: "P" + index } });
+  for (let index = 0; index < 50; index += 1) handlers.presence({ type: "state", userId: "acct_01HZX3K7M9P2Q4R6S8T0" + String(index).padStart(6, "0"), states: { x: String(lot.door.x), y: String(lot.door.y + 1), dir: "down", name: "P" + index } });
   assert.equal(calls.others, othersBefore, "nothing is drawn until the frame");
   flushFrames();
   assert.deepEqual([calls.others - othersBefore, calls.people - peopleBefore], [1, 1]);
@@ -346,7 +346,7 @@ test("the merged people list is kept and reported each time it is rebuilt", asyn
   const api = async (path) => path === "/api/spaces/plaza/enter" ? access("plaza", "plaza-1") : {};
   const { stage, calls, flushFrames } = setup({ api, onPeople: (list) => lists.push(list.map((person) => person.name)) });
   await stage.toPlaza(null);
-  calls.handlers["plaza-1"].presence({ type: "snapshot", people: [{ userId: "a-72a639ba-3a45-4afe-936b-222222222222", states: { x: String(lot.door.x), y: String(lot.door.y + 1), dir: "down", name: "Ada" } }] });
+  calls.handlers["plaza-1"].presence({ type: "snapshot", people: [{ userId: "acct_01HZX3K7M9P2Q4R6S8T0222222", states: { x: String(lot.door.x), y: String(lot.door.y + 1), dir: "down", name: "Ada" } }] });
   flushFrames();
   assert.deepEqual(lists.at(-1), ["Ada"]);
   assert.deepEqual(stage.people().map((person) => person.name), ["Ada"]);
@@ -423,15 +423,15 @@ test("the host can hand over hosting; the room stops offering host tools", async
   const api = async (path, options) => {
     if (path === "/api/spaces/plaza/enter") return access("plaza", "plaza-1");
     if (path.endsWith("/enter")) return access("lot-" + lot.slug, "lot-ch");
-    if (path.endsWith("/host")) { posts.push(JSON.parse(options.body)); return { hostId: "account:72a639ba-3a45-4afe-936b-222222222222" }; }
+    if (path.endsWith("/host")) { posts.push(JSON.parse(options.body)); return { hostId: "acct_01HZX3K7M9P2Q4R6S8T0222222" }; }
     return {};
   };
   const { stage, calls } = setup({ api, onManage: (can) => managed.push(can) });
   await stage.toPlaza(null);
   await stage.enterLot(lot);
   assert.equal(stage.canManage(), true);
-  await stage.makeHost({ id: "account:72a639ba-3a45-4afe-936b-222222222222", name: "Ada" });
-  assert.deepEqual(posts, [{ actorId: "account:72a639ba-3a45-4afe-936b-222222222222" }]);
+  await stage.makeHost({ id: "acct_01HZX3K7M9P2Q4R6S8T0222222", name: "Ada" });
+  assert.deepEqual(posts, [{ actorId: "acct_01HZX3K7M9P2Q4R6S8T0222222" }]);
   assert.equal(calls.showRoom.at(-1).host, false);
   assert.equal(calls.showRoom.at(-1).decorate, false);
   assert.equal(stage.canManage(), false);

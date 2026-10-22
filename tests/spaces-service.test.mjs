@@ -21,18 +21,21 @@ async function setup(t, { plazaCapacity, before, admins = [] } = {}) {
   const clock = { now: 1800000000000 };
   const now = () => clock.now;
   const store = createStore(resolve(root, "data/people.json"), resolve(directory, "state.json"), { now });
-  const person = async (name) => { const { token } = await store.join(profile(name)); return { token, id: (await store.actor(token)).id }; };
+  const person = async (name) => { const { token } = await store.join(profile(name)); return { token, id: (await store.actor(token)).profile.id }; };
   const context = before ? await before(store, person) : {};
   const spaces = createSpaces({ store, worlds, secret, now, plazaCapacity, admins, signaling: createSignaling(signalingConfig(env), { now }), calls: createAgoraCalls(agoraConfig(env), { now }) });
   const events = [];
   spaces.onEvents((list) => events.push(...list));
   const account = async (name, subject) => {
-    const login = await store.login({ provider: "github", issuer: "https://github.com", subject: String(subject), name });
-    await store.join(profile(name), login.token);
-    const actor = await store.actor(login.token);
-    return { token: login.token, id: actor.id, accountId: actor.accountId, memberId: actor.memberId };
+    const login = await store.signIn({ sub: "acct_" + String(subject).padStart(26, "0"), sid: "sid-" + subject, name, idToken: "id-token" });
+    const { token } = await store.join(profile(name), login.token);
+    const actor = await store.actor(token);
+    return { token, id: actor.account.id, accountId: actor.account.id, memberId: actor.profile.id };
   };
-  return { store, spaces, events, clock, person, account, ...context };
+  // Only accounts create and own spaces, so space owners are signed-in accounts with a profile.
+  let subjects = 100;
+  const holder = (name) => account(name, ++subjects);
+  return { store, spaces, events, clock, person, account, holder, ...context };
 }
 
 test("system spaces and legacy rooms are prepared once", async (t) => {
@@ -47,7 +50,7 @@ test("system spaces and legacy rooms are prepared once", async (t) => {
 });
 
 test("the first person in a lot hosts and sets the topic; hosting passes on; an empty lot resets", async (t) => {
-  const { spaces, events, clock, person } = await setup(t);
+  const { spaces, events, clock, person, holder } = await setup(t);
   const [a, b, c] = [await person("Ada"), await person("Bo"), await person("Cy")];
   const first = await spaces.enter(a.token, "lot-ai-agents");
   assert.deepEqual([first.firstIn, first.hostId, first.channel, first.key], [true, a.id, "ab-stoa-ai-agents", null]);
@@ -72,7 +75,7 @@ test("the first person in a lot hosts and sets the topic; hosting passes on; an 
 });
 
 test("expired leases free seats and hand over hosting", async (t) => {
-  const { spaces, clock, person } = await setup(t);
+  const { spaces, clock, person, holder } = await setup(t);
   const [a, b] = [await person("Ada"), await person("Bo")];
   await spaces.enter(a.token, "lot-rtc-lab");
   clock.now += 61000;
@@ -83,8 +86,8 @@ test("expired leases free seats and hand over hosting", async (t) => {
 });
 
 test("a full plaza offers the person's unlisted spaces, and lots stay open", async (t) => {
-  const { spaces, person } = await setup(t, { plazaCapacity: 1 });
-  const [a, b] = [await person("Ada"), await person("Bo")];
+  const { spaces, person, holder } = await setup(t, { plazaCapacity: 1 });
+  const [a, b] = [await person("Ada"), await holder("Bo")];
   await spaces.enter(a.token, "plaza");
   const own = await spaces.create(b.token, { title: "Bo's corner" });
   await assert.rejects(spaces.enter(b.token, "plaza"), (error) => {
@@ -100,16 +103,19 @@ test("a full plaza offers the person's unlisted spaces, and lots stay open", asy
 });
 
 test("people can own as many spaces as their plan allows", async (t) => {
-  const { spaces, person } = await setup(t);
-  const a = await person("Ada");
+  const { spaces, person, holder } = await setup(t);
+  const a = await holder("Ada");
   for (const title of ["One", "Two", "Three"]) await spaces.create(a.token, { title });
   await assert.rejects(spaces.create(a.token, { title: "Four" }), { status: 409 });
   await assert.rejects(spaces.create(null, { title: "Guest" }), { status: 401 });
+  const guest = await person("Guest");
+  await assert.rejects(spaces.create(guest.token, { title: "Guest room" }), { status: 401 });
+  assert.equal((await spaces.mine(guest.token)).canCreate, false, "a guest can't own spaces");
 });
 
 test("private spaces stay hidden from strangers and admit invitation holders", async (t) => {
-  const { spaces, events, clock, person } = await setup(t);
-  const [owner, guest, late, later] = [await person("Owner"), await person("Guest"), await person("Late"), await person("Later")];
+  const { spaces, events, clock, person, holder } = await setup(t);
+  const [owner, guest, late, later] = [await holder("Owner"), await person("Guest"), await person("Late"), await person("Later")];
   const space = await spaces.create(owner.token, { title: "Board room", visibility: "private" });
   await assert.rejects(spaces.get(guest.token, space.id), missing);
   await assert.rejects(spaces.get(guest.token, "00000000-0000-4000-8000-000000000000"), missing);
@@ -134,8 +140,8 @@ test("private spaces stay hidden from strangers and admit invitation holders", a
 });
 
 test("removing someone blocks them, renames hidden channels, and ends their heartbeat", async (t) => {
-  const { spaces, events, person } = await setup(t);
-  const [owner, visitor] = [await person("Owner"), await person("Visitor")];
+  const { spaces, events, person, holder } = await setup(t);
+  const [owner, visitor] = [await holder("Owner"), await person("Visitor")];
   const space = await spaces.create(owner.token, { title: "Open studio", access: "open" });
   const before = await spaces.enter(owner.token, space.id);
   await spaces.enter(visitor.token, space.id);
@@ -156,8 +162,8 @@ test("removing someone blocks them, renames hidden channels, and ends their hear
 });
 
 test("owners edit and delete their spaces; the map's rooms cannot be edited", async (t) => {
-  const { spaces, events, person } = await setup(t);
-  const [owner, other] = [await person("Owner"), await person("Other")];
+  const { spaces, events, person, holder } = await setup(t);
+  const [owner, other] = [await holder("Owner"), await person("Other")];
   const space = await spaces.create(owner.token, { title: "Studio" });
   assert.equal((await spaces.update(owner.token, space.id, { title: "Studio two", themeId: "cyberpunk" })).title, "Studio two");
   await assert.rejects(spaces.update(other.token, space.id, { title: "Mine" }), { status: 403 });
@@ -169,7 +175,7 @@ test("owners edit and delete their spaces; the map's rooms cannot be edited", as
 });
 
 test("only the host decorates, within the room's rules", async (t) => {
-  const { spaces, person } = await setup(t);
+  const { spaces, person, holder } = await setup(t);
   const [a, b] = [await person("Ada"), await person("Bo")];
   await spaces.enter(a.token, "lot-rtc-lab");
   await spaces.enter(b.token, "lot-rtc-lab");
@@ -180,8 +186,8 @@ test("only the host decorates, within the room's rules", async (t) => {
 });
 
 test("Signaling tokens list only channels the person may use", async (t) => {
-  const { spaces, person } = await setup(t);
-  const [owner, stranger] = [await person("Owner"), await person("Stranger")];
+  const { spaces, person, holder } = await setup(t);
+  const [owner, stranger] = [await holder("Owner"), await person("Stranger")];
   const hidden = await spaces.create(owner.token, { title: "Secret plans", visibility: "private" });
   const entered = await spaces.enter(owner.token, hidden.id);
   const guest = await spaces.signalingToken(null);
@@ -195,7 +201,7 @@ test("Signaling tokens list only channels the person may use", async (t) => {
 });
 
 test("RTC tokens require being inside a room", async (t) => {
-  const { spaces, person } = await setup(t);
+  const { spaces, person, holder } = await setup(t);
   const a = await person("Ada");
   await assert.rejects(spaces.rtcToken(a.token, "lot-lounge", {}), { status: 403 });
   await spaces.enter(a.token, "lot-lounge");
@@ -205,7 +211,7 @@ test("RTC tokens require being inside a room", async (t) => {
 });
 
 test("simultaneous entries never exceed capacity and produce one host", async (t) => {
-  const { spaces, person } = await setup(t);
+  const { spaces, person, holder } = await setup(t);
   const walkers = [];
   for (let index = 0; index < 8; index += 1) walkers.push(await person("Walker " + index));
   const results = await Promise.allSettled(walkers.map((walker) => spaces.enter(walker.token, "lot-rtc-lab")));
@@ -218,8 +224,8 @@ test("simultaneous entries never exceed capacity and produce one host", async (t
 });
 
 test("hidden private spaces answer every operation exactly like a missing one", async (t) => {
-  const { spaces, person } = await setup(t);
-  const [owner, stranger] = [await person("Owner"), await person("Stranger")];
+  const { spaces, person, holder } = await setup(t);
+  const [owner, stranger] = [await holder("Owner"), await person("Stranger")];
   const space = await spaces.create(owner.token, { title: "Board room", visibility: "private" });
   const ghost = "00000000-0000-4000-8000-000000000000";
   const calls = (id) => [
@@ -235,8 +241,8 @@ test("hidden private spaces answer every operation exactly like a missing one", 
 });
 
 test("making a space private removes people who may no longer enter", async (t) => {
-  const { spaces, person } = await setup(t);
-  const [owner, stranger] = [await person("Owner"), await person("Stranger")];
+  const { spaces, person, holder } = await setup(t);
+  const [owner, stranger] = [await holder("Owner"), await person("Stranger")];
   const space = await spaces.create(owner.token, { title: "Open studio", access: "open" });
   const before = await spaces.enter(owner.token, space.id);
   await spaces.enter(stranger.token, space.id);
@@ -248,8 +254,8 @@ test("making a space private removes people who may no longer enter", async (t) 
 });
 
 test("access tightening on an unlisted space rotates the channel and key", async (t) => {
-  const { spaces, person } = await setup(t);
-  const [owner, stranger] = [await person("Owner"), await person("Stranger")];
+  const { spaces, person, holder } = await setup(t);
+  const [owner, stranger] = [await holder("Owner"), await person("Stranger")];
   const space = await spaces.create(owner.token, { title: "Side room", visibility: "unlisted", access: "open" });
   const before = await spaces.enter(owner.token, space.id);
   await spaces.enter(stranger.token, space.id);
@@ -263,7 +269,7 @@ test("account-backed actors own, enter, sign tokens, and are blocked by both ids
   const admins = [];
   const { spaces, account } = await setup(t, { admins });
   const [owner, guest] = [await account("Acct Owner", 1), await account("Acct Guest", 2)];
-  assert.match(owner.id, /^account:/);
+  assert.match(owner.id, /^acct_[0-9A-HJKMNP-TV-Z]{26}$/);
   const space = await spaces.create(owner.token, { title: "Account room", access: "open" });
   assert.equal(space.ownerId, owner.id);
   assert.deepEqual(space.members, [owner.id]);
@@ -272,20 +278,32 @@ test("account-backed actors own, enter, sign tokens, and are blocked by both ids
   assert.equal((await spaces.get(owner.token, space.id)).occupants[0].id, owner.id);
   await spaces.enter(guest.token, space.id);
   const signed = await spaces.signalingToken(owner.token);
-  assert.match(signed.userId, /^a-/);
+  assert.equal(signed.userId, owner.id);
   assert.ok(signed.channels.some((channel) => channel.spaceId === space.id && channel.name === entered.channel));
   const rtc = await spaces.rtcToken(owner.token, space.id, {});
-  assert.ok(rtc.uid.startsWith(owner.id.replace(/^account:/, "") + "_"));
+  assert.ok(rtc.uid.startsWith(owner.id + "_"));
   const removed = await spaces.removePerson(owner.token, space.id, { actorId: guest.id });
   assert.deepEqual(removed.blocked, [guest.id, guest.memberId]);
   assert.notEqual(removed.channel, entered.channel);
   await assert.rejects(spaces.enter(guest.token, space.id), { status: 403 });
 });
 
+test("owners add and remove accounts by their auth.agora.build ID", async (t) => {
+  const { spaces, account } = await setup(t);
+  const [owner, friend] = [await account("Acct Owner", 1), await account("Acct Friend", 2)];
+  const space = await spaces.create(owner.token, { title: "Account members", visibility: "private" });
+  await spaces.addMember(owner.token, space.id, friend.id);
+  assert.ok((await spaces.get(owner.token, space.id)).members.includes(friend.id));
+  assert.equal((await spaces.get(friend.token, space.id)).id, space.id);
+  await spaces.removeMember(owner.token, space.id, friend.id);
+  assert.equal((await spaces.get(owner.token, space.id)).members.includes(friend.id), false);
+  await assert.rejects(spaces.addMember(owner.token, space.id, "account:72a639ba-3a45-4afe-936b-111111111111"), { status: 422 });
+});
+
 test("a platform admin sees and enters a private space", async (t) => {
   const admins = [];
-  const { spaces, person, account } = await setup(t, { admins });
-  const owner = await person("Owner");
+  const { spaces, person, holder, account } = await setup(t, { admins });
+  const owner = await holder("Owner");
   const space = await spaces.create(owner.token, { title: "Board room", visibility: "private" });
   const admin = await account("Admin", 9);
   await assert.rejects(spaces.get(admin.token, space.id), missing);
@@ -304,8 +322,8 @@ test("signalingToken matches leases through any of the actor ids", async (t) => 
 });
 
 test("removeMember validates input and ignores non-members", async (t) => {
-  const { spaces, events, person } = await setup(t);
-  const [owner, other] = [await person("Owner"), await person("Other")];
+  const { spaces, events, person, holder } = await setup(t);
+  const [owner, other] = [await holder("Owner"), await person("Other")];
   const space = await spaces.create(owner.token, { title: "Member room", visibility: "unlisted" });
   await assert.rejects(spaces.removeMember(owner.token, space.id, "nonsense"), { status: 422, message: "Choose a builder to remove." });
   const before = await spaces.enter(owner.token, space.id);
@@ -316,16 +334,16 @@ test("removeMember validates input and ignores non-members", async (t) => {
 });
 
 test("a throwing or rejecting listener never fails a committed change", async (t) => {
-  const { spaces, person } = await setup(t);
+  const { spaces, person, holder } = await setup(t);
   spaces.onEvents(() => { throw new Error("boom"); });
   spaces.onEvents(async () => { throw new Error("late"); });
-  const owner = await person("Owner");
+  const owner = await holder("Owner");
   assert.equal((await spaces.enter(owner.token, "plaza")).space.id, "plaza");
 });
 
 test("sweep without expired leases never writes", async (t) => {
-  const { spaces, store, person, clock } = await setup(t);
-  const owner = await person("Owner");
+  const { spaces, store, person, holder, clock } = await setup(t);
+  const owner = await holder("Owner");
   await spaces.enter(owner.token, "plaza");
   const original = store.transaction;
   let count = 0;
@@ -337,8 +355,8 @@ test("sweep without expired leases never writes", async (t) => {
   assert.equal(count, 1);
 });
 test("your spaces lists spaces you own or belong to, newest first, with your allowance", async (t) => {
-  const { spaces, clock, person } = await setup(t);
-  const owner = await person("Owner"), friend = await person("Friend"), stranger = await person("Stranger");
+  const { spaces, clock, person, holder } = await setup(t);
+  const owner = await holder("Owner"), friend = await person("Friend"), stranger = await person("Stranger");
   const first = await spaces.create(owner.token, { title: "First space" });
   clock.now += 1000;
   const second = await spaces.create(owner.token, { title: "Second space", visibility: "private" });
@@ -351,8 +369,8 @@ test("your spaces lists spaces you own or belong to, newest first, with your all
   await assert.rejects(spaces.mine(null), { status: 401 });
 });
 test("owners see member and blocked names; others see neither", async (t) => {
-  const { spaces, person } = await setup(t);
-  const owner = await person("Owner"), friend = await person("Friend");
+  const { spaces, person, holder } = await setup(t);
+  const owner = await holder("Owner"), friend = await person("Friend");
   const space = await spaces.create(owner.token, { title: "Named space" });
   await spaces.addMember(owner.token, space.id, friend.id);
   const seen = await spaces.get(owner.token, space.id);

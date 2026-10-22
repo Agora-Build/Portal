@@ -1,0 +1,7 @@
+{
+  "vox": {
+    "services": {
+      "evaluation": { "credits": 4, "maxUnits": 100 }
+    }
+  }
+}

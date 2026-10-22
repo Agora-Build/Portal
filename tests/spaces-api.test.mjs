@@ -4,9 +4,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { createAppServer } from "../scripts/serve.mjs";
+import { createStore } from "../scripts/store.mjs";
 import { createModelClient, modelConfig } from "../scripts/models.mjs";
 import { agoraConfig, createAgoraCalls } from "../scripts/calls.mjs";
-import { authConfig, createAuth } from "../scripts/auth.mjs";
 import { createSignaling, signalingConfig } from "../scripts/spaces/signaling.mjs";
 
 const root = new URL("../", import.meta.url).pathname;
@@ -15,15 +15,27 @@ const profile = (name) => ({ name, bio: "Building voice agents with Rust.", inte
 const absent = "/00000000-0000-4000-8000-000000000000";
 let temporary;
 const close = (instance) => new Promise((done) => { instance.close(done); instance.closeIdleConnections(); });
+const stores = new Map();
+let accounts = 0;
 async function start(options = {}) {
-  const instance = createAppServer(root, { monitor: false, storageFile: resolve(temporary, Math.random() + ".json"), models: createModelClient(modelConfig({})), calls: createAgoraCalls(agoraConfig(env)), auth: createAuth(authConfig({})), signaling: createSignaling(signalingConfig(env)), channelSecret: env.SPACES_SIGNALING_SECRET, ...options });
+  const store = createStore(resolve(root, "data/people.json"), resolve(temporary, Math.random() + ".json"), { log: () => {} });
+  const instance = createAppServer(root, { monitor: false, store, models: createModelClient(modelConfig({})), calls: createAgoraCalls(agoraConfig(env)), idp: null, signaling: createSignaling(signalingConfig(env)), channelSecret: env.SPACES_SIGNALING_SECRET, ...options });
   await new Promise((done) => instance.listen(0, "127.0.0.1", done));
-  return { instance, url: "http://127.0.0.1:" + instance.address().port };
+  const url = "http://127.0.0.1:" + instance.address().port;
+  stores.set(url, store);
+  return { instance, url };
 }
 const request = (base, path, { cookie, method = "GET", data } = {}) => fetch(base + path, { method, headers: { ...(cookie ? { Cookie: cookie } : {}), ...(data !== undefined ? { "Content-Type": "application/json" } : {}) }, ...(data !== undefined ? { body: JSON.stringify(data) } : {}) });
 const post = (base, path, cookie, data = {}) => request(base, path, { cookie, method: "POST", data });
 async function join(base, name) {
   const response = await post(base, "/api/profile", undefined, profile(name));
+  assert.equal(response.status, 201);
+  return response.headers.get("set-cookie").split(";")[0];
+}
+// A signed-in auth.agora.build account with a public profile: only accounts create and own spaces.
+async function member(base, name) {
+  const { token } = await stores.get(base).signIn({ sub: "acct_" + String(++accounts).padStart(26, "0"), sid: "sid-" + accounts, name, idToken: "id-token" });
+  const response = await post(base, "/api/profile", "house_session=" + token, profile(name));
   assert.equal(response.status, 201);
   return response.headers.get("set-cookie").split(";")[0];
 }
@@ -39,7 +51,7 @@ test("Stoa pages and worlds are served, and hidden spaces look exactly like miss
       assert.match(await response.text(), /Stoa/);
     }
     assert.equal((await request(url, "/stoa/room/nowhere")).status, 404);
-    const owner = await join(url, "Owner"), stranger = await join(url, "Stranger");
+    const owner = await member(url, "Owner"), stranger = await join(url, "Stranger");
     const created = await post(url, "/api/spaces", owner, { title: "Board room", visibility: "private" });
     assert.equal(created.status, 201);
     const { space } = await created.json();
@@ -55,6 +67,7 @@ test("Stoa pages and worlds are served, and hidden spaces look exactly like miss
     assert.equal((await request(url, "/api/worlds/secret")).status, 404);
     assert.equal(JSON.stringify(await (await request(url, "/api/spaces")).json()).includes(space.id), false);
     assert.equal((await post(url, "/api/spaces", undefined, { title: "Guest" })).status, 401);
+    assert.equal((await post(url, "/api/spaces", stranger, { title: "Guest" })).status, 401, "a guest can't own a space");
   } finally { await close(instance); }
 });
 
@@ -86,7 +99,7 @@ test("walking in, hosting, decorating, and calls work over HTTP", async () => {
 test("a full plaza answers with an offer of other places", async () => {
   const { instance, url } = await start({ plazaCapacity: 1 });
   try {
-    const ada = await join(url, "Ada"), bo = await join(url, "Bo");
+    const ada = await join(url, "Ada"), bo = await member(url, "Bo");
     assert.equal((await post(url, "/api/spaces/plaza/enter", ada)).status, 200);
     const full = await post(url, "/api/spaces/plaza/enter", bo);
     assert.equal(full.status, 409);
@@ -97,7 +110,7 @@ test("a full plaza answers with an offer of other places", async () => {
 test("invitations, membership, and deletion work over HTTP", async () => {
   const { instance, url } = await start();
   try {
-    const owner = await join(url, "Owner"), guest = await join(url, "Guest");
+    const owner = await member(url, "Owner"), guest = await join(url, "Guest");
     const guestId = (await (await request(url, "/api/me", { cookie: guest })).json()).profile.id;
     const { space } = await (await post(url, "/api/spaces", owner, { title: "Board room", visibility: "private" })).json();
     const invitation = await post(url, "/api/spaces/" + space.id + "/invitations", owner, { uses: 2, hours: 24 });
@@ -197,9 +210,20 @@ test("your spaces needs sign-in and lists what you own", async () => {
   const { instance, url } = await start();
   try {
     assert.equal((await request(url, "/api/spaces/mine")).status, 401);
-    const ada = await join(url, "Ada");
+    const ada = await member(url, "Ada");
     const created = await (await post(url, "/api/spaces", ada, { title: "Ada's lab" })).json();
     const mine = await (await request(url, "/api/spaces/mine", { cookie: ada })).json();
     assert.deepEqual(mine.spaces.map((space) => [space.id, space.owner]), [[created.space.id, true]]);
   } finally { await close(instance); }
+});
+
+test("member routes take auth.agora.build account IDs", async () => {
+  const { handleSpaces } = await import("../scripts/spaces/routes.mjs");
+  const id = "11111111-1111-4111-8111-111111111111", member = "acct_" + "M".repeat(26);
+  const seen = [];
+  const spaces = { removeMember: async (...args) => { seen.push(args); return { removed: true }; } };
+  const call = (path) => handleSpaces({ path, method: "DELETE", url: new URL("http://localhost" + path), token: "t", read: async () => ({}), spaces, worlds: {}, themes: [], limit: () => {}, ip: "127.0.0.1" });
+  assert.deepEqual(await call("/api/spaces/" + id + "/members/" + member), { status: 200, body: { removed: true } });
+  assert.deepEqual(seen, [["t", id, member]]);
+  assert.equal(await call("/api/spaces/" + id + "/members/acct_" + "m".repeat(26)), null);
 });

@@ -8,7 +8,6 @@ import { createStore } from "../scripts/store.mjs";
 import { createLedger } from "../scripts/ledger.mjs";
 import { createBilling, billingConfig } from "../scripts/billing.mjs";
 import { createAppServer } from "../scripts/serve.mjs";
-import { authConfig, createAuth } from "../scripts/auth.mjs";
 import { createModelClient, modelConfig } from "../scripts/models.mjs";
 
 const root = new URL("../", import.meta.url).pathname;
@@ -18,7 +17,8 @@ after(async () => { await rm(temp, { recursive: true, force: true }); });
 const config = () => ({ ready: true, origin: "https://agora.build", secret: "sk_test_fixture", webhookSecret: "whsec_fixture_only", periodCredits: 25, products: [{ id: "premium-monthly", plan: "premium", priceId: "price_premium" }, { id: "builder-pack", name: "Builder pack", type: "credits", credits: 100, priceId: "price_credits" }] });
 async function fixture() {
   const store = createStore(resolve(root, "data/people.json"), resolve(temp, ++count + ".json"));
-  const login = await store.login({ provider: "google", issuer: "https://accounts.google.com", subject: "fixture-user", name: "Builder" });
+  const sub = "acct_" + "B".repeat(26);
+  const login = { ...(await store.signIn({ sub, sid: "fixture-sid", name: "Builder", idToken: "fixture-id-token" })), account: { id: sub } };
   const sessions = new Map(), subscriptions = new Map(), invoices = new Map(), payments = new Map(), charges = new Map();
   let sequence = 0, customerCalls = 0;
   const real = new Stripe("sk_test_fixture");
@@ -126,7 +126,7 @@ test("HTTP payment webhooks verify the raw body signature and browser return URL
   const session = [...f.sessions.values()][0]; session.payment_status = "paid";
   const payload = JSON.stringify(event("evt_signed", "checkout.session.completed", session));
   const signature = f.stripe.webhooks.generateTestHeaderString({ payload, secret: config().webhookSecret });
-  const server = createAppServer(root, { store: f.store, billing: f.billing, auth: createAuth(authConfig({})), models: createModelClient(modelConfig({})), monitor: false });
+  const server = createAppServer(root, { store: f.store, billing: f.billing, idp: null, models: createModelClient(modelConfig({})), monitor: false });
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
   const base = "http://127.0.0.1:" + server.address().port;
   try {

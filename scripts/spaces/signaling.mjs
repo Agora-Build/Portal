@@ -13,7 +13,7 @@ export function signalingConfig(env = process.env) {
 const mac = (secret, value) => createHmac("sha256", secret).update(value).digest();
 export const channelName = (secret, space) => "ab-" + space.type + "-" + (space.visibility === "listed" ? space.slug || space.id : mac(secret, "channel:" + space.id + ":" + (space.channelEpoch || 0)).toString("hex").slice(0, 24));
 export const spaceKey = (secret, space) => space.visibility === "listed" ? null : mac(secret, "key:" + space.id + ":" + (space.channelEpoch || 0)).toString("base64");
-export const signalingUser = (actor) => actor ? actor.id.replace(/^account:/, "a-").replace(/^member:/, "m-") : "g-" + randomBytes(8).toString("hex");
+export const signalingUser = (actor) => actor ? actor.id.replace(/^member:/, "m-") : "g-" + randomBytes(8).toString("hex");
 
 export function createSignaling(config = signalingConfig(), { now = Date.now } = {}) {
   const { RtmTokenBuilder, Rtm2Permissions } = agoraToken;

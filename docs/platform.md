@@ -1,53 +1,294 @@
 # Agora.Build Identity, Credits And Membership
 
-The portal owns a private user with a permanent `account:<uuid>` ID, provider
-identities, service connections, a subscription, and one credit wallet. Public
-community profiles use separate `member:<uuid>` IDs. Signing in creates the
-private user immediately; publishing a profile requires real intent.
+Sign-in for the Portal (agora.build, including Stoa) comes only from
+`auth.agora.build`, over standard OpenID Connect. The Portal is a client of that
+identity provider (IdP); it is not an identity provider or an OAuth server
+itself. The Portal keeps everything that is not identity: profiles, plans,
+credits, billing, Stoa spaces and the Agora Console connection.
 
-Google, GitHub, Apple, and Agora identities are matched by verified issuer and
-subject. Connecting another provider is an explicit operation on a signed-in
-account. Agora callback `loginId` values never identify users, and an email
-never signs anyone in on its own.
+Apps and servers that want to sign people in follow Auth's
+[`docs/integrating.md`](https://github.com/Agora-Build/Auth/blob/main/docs/integrating.md).
+This guide covers what the Portal adds: its accounts, sessions, and the API
+contract for IdP access tokens, platform credits and Agora Console access.
 
-Each login keeps the provider's verified email privately, refreshed at every
-sign-in (GitHub: primary and verified in `/user/emails`; Google and Apple:
-`email_verified`; Agora OIDC: `email_verified`; Agora OAuth: none until its SSO
-returns a stable user ID). Only plain ASCII addresses match. If GitHub's email
-lookup fails, the stored email is kept rather than cleared.
+## Signing In Through auth.agora.build
 
-A new login whose verified email already belongs to an account does not create a
-second account and gets no session. It is held for ten minutes, referenced by an
-HttpOnly `__Host-house_link` cookie (`house_link` over plain HTTP in development),
-which a sibling subdomain cannot set. The browser then has three choices:
+The Portal is the confidential OIDC client `portal`, using Authorization Code
+with PKCE (S256), state and nonce. Google, GitHub and every other login live on
+the IdP; linked logins, devices and "sign out everywhere" are managed at
+`<AUTH_ISSUER>/account`, which the account page links to as "Manage sign-in".
 
-1. Sign in with one of the matching account's logins (`/auth/<provider>?confirmLink=1`,
-   refused when `Sec-Fetch-Site` is not same-origin). This only readies the hold;
-   the page then asks "Connect Google (a***@example.com) to this account?" and the
-   login is connected by a same-origin `POST /api/auth/pending-link {action:"connect"}`.
-2. Create a separate account for the new login (`{action:"separate"}`).
-3. Discard it (`{action:"discard"}`), or let it lapse.
+| Setting | Meaning |
+| --- | --- |
+| `AUTH_ISSUER` | The IdP, `https://auth.agora.build` (locally `http://auth.localhost:3090`; plain http only on a local host) |
+| `PORTAL_CLIENT_ID` | The Portal's client ID at the IdP (default `portal`) |
+| `PORTAL_CLIENT_SECRET` | Its client secret, at least 32 characters; the same value the IdP reads through its clients file's `secretEnv` |
+| `PORTAL_API_AUDIENCE` | The resource the Portal's APIs accept tokens for (default `https://api.agora.build`) |
+| `SITE_URL` | The Portal's public origin; the redirect URIs below are built from it |
 
-A sign-in to a different account discards the hold, and an account that already
-has a login from the same provider cannot connect another. `GET /api/auth/pending-link`
-shows the holding browser only the provider, a masked email, and the matching
-account's providers. Accounts that already share an email are not merged. Emails
-appear only to the owner in a browser session (`/api/me`), never to applications:
-not in `/oauth/userinfo`, app reads of `/api/me`, or identity lookup.
-Accounts and purchased credits survive public profile deletion.
+1. `GET /auth/login?returnTo=<path>` (the sign-in dialog's one "Sign in"
+   button) checks `returnTo` against the same-site path allowlist, stores the
+   transaction (state, nonce, PKCE verifier, `returnTo`) in the store for ten
+   minutes, and sets an HttpOnly `__Host-portal_auth` cookie (`portal_auth` over
+   plain http) naming it. Because transactions live in the store, any Portal
+   instance can finish a sign-in; no sticky routing is needed. Sign-in starts are
+   limited to 20 a minute per address.
+2. The browser signs in at the IdP and comes back to `GET /auth/callback`. The
+   transaction is consumed once, the code exchanged and the ID token checked
+   (issuer, audience, nonce, expiry, signature).
+3. The Portal upserts the account and starts its own session, then redirects to
+   `returnTo?signin=success`. Any failure (an IdP `error`, a missing or replayed
+   transaction, a failed exchange, an invalid ID token) redirects with
+   `?signin=failed` and creates no session. The log records the reason only,
+   never a token.
+
+If the IdP is unreachable when the Portal starts, the Portal still starts and
+sign-in reports itself unavailable (`?signin=unavailable`, "Sign-in is
+temporarily unavailable") until discovery succeeds; it retries at most every
+30 seconds. When the Portal has not heard from the IdP for 30 seconds, a new
+sign-in first re-checks that the IdP answers (a probe of up to about two
+seconds). A sign-in can therefore still be sent to an IdP that stopped less than
+30 seconds after the Portal last reached it; that person sees the IdP's own
+error and can try again. Existing Portal sessions keep working while the IdP is
+down, because the IdP is not called per request.
+
+### IdP Registration
+
+Register the Portal in the Auth deployment's clients file (`CLIENTS_FILE`), with
+the API resource and its scopes. The secret is named, never written there:
+
+```json
+{
+  "resources": [
+    { "indicator": "https://api.agora.build", "name": "Agora Build API", "scopes": ["credits", "agora:projects", "agora:certificates"] }
+  ],
+  "clients": [
+    {
+      "id": "portal",
+      "name": "Agora Build",
+      "type": "web",
+      "firstParty": true,
+      "secretEnv": "PORTAL_CLIENT_SECRET",
+      "redirectUris": ["https://agora.build/auth/callback"],
+      "postLogoutRedirectUris": ["https://agora.build/"],
+      "backchannelLogoutUri": "https://agora.build/auth/backchannel-logout",
+      "homeUrl": "https://agora.build/",
+      "grants": ["authorization_code"],
+      "scopes": ["openid", "profile", "email"]
+    }
+  ]
+}
+```
+
+The production IdP's `https://api.agora.build` resource must include
+`agora:certificates` as well as `credits` and `agora:projects`; without it no
+token can carry that scope, and `POST /api/connections/agora/certificate`
+answers 403 to every app. Put the same `PORTAL_CLIENT_SECRET` value in the IdP's
+environment and the Portal's. Locally the URIs are `http://localhost:3080/...` against
+`http://auth.localhost:3090`; the IdP accepts plain http only on local host
+names (`localhost`, `*.localhost`, `127.0.0.1`) and only with an http issuer.
+Vox, Atem and other apps are registered with the `https://api.agora.build`
+resource and only the scopes they need (see below).
+
+## Accounts, Sessions And Guests
+
+The IdP's `sub` (`acct_` followed by 26 Crockford base32 characters) is the
+Portal account ID, so one person has the same ID in every Agora Build app.
+`PLATFORM_ADMINS` and `platform-admin.mjs` take these `acct_…` IDs. At each
+browser sign-in the account's name and picture are refreshed from the ID token;
+the email is kept only when the IdP marks it verified. The email is shown only to
+the owner's browser session (`/api/me`), never to bearer (app) callers. The first
+access token for a `sub` that has no Portal account creates a minimal account
+(`name: null`), so app users get a wallet; the name fills in at their first
+browser sign-in.
+
+A Portal session is an HttpOnly, `SameSite=Lax`, `Path=/` cookie named
+`__Host-house_session` on https (`house_session` over plain http), with a 30-day
+absolute lifetime and at most 20 sessions per account (the oldest are dropped).
+The server keeps only a hash of the session token, the IdP session ID (`sid`) and
+the ID token for `id_token_hint`; the ID token is not accepted as a credential by
+any API and is deleted with its session. Moving production to the
+`__Host-house_session` name doesn't strand guests: until 31 January 2027
+(`LEGACY_GUEST_COOKIE_UNTIL` in `scripts/serve.mjs`), an https request without
+`__Host-house_session` whose old `house_session` cookie is a guest profile's
+session is accepted once, and the same token is re-issued as
+`__Host-house_session` (Secure, HttpOnly, `SameSite=Lax`, `Path=/`) while the old
+cookie is cleared (`Max-Age=0`). An old cookie for an account session is never
+honoured (account sessions started empty with this change). After that date the
+old cookie is ignored.
+
+This change starts the Portal's identity data empty. At first load (state
+version 2) the Portal deletes old sessions, OAuth codes and grants, pending
+links, every account whose ID is not `acct_…`, and those accounts' ledger and
+billing rows and spaces. Guest profiles, rooms and the radar are kept. Only
+counts are logged.
+
+"Continue with this browser" stays for looking around: a browser-only profile
+can walk the Stoa, appear on the radar and keep a public profile. Credits,
+services (chat and TTS), billing, Agora Console and owning spaces need a
+signed-in account; guests see "Sign in to use credits" and similar prompts
+instead. A guest who signs in keeps their profile when the account has none yet.
+
+## Signing Out
+
+"Sign out" (`POST /api/auth/logout`, same-origin) deletes the Portal session and
+answers `{ endSessionUrl }`: the IdP's end-session endpoint with `client_id`,
+`post_logout_redirect_uri` (`<SITE_URL>/`) and `id_token_hint`. The browser
+follows it, confirms on the IdP's page, and returns to the Portal home signed
+out of both.
+
+`POST /auth/backchannel-logout` receives the IdP's back-channel logout (for
+example "Sign out everywhere" on the IdP's account page). It is a form-encoded
+`logout_token`, a `logout+jwt` signed by the IdP and checked for issuer,
+audience (our client ID), `iat` (at most five minutes old), `jti`, the
+back-channel `events` claim, no `nonce`, and a `sid` or `sub`. A `sid` ends that
+IdP session's Portal sessions; a `sub` alone ends all of that account's sessions.
+It is the one route exempt from the same-origin checks, because it is a
+server-to-server POST. Answers carry `Cache-Control: no-store`:
+
+| Status | When |
+| --- | --- |
+| 200 | Verified and applied |
+| 400 | The token is missing or invalid |
+| 503 | The IdP's keys can't be fetched (the IdP is unreachable, or sign-in isn't configured), so the token can't be checked yet |
+
+Auth sends each back-channel logout once, as one POST with a 2.5 second timeout,
+and never retries. A missed logout (any non-2xx answer, or a timeout) leaves the
+Portal session in place until the person signs out of the Portal or the session
+reaches its 30-day expiry. To make misses rarer, the Portal fetches the IdP's
+discovery document and JWKS at startup, without blocking it (a failure is logged
+by reason only), so the first logout token doesn't wait for a cold discovery
+(10 seconds) or JWKS fetch (5 seconds).
+
+The IdP must be able to reach the back-channel URI. Locally it posts across the
+Docker network, so the Portal container needs a host name the IdP accepts for
+plain http (see "Local deployment" in the README).
+
+## Signing Keys And Rotation
+
+The Portal checks access and logout tokens against the IdP's JWKS, cached for 60
+seconds and refetched for an unknown key ID. The trade-offs:
+
+- A new IdP key is picked up within about five seconds: a token signed with an
+  unknown key refetches the JWKS, at most once every five seconds.
+- After an emergency rotation that drops a key, tokens signed with the old key
+  are still accepted for up to 60 seconds, until the cached JWKS expires.
+- While the JWKS is unreachable, keys from the last good fetch stay accepted
+  for up to one hour after that fetch (the network is retried at most every 30
+  seconds). A rotation that drops a key during an IdP outage therefore takes up
+  to an hour to reach the Portal.
+- If the JWKS can't be fetched for an unknown key, bearer calls answer 503 and
+  back-channel logouts answer 503; they are never treated as valid.
+- A dead IdP is noticed by new sign-ins after at most 30 seconds without contact
+  (see above).
+
+## Apps: IdP Access Tokens And Scopes
+
+Browsers use the session cookie, with the same-origin checks unchanged for
+non-GET requests. Apps and servers send `Authorization: Bearer <access token>`,
+an IdP access token for the resource `https://api.agora.build`. A request with a
+bearer token never falls back to the cookie. The token must be a JWT with `typ`
+`at+jwt` and `alg` ES256, issued by `AUTH_ISSUER`, with `aud` containing
+`PORTAL_API_AUDIENCE`, an unexpired `exp` and a `sub`. Request the resource with
+`resource=https://api.agora.build` and the scopes below; see Auth's
+`docs/integrating.md` for the flows (web code + PKCE, native device code).
+
+| Route | Browser (cookie) | Bearer scope |
+| --- | --- | --- |
+| `GET /api/me` | account or guest | any (an `openid`-only token is enough) |
+| `GET /api/credits/balance`, `/api/credits/statement` | account | `credits` |
+| `POST /api/services/chat`, `/api/services/tts` | account (no guests) | `credits` |
+| `GET /api/connections`, `/api/connections/agora/projects`, `DELETE /api/connections/agora` | account | `agora:projects` |
+| `POST /api/connections/agora/certificate` | account | `agora:certificates` |
+| `POST /api/platform/credits/reserve`, `/settle` | not accepted | `credits`, from a client in `PORTAL_BILLING_FILE` |
+| Billing account, checkout and manage | account | not accepted |
+| Stoa spaces (create, own, admin), profile, radar, signaling | account (spaces) or guest | not accepted |
+
+Bearer errors:
+
+- missing, invalid or expired token: 401 with `WWW-Authenticate: Bearer error="invalid_token"`;
+- missing scope: 403 with `WWW-Authenticate: Bearer error="insufficient_scope", scope="<scope>"`;
+- a browser-only route (billing, profile, radar, Stoa spaces): 403, whatever the scopes;
+- the IdP's keys unreachable for an unknown key ID: 503 (retry later).
+
+A token for one account can only read and spend that account's data.
+
+## Platform Credits For Billing Clients
+
+Billing clients (such as Vox) hold and settle a person's credits with that
+person's access token, issued to the billing client with the `credits` scope.
+The client never sends a price: `PORTAL_BILLING_FILE` names a private JSON file of
+server-side prices per client and service, shaped like
+`config/billing-clients.example.json`:
+
+```json
+{ "vox": { "services": { "evaluation": { "credits": 4, "maxUnits": 100 } } } }
+```
+
+A client may charge only if its `client_id` is listed, and only for its listed
+services. List only confidential clients (web or server clients that
+authenticate to the IdP with a secret, such as Vox). A native client's ID (such
+as Atem's) is public, so any program can obtain tokens under it; never list one. Each charge is `credits × units`, with whole `units` from 1 to
+`maxUnits`. If the setting is unset, or the file is missing or invalid, platform
+billing is off (503) and the log says why.
+
+```http
+POST /api/platform/credits/reserve
+Authorization: Bearer <the person's access token for vox>
+Content-Type: application/json
+
+{ "service": "evaluation", "units": 2, "idempotencyKey": "eval-2026-10-21-0001" }
+```
+
+The answer is `{ id, status }`: `reserved` for a new hold, or, for a repeated
+`idempotencyKey`, the existing hold's `pending`, `captured` or `released`; a
+repeat never charges twice. Run the work only after `reserved`. Settle with
+`POST /api/platform/credits/settle` and `{ service, reservationId, outcome }`,
+where `outcome` is `capture` or `release`. `units` defaults to 1;
+`idempotencyKey` is 16 to 120 characters of letters, digits, `:`, `_` and `-`.
+Other answers: 403 for a client that isn't listed, 422 for an unknown service or
+units out of range, 409 for insufficient credits, and 429 past the rate limit.
+
+Caveats:
+
+- The reserve rate limit is 60 a minute per account, and counts every attempt,
+  including malformed requests and retries of the same key.
+- Changing a service's price while holds are live makes a retry of one of those
+  holds answer 409 ("Request price conflict"), because the repeated key now
+  prices differently. Use a new key for a new request.
+- Holds not settled within an hour are released by the five-minute expiry timer,
+  including holds for a service later removed from the file (they can no longer
+  be settled, because settling needs a listed service).
+
+Portal chat and TTS prices are separate: `SERVICE_CHAT_CREDITS` and
+`SERVICE_TTS_CREDITS` (zero means no charge). Paid requests need a signed-in
+account (or a `credits` token) and an `Idempotency-Key` header; failed model
+requests release their hold. No browser or native endpoint can grant credits.
+The ledger uses whole credits and balanced entries across user, escrow and
+platform accounts; concurrent spending cannot overdraw a wallet. Users start
+with zero credits.
 
 ## Storage And Deployment
 
-Set `SITE_URL=https://agora.build` behind an HTTPS reverse proxy. Set `DATABASE_URL`
-to a dedicated PostgreSQL database for production. The server creates
-`agora_build_state`, a locked JSONB aggregate; identity, sessions, subscriptions,
-payment receipts, and ledger mutations commit atomically. This initial storage
-model prioritizes consistency and serializes writes; it can be split into
-normalized tables as volume grows without changing the public user IDs.
+Set `SITE_URL=https://agora.build` behind an HTTPS reverse proxy, which must
+preserve the public Host header. Set `DATABASE_URL` to a dedicated PostgreSQL
+database for production. The server creates `agora_build_state`, a locked JSONB
+aggregate; accounts, sessions, sign-in transactions, subscriptions, payment
+receipts and ledger mutations commit atomically. This storage model prioritizes
+consistency and serializes writes; it can be split into normalized tables as
+volume grows without changing account IDs.
+
+Rate limits keyed by client address (sign-in starts, joining, spaces, Signaling
+tokens and model calls) use the socket address by default. Behind a reverse
+proxy every request would share the proxy's address, so set `TRUST_PROXY=1`
+only behind a proxy that appends `X-Forwarded-For`: the client address is then
+the header's last hop, the one that proxy appended, and anything a client put
+before it is ignored. Without the header the socket address is used. Logs never
+include addresses.
 
 Without PostgreSQL, local development uses `.data/community.json` and supports
 one Node process. Back up the database or this private directory. Local admin
-writes require stopping the portal and setting `PORTAL_OFFLINE_ADMIN=true`.
+writes require stopping the Portal and setting `PORTAL_OFFLINE_ADMIN=true`.
 To move existing file data to an empty database, stop the old server, back up the
 file, configure `DATABASE_URL`, then run:
 
@@ -55,112 +296,8 @@ file, configure `DATABASE_URL`, then run:
 node scripts/platform-admin.mjs import-json
 ```
 
-Never run this import against Vox's database or overwrite an existing portal
-database. The command refuses a nonempty destination. Provider OAuth transactions
-remain in process memory for ten minutes; run one portal instance or use sticky
-routing for `/auth/` until these transactions are moved to shared storage.
-
-## Register Applications
-
-`IDENTITY_CLIENTS_FILE` points to a private application registry. Start with
-`config/identity-clients.example.json`; its sample rate is illustrative, not a
-published price. Use `secretEnv` to refer to a server secret. Confidential web
-clients need a secret of at least 32 characters, exact callback URLs, and explicit
-scopes. There are no wildcard subdomains or shared domain cookies.
-
-The `VOX_IDENTITY_CLIENT_SECRET` / `VOX_IDENTITY_REDIRECT_URI` shortcut registers
-Vox. `ASTATION_IDENTITY_ENABLED=true` registers a public native client accepting
-only `http://127.0.0.1:<port>/oauth/callback`. Use either the shortcut or a file
-entry for an application, not both. Native clients have no secret and cannot
-resolve other users or submit service charges.
-
-| Scope | Access |
-| --- | --- |
-| `identity` | Own permanent user ID, display name, plan, and entitlements |
-| `credits` | Own balance and statement; consent to registered service charging |
-| `services` | Portal LLM and TTS endpoints |
-| `agora:projects` | Own connected Agora projects and App IDs |
-| `agora:certificates` | Explicit certificate retrieval for own Agora projects |
-
-`identityLookup: true` permits a trusted application server to resolve provider
-subjects at `GET /api/identity/accounts/<user-id>` for account migration. This is
-a privileged server capability; it does not return provider tokens or certificates.
-
-## Direct Login And SSO Contract
-
-Use `integrations/agora-build-client.mjs` from a service's backend. The client
-starts an Authorization Code flow with S256 PKCE and browser-bound random state:
-
-```js
-const started = client.begin(["identity", "credits", "services"]);
-// Persist started.transaction in the application's private browser session.
-// Redirect the browser to started.url.
-const tokens = await client.complete(callbackUrl, savedTransaction);
-const user = await client.user(tokens.access_token);
-// user.sub is the portal ID in every app. Keep app-local ownership IDs mapped to it.
-```
-
-Clear the saved transaction before handling the callback. Regenerate the app's
-local session after successful exchange. Store tokens server-side or in encrypted
-native storage. Each application owns its HttpOnly cookie; only the portal sees
-`house_session`. An existing portal session completes SSO without a provider
-prompt. A fresh browser signs in centrally, creating the portal user before the
-application receives tokens. This is OAuth, not an OIDC provider: there is no
-ID token or discovery document.
-
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /oauth/authorize` | Registered callback, state, S256 challenge, scopes |
-| `POST /oauth/token` | Form-encoded code exchange or refresh |
-| `GET /oauth/userinfo` | Bearer token; stable `sub`, `plan`, `entitlements` |
-| `POST /oauth/revoke` | Form-encoded app credentials and access/refresh token |
-| `POST /api/auth/logout-all` | Portal browser session; revoke all app grants |
-
-Codes expire after 60 seconds and redeem once. Access tokens expire after 15
-minutes; refresh grants last 30 days. Refresh tokens rotate; clients must serialize
-refreshes and save the new pair together. Reusing an old refresh token revokes its
-grant. Logging out of a portal session also revokes grants created through it;
-global logout invalidates every grant. Applications must consult the central
-userinfo endpoint before relying on an existing local session; an app must not
-keep granting access solely because its own cookie exists. Redact OAuth query
-strings and credential headers in reverse-proxy logs.
-
-## Shared Credits And Service Charging
-
-`GET /api/credits/balance` and `/api/credits/statement` accept a portal browser
-session or an app token with `credits`. No browser or native endpoint can grant
-credits. The ledger uses whole credit units and balanced entries across user,
-external, escrow, and platform accounts. Users start with zero credits.
-
-Register paid operations in the client's `rates`, such as `evaluation`. The
-service uses its own secret plus a user token issued to that same client:
-
-```js
-const hold = await client.reserve(userToken, "evaluation", requestKey);
-// Run work only if hold.status === "reserved". Never repeat a pending request.
-let result;
-try {
-  result = await runEvaluation();
-} catch (error) {
-  await client.settle(userToken, "evaluation", hold.id, "release");
-  throw error;
-}
-await client.settle(userToken, "evaluation", hold.id, "capture");
-return result;
-```
-
-`POST /api/platform/credits/reserve` uses `Authorization: Bearer <app-secret>`,
-`X-Agora-Client-Id`, and `X-Agora-User-Token`. Its JSON body is
-`{service, idempotencyKey}`; the registered server rate determines the charge.
-Settlement uses the same headers and `{service, reservationId, outcome}`.
-Reservations bind to the user and service; concurrent spending cannot overdraw
-the wallet. Repeated keys never repeat work or charges. Complete operations within
-one hour; stale holds are refunded by the five-minute reconciliation timer.
-
-Portal LLM/TTS prices use `SERVICE_CHAT_CREDITS` and `SERVICE_TTS_CREDITS`.
-Zero means no charge. Paid requests require a signed-in account and an
-`Idempotency-Key` header. Failed model requests release their reservation.
-People discovery and radar retain their existing shared service allowances.
+Never run this import against Vox's or Auth's database or overwrite an existing
+Portal database. The command refuses a nonempty destination.
 
 ## Subscription Plans And Purchases
 
@@ -168,7 +305,7 @@ The account page supports Basic, Premium, Principal, and Fellow, matching Vox's
 plan names and entitlement limits. Premium provides 20 projects, 20 console eval
 flows per project, 200 API eval flows, private resources, and own storage.
 Principal/Fellow also permit mainline publishing and are assigned roles rather
-than purchasable products. Vox enforcement starts with its later auth refactor;
+than purchasable products. Vox enforcement starts when Vox signs in through auth.agora.build;
 buying a portal plan does not currently change an existing Vox account.
 
 Configure `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and recurring Premium
@@ -202,68 +339,89 @@ new credits. Charge disputes require operator review; they are not auto-refunds.
 Operators can record audited manual grants and community roles with:
 
 ```sh
-node scripts/platform-admin.mjs grant-credits <user-id> <credits> <unique-key> <reason>
-node scripts/platform-admin.mjs assign-role <user-id> <basic|principal|fellow>
+node scripts/platform-admin.mjs grant-credits <acct_…> <credits> <unique-key> <reason>
+node scripts/platform-admin.mjs assign-role <acct_…> <basic|principal|fellow>
 ```
 
 `basic` removes an assigned role; it does not cancel a Stripe subscription.
 
 ## Agora Console Connections
 
-Configure either an Agora OIDC identity service or Agora's existing OAuth service.
-For existing OAuth, register a dedicated portal client with
-`https://agora.build/auth/agora/callback`. Set `AGORA_OAUTH_BASE_URL`,
-`AGORA_OAUTH_CLIENT_ID`, optional client secret, `AGORA_OAUTH_USERINFO_URL`, and
-`AGORA_OAUTH_SUBJECT_FIELD` (`sub`, `user_id`, or `uid`). The identity endpoint must
-accept Bearer tokens and return an immutable user ID. The current Astation
-integration uses `sso2.agora.io`; `sso.agora.io` can be configured explicitly when
-that is the registered issuer. The documented upstream userinfo 401 / changing
-callback `loginId` issue must be resolved before existing Agora tokens can identify
-portal users. The portal refuses to substitute email or the callback login ID.
+Connecting Agora Console is separate from signing in: an Agora OAuth
+authorization used only to let the signed-in account read its Console projects.
+`GET /connect/agora` (signed-in accounts only; guests are sent to sign in)
+stores a transaction bound to the account, like sign-in, in an HttpOnly
+`__Host-portal_connect` cookie (`portal_connect` over http), and sends the
+browser to Agora with scope `basic_info,console` and PKCE. The callback,
+`/connect/agora/callback`, refuses a transaction that belongs to another account,
+stores `{accessToken, refreshToken, expiresAt}` sealed, and redirects to
+`/account.html?connected=agora` (or `?connected=failed`).
 
-Set `AGORA_CONSOLE_ENCRYPTION_KEY` (formerly `CONNECTION_ENCRYPTION_KEY`, still read as a fallback) to a base64-encoded 32-byte server key. It is used only for Agora Console connections. Agora OAuth
-access/refresh tokens are encrypted with AES-256-GCM at rest. Keep and back up this
-key separately from the database. `AGORA_BFF_URL` defaults to the existing
-`https://agora-cli.agora.io` service used by Astation. OIDC sign-in alone does not
-imply that its token is valid for this BFF; Console binding currently uses the
-existing Agora OAuth flow.
+Register a dedicated, confidential Portal client with Agora's OAuth service and
+allow the redirect URI `<SITE_URL>/connect/agora/callback` (for production
+`https://agora.build/connect/agora/callback`; locally
+`http://localhost:3080/connect/agora/callback`). The old
+`/auth/agora/callback` is gone. Settings:
 
-The owner can list projects/App IDs and explicitly reveal a project's certificate.
-Lists omit certificates; credentials never appear in userinfo or public profiles.
-Certificates are fetched on demand and not cached in the portal database. The
-browser clears revealed certificates after 30 seconds or when its tab is hidden.
-Disconnecting removes the stored Console connection while keeping login identity.
+| Setting | Meaning |
+| --- | --- |
+| `AGORA_OAUTH_BASE_URL` | Agora's OAuth service (default `https://sso2.agora.io`) |
+| `AGORA_OAUTH_CLIENT_ID` | The Portal's Agora client ID |
+| `AGORA_OAUTH_CLIENT_SECRET` | Its client secret; required, the client is confidential (the code exchange and refresh send it) |
+| `AGORA_OAUTH_USERINFO_URL` | Optional; a Bearer userinfo endpoint used only to show the Agora account's display name ("Connected to your Agora account (name)") |
+| `AGORA_BFF_URL` | The Console API (default `https://agora-cli.agora.io`, as Astation uses) |
+| `AGORA_CONSOLE_ENCRYPTION_KEY` | A base64-encoded 32-byte server key (formerly `CONNECTION_ENCRYPTION_KEY`, still read as a fallback) |
 
-Native clients can exchange an existing Agora token through `/oauth/token` using
-`grant_type=urn:ietf:params:oauth:grant-type:token-exchange`,
-`subject_token_type=urn:ietf:params:oauth:token-type:access_token`, `subject_token`,
-and their public `client_id`. Identity verification uses the same permanent-ID
-endpoint. The portal issues separate tokens; Agora tokens never become portal
-sessions. An exchanged connection without a refresh token must be reconnected
-for long-lived Console access.
+Without all of the required ones, "Connect Agora" is hidden and the account page
+says Console connections are not available yet. Agora access and refresh tokens
+are encrypted with AES-256-GCM at rest, using only
+`AGORA_CONSOLE_ENCRYPTION_KEY`; keep and back up that key separately from the
+database and never change it once connections exist.
 
-## Vox And Astation Follow-up
+The owner can list projects and App IDs and explicitly reveal a project's
+certificate. Lists omit certificates; credentials never appear in public
+profiles. Certificates are fetched on demand and not cached in the Portal
+database. The browser clears revealed certificates after 30 seconds or when its
+tab is hidden. Disconnecting removes the stored Console connection; it does not
+sign anyone out. Apps reach the same routes with `agora:projects` and
+`agora:certificates` tokens.
 
-Both repositories remain unchanged in this phase. Their next refactor should use
-the central login flow, persist the global user ID, and check current central
-entitlements. Preserve local ownership IDs while mapping them to the portal ID.
-Map existing Vox identities using exact verified provider subjects, never email;
-Apple subjects require compatible client/team grouping and must not be assumed
-equal across different registrations. Existing Vox balances/history require an
-explicit, backed-up migration with idempotent opening balances before moving
-spending to this ledger. They have not been imported or combined here.
+## Vox, Atem And Astation
 
-Astation should keep separate encrypted Agora BFF and Agora.Build sessions, so
-portal LLM/TTS and credits can coexist with Agora Console access. Use loopback
-PKCE for its central login and serialize rotating refresh-token requests.
+Moving Vox, Astation and Atem onto the IdP is their teams' work; the Portal side
+is ready. Each app registers with the IdP, signs people in there, and uses the
+`acct_…` `sub` as the global account ID. Vox becomes a billing client: register
+it with the `credits` scope for `https://api.agora.build` and list its services
+in `PORTAL_BILLING_FILE`. Native apps such as Atem use the device-code flow with
+the scopes they need. Map existing Vox identities by exact verified provider
+subjects, never email; existing Vox balances and history need an explicit,
+backed-up migration with idempotent opening balances before spending moves to
+this ledger. Astation keeps its Agora BFF session separate from its Agora Build
+token, so Portal services and credits coexist with Agora Console access.
 
 ## Verification
 
-`npm test` covers identity/PKCE/revocation, ledger concurrency and refunds,
-payment authenticity/idempotency, subscription lifecycle, resource ownership,
-and public-file restrictions. PostgreSQL integration is optional in the default
-suite: set `PORTAL_TEST_DATABASE_URL` to a dedicated database named
-`agora_portal_test` and run `node --test tests/persistence.test.mjs`. That test
-rebuilds its own table; never point it at production. Live provider sign-in,
-Stripe checkout, refunds, and webhook delivery still require registered
-credentials and HTTPS deployment to verify end to end.
+`npm test` covers the OIDC client (callback validation, sessions, back-channel
+logout, bearer tokens, key rotation and an unreachable JWKS) against a stand-in
+IdP, plus the ledger, payments, subscriptions, ownership and public-file
+restrictions. PostgreSQL integration is optional in the default suite: set
+`PORTAL_TEST_DATABASE_URL` to a dedicated database named `agora_portal_test` and
+run `node --test tests/persistence.test.mjs`. That test rebuilds its own table;
+never point it at production.
+
+`npm run test:e2e` runs the real Portal against the real auth.agora.build, loaded
+from an Agora-Build/Auth checkout (`AUTH_REPO`, default `../Auth`, with
+`npm ci` done) with Auth's stand-in GitHub and Google. It needs Node 22 (at least
+20.18) and `TEST_DATABASE_URL`, a throwaway PostgreSQL database in which Auth's
+helpers create and drop their own schemas. It drives sign-in, SSO, sign-out,
+back-channel logout, a billing client, a native app, the billing allowlist, key
+rotation, the IdP going down and cross-account isolation over real HTTP.
+
+`node scripts/browser-smoke.mjs` drives a real headless Chromium through the same
+stack at desktop and mobile sizes: the keyboard-reachable "Sign in", the IdP page
+and back, the account page, guest prompts, the account page when
+`/api/auth/config` fails, and signing out of both. It needs the e2e settings plus
+`PLAYWRIGHT_CORE` (a playwright-core directory) and `CHROMIUM_PATH`; nothing is
+installed into this package. Real GitHub/Google sign-in, Agora Console, Stripe
+checkout, refunds and webhook delivery still need registered credentials and an
+HTTPS deployment to verify end to end.

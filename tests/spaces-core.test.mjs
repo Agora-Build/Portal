@@ -23,16 +23,18 @@ test("the store resolves the acting person for accounts, profiles, and guests", 
   const directory = await mkdtemp(resolve(tmpdir(), "spaces-actor-"));
   try {
     const store = createStore(resolve(root, "data/people.json"), resolve(directory, "state.json"));
-    assert.equal(await store.actor(""), null);
-    assert.equal(await store.actor("unknown"), null);
+    assert.deepEqual(await store.actor(""), { kind: null });
+    assert.deepEqual(await store.actor("unknown"), { kind: null });
     const { token: profileToken, person } = await store.join(profile("Profile only"));
-    assert.deepEqual(await store.actor(profileToken), { id: person.id, accountId: null, memberId: person.id, name: "Profile only", avatar: "", hasProfile: true, plan: "basic" });
-    const login = await store.login({ provider: "github", issuer: "https://github.com", subject: "42", name: "Account only" });
+    assert.deepEqual(await store.actor(profileToken), { kind: "guest", profile: { ...person } });
+    const sub = "acct_" + "4".repeat(26);
+    const login = await store.signIn({ sub, sid: "s", name: "Account only", idToken: "t" });
     const actor = await store.actor(login.token);
-    assert.equal(actor.id, login.account.id);
-    assert.equal(actor.memberId, null);
-    assert.equal(actor.hasProfile, false);
-    assert.equal(actor.name, "Account only");
+    assert.equal(actor.kind, "account");
+    assert.equal(actor.account.id, sub);
+    assert.equal(actor.account.name, "Account only");
+    assert.equal(actor.account.plan, "basic");
+    assert.equal(actor.profile, null);
     const state = await store.snapshot();
     assert.deepEqual([state.spaces, state.spaceLeases], [[], []]);
   } finally { await rm(directory, { recursive: true, force: true }); }
@@ -275,7 +277,7 @@ test("listed channels are public names; unlisted and private names and keys need
   assert.notEqual(spaceKey(secret, { ...hidden, channelEpoch: 1 }), key);
 });
 test("Signaling user IDs come from the account, the profile, or a random guest ID", () => {
-  assert.equal(signalingUser({ id: "account:72a639ba-3a45-4afe-936b-111111111111" }), "a-72a639ba-3a45-4afe-936b-111111111111");
+  assert.equal(signalingUser({ id: "acct_01HZX3K7M9P2Q4R6S8T0V1W2Y3" }), "acct_01HZX3K7M9P2Q4R6S8T0V1W2Y3", "an account ID is its own Signaling user ID");
   assert.equal(signalingUser({ id: "member:72a639ba-3a45-4afe-936b-111111111111" }), "m-72a639ba-3a45-4afe-936b-111111111111");
   assert.match(signalingUser(null), /^g-[a-f0-9]{16}$/);
   assert.notEqual(signalingUser(null), signalingUser(null));

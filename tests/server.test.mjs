@@ -7,7 +7,6 @@ import { createAppServer } from "../scripts/serve.mjs";
 import { createModelClient, modelConfig } from "../scripts/models.mjs";
 import { createStore } from "../scripts/store.mjs";
 import { agoraConfig, createAgoraCalls } from "../scripts/calls.mjs";
-import { authConfig, createAuth } from "../scripts/auth.mjs";
 
 const root = new URL("../", import.meta.url).pathname;
 const profile = (name = "Test builder") => ({ name, bio: "Building voice agents with Rust.", intent: "Build a language practice voice agent with natural interruptions.", lookingFor: "Audio engineers", skills: ["Rust", "Voice AI"], location: "Remote", contact: "https://example.com/builder", monitor: false });
@@ -16,7 +15,7 @@ let origin;
 let server;
 const close = (instance) => new Promise((done) => { instance.close(done); instance.closeIdleConnections(); });
 async function start(options = {}, directory = root) {
-  const instance = createAppServer(directory, { monitor: false, storageFile: resolve(temporary, Math.random() + ".json"), models: createModelClient(modelConfig({})), calls: createAgoraCalls(agoraConfig({})), auth: createAuth(authConfig({})), ...options });
+  const instance = createAppServer(directory, { monitor: false, storageFile: resolve(temporary, Math.random() + ".json"), models: createModelClient(modelConfig({})), calls: createAgoraCalls(agoraConfig({})), idp: null, ...options });
   await new Promise((done) => instance.listen(0, "127.0.0.1", done));
   return { instance, url: "http://127.0.0.1:" + instance.address().port };
 }
@@ -155,15 +154,20 @@ test("existing room IDs and rosters survive the call provider change without pub
   assert.ok(!("videoUrl" in room));
   assert.deepEqual(room.participants, [person.person.id]);
 });
-test("connected service API preserves provider privacy, requires membership, and enforces allowances", async () => {
+test("connected service API preserves provider privacy, requires a signed-in account, and enforces allowances", async () => {
   const config = modelConfig({ OPENAI_API_KEY: "test-only-provider-secret" });
   const models = { config, chat: async () => "Mocked workshop answer", speak: async () => Buffer.from("ID3-mocked-audio"), research: async () => ({ items: [{ kind: "resource", title: "Test source", url: "https://example.com/source", reason: "Relevant to voice agents" }] }), search: async (people) => people };
-  const isolated = await start({ models, modelLimit: 3 });
+  const store = createStore(resolve(root, "data/people.json"), resolve(temporary, "services.json"), { log: () => {} });
+  const isolated = await start({ models, modelLimit: 3, store });
   try {
     const publicConfig = await (await request("/api/services", { base: isolated.url })).text();
     assert.ok(!publicConfig.includes("test-only-provider-secret") && !publicConfig.includes("api.openai.com"));
     assert.equal((await request("/api/services/chat", { base: isolated.url, method: "POST", data: { message: "Help" } })).status, 401);
-    const member = await join("Service tester", isolated.url);
+    const visitor = await join("Guest tester", isolated.url);
+    assert.equal((await request("/api/services/chat", { base: isolated.url, cookie: visitor.cookie, method: "POST", data: { message: "Help" } })).status, 401, "guests can't use services");
+    const { token } = await store.signIn({ sub: "acct_" + "T".repeat(26), sid: "sid", name: "Service tester", idToken: "id-token" });
+    const joined = await request("/api/profile", { base: isolated.url, cookie: "house_session=" + token, method: "POST", data: profile("Service tester") });
+    const member = { cookie: joined.headers.get("set-cookie").split(";")[0] };
     const chat = await request("/api/services/chat", { base: isolated.url, cookie: member.cookie, method: "POST", data: { message: "Help" } });
     assert.equal((await chat.json()).answer, "Mocked workshop answer");
     const speech = await request("/api/services/tts", { base: isolated.url, cookie: member.cookie, method: "POST", data: { text: "Hello", voice: "coral" } });
@@ -210,10 +214,10 @@ test("automatic radar scans only opted-in members and respects the scan interval
 });
 test("production output includes six pages, platform backend, seed data, and no private state", async () => {
   await import("../scripts/build.mjs");
-  for (const file of ["account.html", "account.js", "scripts/identity.mjs", "scripts/ledger.mjs", "scripts/credits.mjs", "scripts/billing.mjs", "scripts/connections.mjs", "scripts/plans.mjs", "scripts/persistence.mjs", "scripts/platform-admin.mjs"]) assert.deepEqual(await readFile(resolve(root, "dist", file)), await readFile(resolve(root, file)), file);
-  const files = ["index.html", "explore.html", "services.html", "radar.html", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "services.js", "radar.js", "package.json", "package-lock.json", "assets/favicon.svg", "assets/guohai.jpg", "scripts/serve.mjs", "scripts/store.mjs", "scripts/models.mjs", "scripts/activity.mjs", "scripts/calls.mjs", "scripts/auth.mjs", "stoa.html", "stoa.js", "world/engine.js", "world/sdk.js", "world/map.js", "world/kinds.js", "stoa/stage.js", "world/signaling.js", "worlds/plaza/map.json", "worlds/room/map.json", "scripts/spaces/service.mjs", "scripts/spaces/routes.mjs", "data/people.json", "data/projects.json", "data/offers.json", "data/activity.json", "themes/agora/theme.json", "themes/minimal/theme.json", "themes/cyberpunk/theme.json"];
+  for (const file of ["account.html", "account.js", "scripts/idp.mjs", "scripts/return-path.mjs", "scripts/billing-clients.mjs", "scripts/ledger.mjs", "scripts/credits.mjs", "scripts/billing.mjs", "scripts/connections.mjs", "scripts/plans.mjs", "scripts/persistence.mjs", "scripts/platform-admin.mjs"]) assert.deepEqual(await readFile(resolve(root, "dist", file)), await readFile(resolve(root, file)), file);
+  const files = ["index.html", "explore.html", "services.html", "radar.html", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "services.js", "radar.js", "package.json", "package-lock.json", "assets/favicon.svg", "assets/guohai.jpg", "scripts/serve.mjs", "scripts/store.mjs", "scripts/models.mjs", "scripts/activity.mjs", "scripts/calls.mjs", "stoa.html", "stoa.js", "world/engine.js", "world/sdk.js", "world/map.js", "world/kinds.js", "stoa/stage.js", "world/signaling.js", "worlds/plaza/map.json", "worlds/room/map.json", "scripts/spaces/service.mjs", "scripts/spaces/routes.mjs", "data/people.json", "data/projects.json", "data/offers.json", "data/activity.json", "themes/agora/theme.json", "themes/minimal/theme.json", "themes/cyberpunk/theme.json"];
   for (const file of files) assert.deepEqual(await readFile(resolve(root, "dist", file)), await readFile(resolve(root, file)), file);
-  for (const file of [".env", ".data/community.json"]) await assert.rejects(readFile(resolve(root, "dist", file)), { code: "ENOENT" });
+  for (const file of [".env", ".data/community.json", "scripts/auth.mjs", "scripts/identity.mjs"]) await assert.rejects(readFile(resolve(root, "dist", file)), { code: "ENOENT" });
   const built = await start({}, resolve(root, "dist"));
   try {
     assert.equal((await request("/account.html", { base: built.url })).status, 200);
@@ -235,4 +239,28 @@ test("public activity API returns the feed without exposing runtime files", asyn
     assert.equal((await request("/scripts/activity.mjs", { base: isolated.url })).status, 404);
     assert.equal((await request("/data/activity.json", { base: isolated.url })).status, 404);
   } finally { await close(isolated.instance); }
+});
+// /auth/login allows 20 requests a minute per client address.
+async function loginsUntilLimited(base, forwarded) {
+  const statuses = [];
+  for (const hops of forwarded) statuses.push((await fetch(base + "/auth/login", { redirect: "manual", headers: hops ? { "X-Forwarded-For": hops } : {} })).status);
+  return statuses;
+}
+test("without TRUST_PROXY, IP limits use the socket address and ignore X-Forwarded-For", async () => {
+  const { instance, url } = await start({ trustProxy: "0" });
+  try {
+    const statuses = await loginsUntilLimited(url, Array.from({ length: 21 }, (_, index) => "203.0.113." + index));
+    assert.deepEqual([statuses.slice(0, 20).every((status) => status === 303), statuses[20]], [true, 429]);
+  } finally { await close(instance); }
+});
+test("with TRUST_PROXY=1, IP limits use the last X-Forwarded-For hop only", async () => {
+  const { instance, url } = await start({ trustProxy: "1" });
+  try {
+    // A client can prepend anything; only the hop the trusted proxy appended counts.
+    const spoofed = Array.from({ length: 21 }, (_, index) => "198.51.100." + index + ", 203.0.113.7");
+    const statuses = await loginsUntilLimited(url, spoofed);
+    assert.deepEqual([statuses.slice(0, 20).every((status) => status === 303), statuses[20]], [true, 429]);
+    assert.equal((await loginsUntilLimited(url, ["198.51.100.1, 203.0.113.8"]))[0], 303, "another client behind the proxy has its own allowance");
+    assert.equal((await loginsUntilLimited(url, [""]))[0], 303, "without the header the socket address is used");
+  } finally { await close(instance); }
 });
