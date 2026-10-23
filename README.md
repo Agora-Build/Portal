@@ -79,7 +79,7 @@ Set `SITE_URL` to the public HTTPS origin, such as `https://agora.build` (or `ht
 
 The IdP's clients file holds the same secret through `secretEnv: "PORTAL_CLIENT_SECRET"`; the registration block is in [the platform guide](docs/platform.md#idp-registration). The portal no longer reads `GOOGLE_*`, `GITHUB_*`, `APPLE_*`, `AGORA_OIDC_*`, `IDENTITY_CLIENTS_FILE`, `VOX_IDENTITY_*`, or `ASTATION_IDENTITY_ENABLED`, and it no longer serves `/oauth/*`. Without `AUTH_ISSUER` and a valid secret, or while the IdP is unreachable, sign-in shows itself as temporarily unavailable and browser-only participation keeps working.
 
-Connecting Agora Console is separate from signing in: it uses Agora's OAuth (`AGORA_OAUTH_*`) with the redirect URI `<SITE_URL>/connect/agora/callback`. See [Agora Console connections](docs/platform.md#agora-console-connections).
+Connecting Agora Console is separate from signing in: the portal is a confidential client of Agora SSO (`AGORA_SSO_BASE_URL`, `AGORA_SSO_CLIENT_ID`, `AGORA_SSO_CLIENT_SECRET`, `AGORA_SSO_SCOPE`, default `basic_info,console`) with the redirect URI `<SITE_URL>/connect/agora/callback`, and stores connections sealed with `AGORA_CONSOLE_ENCRYPTION_KEY`. See [Agora Console connections](docs/platform.md#agora-console-connections).
 
 ### Local deployment
 

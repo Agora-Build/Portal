@@ -356,44 +356,82 @@ node scripts/platform-admin.mjs assign-role <ab…> <basic|principal|fellow>
 
 ## Agora Console Connections
 
-Connecting Agora Console is separate from signing in: an Agora OAuth
+Connecting Agora Console is separate from signing in: an Agora SSO
 authorization used only to let the signed-in account read its Console projects.
+The Portal is a confidential client of Agora SSO (`https://sso2.agora.io`).
 `GET /connect/agora` (signed-in accounts only; guests are sent to sign in)
-stores a transaction bound to the account, like sign-in, in an HttpOnly
-`__Host-portal_connect` cookie (`portal_connect` over http), and sends the
-browser to Agora with scope `basic_info,console` and PKCE. The callback,
-`/connect/agora/callback`, refuses a transaction that belongs to another account,
-stores `{accessToken, refreshToken, expiresAt}` sealed, and redirects to
-`/account/?connected=agora` (or `?connected=failed`).
+stores a single-use transaction bound to the account, like sign-in, in an
+HttpOnly `__Host-portal_connect` cookie (`portal_connect` over http), and sends
+the browser to `GET /api/v0/oauth/authorize` with `response_type=code`,
+`client_id`, `redirect_uri`, `scope`, `state` and PKCE (`code_challenge`, S256;
+Agora accepts it). The callback, `/connect/agora/callback`, refuses a
+transaction that belongs to another account or a state that does not match,
+redeems the code and redirects to `/account/?connected=agora` (or
+`?connected=failed`).
 
-Register a dedicated, confidential Portal client with Agora's OAuth service and
-allow the redirect URI `<SITE_URL>/connect/agora/callback` (for production
+Register the Portal's client with Agora SSO and allow exactly the redirect URI
+`<SITE_URL>/connect/agora/callback` (for production
 `https://agora.build/connect/agora/callback`; locally
-`http://localhost:3080/connect/agora/callback`). The old
-`/auth/agora/callback` is gone. Settings:
+`http://localhost:3080/connect/agora/callback`). Do not reuse Astation's atem
+loopback client. Settings:
 
 | Setting | Meaning |
 | --- | --- |
-| `AGORA_OAUTH_BASE_URL` | Agora's OAuth service (default `https://sso2.agora.io`) |
-| `AGORA_OAUTH_CLIENT_ID` | The Portal's Agora client ID |
-| `AGORA_OAUTH_CLIENT_SECRET` | Its client secret; required, the client is confidential (the code exchange and refresh send it) |
-| `AGORA_OAUTH_USERINFO_URL` | Optional; a Bearer userinfo endpoint used only to show the Agora account's display name ("Connected to your Agora account (name)") |
-| `AGORA_BFF_URL` | The Console API (default `https://agora-cli.agora.io`, as Astation uses) |
-| `AGORA_CONSOLE_ENCRYPTION_KEY` | A base64-encoded 32-byte server key (formerly `CONNECTION_ENCRYPTION_KEY`, still read as a fallback) |
+| `AGORA_SSO_BASE_URL` | Agora SSO, https only (default `https://sso2.agora.io`) |
+| `AGORA_SSO_CLIENT_ID` | The Portal's Agora SSO client ID |
+| `AGORA_SSO_CLIENT_SECRET` | Its client secret; the client is confidential |
+| `AGORA_SSO_SCOPE` | Comma-separated scopes requested at authorize (default `basic_info,console`, what the Portal has always sent; `basic_info` alone may not cover the Console APIs) |
+| `AGORA_CONSOLE_ENCRYPTION_KEY` | A base64-encoded 32-byte server key that seals stored connections |
 
-Without all of the required ones, "Connect Agora" is hidden and the account page
-says Console connections are not available yet. Agora access and refresh tokens
-are encrypted with AES-256-GCM at rest, using only
-`AGORA_CONSOLE_ENCRYPTION_KEY`; keep and back up that key separately from the
-database and never change it once connections exist.
+Connect is available only when `AGORA_SSO_BASE_URL`, `AGORA_SSO_CLIENT_ID`,
+`AGORA_SSO_CLIENT_SECRET`, a 32-byte `AGORA_CONSOLE_ENCRYPTION_KEY` and
+`SITE_URL` are all set; otherwise "Connect Agora Console" is hidden, the account
+page says Console connections are not available yet, and the server logs the
+missing setting names (never values). There are no other names for these
+settings.
+
+Endpoints used, all on `AGORA_SSO_BASE_URL`:
+
+| Call | Use |
+| --- | --- |
+| `POST /api/v0/oauth/token` `grant_type=authorization_code` | Redeems the code with `client_id`, `client_secret`, `code`, `redirect_uri` (and `code_verifier`) in the form body |
+| `POST /api/v0/oauth/token` `grant_type=refresh_token` | Renews the access token with `client_id`, `client_secret`, `refresh_token`: a minute before it expires, and once after a 401 |
+| `GET /api/v0/customer/company/basic-info`, then `GET /api/v0/customer/user-auth` | The display name shown on the account page (company name, else the user's name), read once at connect |
+| `GET /api/v0/customer/project` | The project list; `GET /api/v0/project` is used when it answers 404 |
+| `GET /api/v0/project/{vendorId}` | A project's certificate, only when the owner asks to reveal it |
+| `DELETE /api/v0/customer/user-auth` | Removes the authorization at Agora when the owner disconnects (best effort) |
+
+Every data call sends `Authorization: Bearer <access token>`. A 401 renews the
+token once and retries; if Agora refuses the renewal the connection is marked
+as needing a reconnect, the account page shows "Reconnect Agora Console", and no
+further calls are made until the owner connects again.
+
+Agora has not documented its response shapes, so one tolerant mapper in
+`scripts/connections.mjs` reads them: a project array at the top level or under
+`data`, `list`, `items` or `projects`; fields such as `name`/`projectName`,
+`vendorId`/`vid`/`id`, `appId`/`key`/`vendorKey`,
+`certificate`/`signKey`/`appCertificate`, `status` and `createdAt`. When a
+response does not match, the server logs only its status code and key names.
+To adapt the mapper, the owner can run the temporary probe
+`node scripts/agora-shapes.mjs <account-id>` with the server's settings (the
+same `DATABASE_URL` and key; a local file store needs the Portal stopped and
+`PORTAL_OFFLINE_ADMIN=true`) after connecting that account. It opens the
+stored token in-process, calls each GET endpoint above plus
+`GET /api/v0/account/companies`, and prints only key names and value types,
+never values.
+
+What is stored: per account, `{accessToken, refreshToken, expiresAt, name,
+reconnect}` sealed with AES-256-GCM under `AGORA_CONSOLE_ENCRYPTION_KEY`, bound
+to the account ID. Keep and back up that key separately from the database and
+never change it once connections exist. Project lists, App IDs and certificates
+are fetched from Agora on demand and never stored.
 
 The owner can list projects and App IDs and explicitly reveal a project's
 certificate. Lists omit certificates; credentials never appear in public
-profiles. Certificates are fetched on demand and not cached in the Portal
-database. The browser clears revealed certificates after 30 seconds or when its
-tab is hidden. Disconnecting removes the stored Console connection; it does not
-sign anyone out. Apps reach the same routes with `agora:projects` and
-`agora:certificates` tokens.
+profiles or logs. The browser clears revealed certificates after 30 seconds or
+when its tab is hidden. Disconnecting removes the authorization at Agora when it
+can and always removes the stored connection; it does not sign anyone out. Apps
+reach the same routes with `agora:projects` and `agora:certificates` tokens.
 
 ## Vox, Atem And Astation
 
