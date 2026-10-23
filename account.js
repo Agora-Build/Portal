@@ -56,38 +56,98 @@ async function statement(append = false, version = renderVersion) {
   cursor = result.nextCursor;
   document.querySelector("#more-statement").hidden = !cursor;
 }
-async function loadProjects(version, available) {
+// The Agora Console details window: the connection, its projects, and each certificate on request. Shown certificates
+// hide after 30 seconds, when the window closes, and when the page is hidden.
+const agoraDialog = document.querySelector("#agora-dialog");
+const shownCertificates = new Set();
+let agora = null;
+let projectsVersion = 0;
+const hideAllCertificates = () => { for (const hide of [...shownCertificates]) hide(); };
+const syncHideAll = () => { document.querySelector("#agora-hide-all").hidden = !shownCertificates.size; };
+async function copy(text, label) {
+  try { await navigator.clipboard.writeText(text); notify(label + " copied."); }
+  catch { notify("Copying isn't available here. Select the text instead."); }
+}
+function projectRow(project, index) {
+  const secretId = "agora-certificate-" + index;
+  const secret = el("code", { class: "project-secret", id: secretId, hidden: "" });
+  const toggle = el("button", { class: "inline-link", type: "button", text: "Show certificate", "aria-expanded": "false", "aria-controls": secretId });
+  const copySecret = el("button", { class: "inline-link", type: "button", text: "Copy certificate", hidden: "" });
+  let expiry, certificate = "";
+  const hide = () => {
+    certificate = ""; secret.textContent = ""; secret.hidden = true; copySecret.hidden = true;
+    toggle.textContent = "Show certificate"; toggle.setAttribute("aria-expanded", "false");
+    clearTimeout(expiry); shownCertificates.delete(hide); syncHideAll();
+  };
+  toggle.addEventListener("click", async () => {
+    if (!secret.hidden) { hide(); return; }
+    toggle.disabled = true;
+    try {
+      const result = await api("/api/connections/agora/certificate", { method: "POST", body: JSON.stringify({ projectId: project.projectId }) });
+      if (!agoraDialog.open) return;
+      certificate = result.certificate || "";
+      secret.textContent = certificate || "No certificate is enabled for this project.";
+      secret.hidden = false; copySecret.hidden = !certificate;
+      toggle.textContent = "Hide certificate"; toggle.setAttribute("aria-expanded", "true");
+      expiry = setTimeout(hide, 30000); shownCertificates.add(hide); syncHideAll();
+    } catch (error) {
+      notify(error.message);
+      if (error.data?.reconnect) showDetailsReconnect(error.message);
+    } finally { toggle.disabled = false; }
+  });
+  copySecret.addEventListener("click", () => { if (certificate) copy(certificate, "Certificate"); });
+  const actions = [toggle, copySecret];
+  if (project.appId) {
+    const copyAppId = el("button", { class: "inline-link", type: "button", text: "Copy App ID" });
+    copyAppId.addEventListener("click", () => copy(project.appId, "App ID"));
+    actions.unshift(copyAppId);
+  }
+  const facts = [project.status ? "Status " + project.status : "", project.createdAt ? "Created " + new Date(project.createdAt).toLocaleDateString() : ""].filter(Boolean).join(" · ");
+  return el("article", { class: "agora-project" }, [
+    el("h3", { text: project.name || "Untitled project" }),
+    el("p", { class: "mono", text: project.appId ? "App ID: " + project.appId : "App ID unavailable" }),
+    ...(facts ? [el("p", { class: "muted", text: facts })] : []),
+    el("div", { class: "agora-project-actions" }, actions),
+    secret
+  ]);
+}
+function showDetailsReconnect(message) {
+  document.querySelector("#agora-dialog-status").textContent = message || "Your Agora Console connection has expired. Reconnect to see your projects.";
+  document.querySelector("#agora-dialog-reconnect").hidden = !agora?.connect;
+  document.querySelector("#agora-refresh").hidden = true;
+}
+async function loadProjects() {
+  const version = ++projectsVersion;
   const container = document.querySelector("#agora-projects");
+  hideAllCertificates();
+  document.querySelector("#agora-dialog-reconnect").hidden = true;
+  document.querySelector("#agora-refresh").hidden = false;
+  document.querySelector("#agora-dialog-status").textContent = "Connected to your Agora account" + (agora?.name ? " (" + agora.name + ")" : "") + ".";
+  if (agora?.reconnect) { container.replaceChildren(); showDetailsReconnect(); return; }
   container.replaceChildren(el("p", { text: "Loading your Agora projects..." }));
   try {
     const result = await api("/api/connections/agora/projects");
-    if (version !== renderVersion) return;
-    container.replaceChildren(...result.projects.map((project) => {
-      const secret = el("code", { class: "project-secret", hidden: "" });
-      const button = el("button", { class: "inline-link", type: "button", text: "Reveal certificate", "aria-expanded": "false" });
-      let expiry;
-      const hide = () => { secret.textContent = ""; secret.hidden = true; button.textContent = "Reveal certificate"; button.setAttribute("aria-expanded", "false"); clearTimeout(expiry); };
-      button.addEventListener("click", async () => {
-        if (!secret.hidden) { hide(); return; }
-        button.disabled = true;
-        try {
-          const result = await api("/api/connections/agora/certificate", { method: "POST", body: JSON.stringify({ projectId: project.projectId }) });
-          secret.textContent = result.certificate || "No certificate is available for this project.";
-          secret.hidden = false; button.textContent = "Hide certificate"; button.setAttribute("aria-expanded", "true"); expiry = setTimeout(hide, 30000);
-        } catch (error) { notify(error.message); }
-        finally { button.disabled = false; }
-      });
-      document.addEventListener("visibilitychange", () => { if (document.hidden) hide(); });
-      return el("article", { class: "agora-project" }, [el("h4", { text: project.name }), el("p", { class: "mono", text: project.appId ? "App ID: " + project.appId : "App ID unavailable" }), button, secret]);
-    }));
-    if (!result.projects.length) container.append(el("p", { text: "No Agora projects were returned for this account." }));
+    if (version !== projectsVersion) return;
+    container.replaceChildren(...result.projects.map(projectRow));
+    if (!result.projects.length) container.append(el("p", { class: "empty-panel", text: "No Agora projects were returned for this account." }));
+    else document.querySelector("#agora-dialog-status").textContent += " " + result.projects.length + (result.projects.length === 1 ? " project." : " projects.");
   } catch (error) {
-    if (version !== renderVersion) return;
+    if (version !== projectsVersion) return;
     container.replaceChildren(el("p", { class: "form-error", text: error.message }));
     // Agora refused to renew the connection: offer to reconnect.
-    if (error.data?.reconnect) showReconnect(available);
+    if (error.data?.reconnect) { showDetailsReconnect(error.message); showReconnect(agora?.connect); }
   }
 }
+function openDetails() {
+  agoraDialog.showModal();
+  loadProjects();
+}
+agoraDialog.addEventListener("close", () => { projectsVersion++; hideAllCertificates(); document.querySelector("#agora-projects").replaceChildren(); });
+document.addEventListener("visibilitychange", () => { if (document.hidden) hideAllCertificates(); });
+document.querySelector("#agora-details").addEventListener("click", openDetails);
+document.querySelector("#agora-refresh").addEventListener("click", () => loadProjects());
+document.querySelector("#agora-hide-all").addEventListener("click", hideAllCertificates);
+document.querySelector("#agora-dialog-reconnect").addEventListener("click", () => { location.assign("/connect/agora"); });
 async function loadAccount() {
   const version = ++renderVersion;
   const account = state.account;
@@ -102,7 +162,9 @@ async function loadAccount() {
   if (!account) {
     document.querySelector("#credit-balance").textContent = "--";
     document.querySelector("#credit-statement").replaceChildren(el("p", { class: "empty-panel", text: "Sign in to see your credit statement." }));
-    document.querySelector("#agora-projects").replaceChildren();
+    agora = null;
+    if (agoraDialog.open) agoraDialog.close();
+    document.querySelector("#agora-details").hidden = true;
     document.querySelector("#manage-billing").hidden = true;
     document.querySelector("#disconnect-agora").hidden = true;
     document.querySelector("#connect-agora").hidden = true;
@@ -124,15 +186,16 @@ async function loadAccount() {
     document.querySelector("#subscription-status").textContent = subscription ? "Premium subscription: " + subscription.status + ". " + (subscription.cancelAtPeriodEnd ? "Ends " : "Current period ends ") + new Date(subscription.currentPeriodEnd * 1000).toLocaleDateString() + "." : "Your current plan: " + billing.plan + ".";
   }
   if (results[2].status === "fulfilled") {
-    const agora = results[2].value.agora;
+    agora = results[2].value.agora;
     const connectButton = document.querySelector("#connect-agora");
     document.querySelector("#agora-status").textContent = agora.connected ? "Connected to your Agora account" + (agora.name ? " (" + agora.name + ")" : "") + "." : agora.connect ? "Connect Agora to access your projects and App IDs." : "Agora Console connections are not available yet.";
     connectButton.textContent = "Connect Agora Console";
     connectButton.hidden = !agora.connect || agora.connected;
     document.querySelector("#disconnect-agora").hidden = !agora.connected;
-    if (agora.connected && agora.reconnect) { document.querySelector("#agora-projects").replaceChildren(); showReconnect(agora.connect); }
-    else if (agora.connected) await loadProjects(version, agora.connect);
-    else document.querySelector("#agora-projects").replaceChildren();
+    document.querySelector("#agora-details").hidden = !agora.connected;
+    if (agora.connected && agora.reconnect) showReconnect(agora.connect);
+    if (!agora.connected && agoraDialog.open) agoraDialog.close();
+    else if (agoraDialog.open) loadProjects();
   }
   for (const result of results) if (result.status === "rejected") notify(result.reason.message);
 }
@@ -160,7 +223,7 @@ document.querySelector("#account-guest").addEventListener("click", () => {
 });
 document.querySelector("#connect-agora").addEventListener("click", () => { location.assign("/connect/agora"); });
 document.querySelector("#disconnect-agora").addEventListener("click", async () => {
-  try { await api("/api/connections/agora", { method: "DELETE" }); document.querySelector("#agora-projects").replaceChildren(); await refreshSession(); }
+  try { await api("/api/connections/agora", { method: "DELETE" }); if (agoraDialog.open) agoraDialog.close(); await refreshSession(); }
   catch (error) { notify(error.message); }
 });
 document.querySelector("#manage-billing").addEventListener("click", async () => {

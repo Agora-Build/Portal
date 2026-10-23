@@ -95,3 +95,20 @@ test("pages link to each other at clean /name/ URLs, never /name.html", async ()
     for (const [, link] of html.matchAll(/(?:src|href)="([^"#]+)"/g)) assert.ok(/^(\/|https:\/\/)/.test(link), file + " " + link + " is absolute");
   }
 });
+test("Agora Console details open in a popup that lists projects and shows or hides each certificate", async () => {
+  const html = await read("account.html");
+  assert.match(html, /<button id="agora-details" class="button" type="button" aria-haspopup="dialog" hidden>Console details<\/button>/);
+  const dialog = html.match(/<dialog id="agora-dialog"[\s\S]*?<\/dialog>/)?.[0] || "";
+  assert.match(dialog, /aria-labelledby="agora-dialog-title"/);
+  assert.match(dialog, /data-close aria-label="Close Agora Console details"/);
+  for (const id of ["agora-projects", "agora-refresh", "agora-hide-all", "agora-dialog-reconnect", "agora-dialog-status"]) assert.match(dialog, new RegExp('id="' + id + '"'), id);
+  assert.doesNotMatch(html.replace(dialog, ""), /id="agora-projects"/, "projects are listed only in the popup");
+  const script = await read("account.js");
+  assert.match(script, /"Show certificate"/);
+  assert.match(script, /"Hide certificate"/);
+  assert.match(script, /"aria-expanded": "false", "aria-controls": secretId/);
+  assert.match(script, /setTimeout\(hide, 30000\)/);
+  assert.match(script, /agoraDialog\.addEventListener\("close", \(\) => \{ projectsVersion\+\+; hideAllCertificates\(\);/);
+  assert.match(script, /if \(document\.hidden\) hideAllCertificates\(\)/);
+  assert.match(script, /if \(!agoraDialog\.open\) return;/, "a certificate that arrives after the popup closed is dropped");
+});
