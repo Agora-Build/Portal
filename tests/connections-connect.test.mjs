@@ -81,7 +81,7 @@ test("a signed-in account connects Agora Console; the tokens are stored sealed a
   assert.equal(location.origin + location.pathname, app.agora.base + "/api/v0/oauth/authorize");
   assert.equal(location.searchParams.get("redirect_uri"), siteUrl + "/connect/agora/callback");
   assert.equal(location.searchParams.get("scope"), "basic_info,console");
-  assert.equal(location.searchParams.get("code_challenge_method"), "S256");
+  assert.ok(!location.searchParams.has("code_challenge") && !location.searchParams.has("code_challenge_method"), "no PKCE: Agora refuses it for confidential clients");
   assert.equal(location.searchParams.get("client_id"), app.agora.clientId);
   assert.ok(!location.searchParams.has("client_secret"));
   const cookie = cookieNamed(begun, "portal_connect");

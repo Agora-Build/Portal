@@ -3,7 +3,7 @@
 // refresh_token, client_secret_post, PKCE S256 checked when sent), and the bearer APIs /api/v0/customer/project,
 // /api/v0/project, /api/v0/project/{vendorId}, /api/v0/customer/user-auth (GET, DELETE),
 // /api/v0/customer/company/basic-info and /api/v0/account/companies. The project list shape can be swapped.
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 
 const projects = [{ vendorId: "vendor-1", projectName: "Private project", key: "agora-app-id", signKey: "private-test-certificate", status: 1, createdAt: 1700000000 }];
 export const listShapes = {
@@ -40,8 +40,9 @@ export function createFakeAgora({ base = "https://sso.agora.example", clientId =
         counts.code++;
         const entry = codes.get(body.get("code"));
         codes.delete(body.get("code"));
-        const challenge = createHash("sha256").update(body.get("code_verifier") || "").digest("base64url");
-        if (!entry || entry.redirectUri !== body.get("redirect_uri") || entry.challenge !== challenge) return Response.json({ error: "invalid_grant" }, { status: 400 });
+        // Like the real Agora SSO: a confidential client must not use PKCE.
+        if (body.has("code_verifier")) return Response.json({ error: "invalid_request", error_description: "PKCE is not supported for confidential client" }, { status: 400 });
+        if (!entry || entry.redirectUri !== body.get("redirect_uri")) return Response.json({ error: "invalid_grant" }, { status: 400 });
         return tokens(entry.user);
       }
       if (body.get("grant_type") === "refresh_token") {
@@ -102,12 +103,14 @@ export function createFakeAgora({ base = "https://sso.agora.example", clientId =
       const query = url.searchParams;
       if (url.origin + url.pathname !== base + "/api/v0/oauth/authorize") throw new Error("not Agora's authorize endpoint");
       if (query.get("response_type") !== "code" || query.get("client_id") !== clientId || query.get("scope") !== scope || !query.get("state") || query.has("toPage")) throw new Error("invalid authorize request");
+      // The real Agora SSO answers "Invalid request: PKCE is not supported for confidential client".
+      if (query.has("code_challenge") || query.has("code_challenge_method")) throw new Error("Invalid request: PKCE is not supported for confidential client");
       const back = new URL(query.get("redirect_uri"));
       back.searchParams.set("state", query.get("state"));
       if (error) back.searchParams.set("error", error);
       else {
         const code = "agora-code-" + randomBytes(12).toString("hex");
-        codes.set(code, { redirectUri: query.get("redirect_uri"), challenge: query.get("code_challenge"), user: { ...state.user } });
+        codes.set(code, { redirectUri: query.get("redirect_uri"), user: { ...state.user } });
         back.searchParams.set("code", code);
       }
       return back.href;

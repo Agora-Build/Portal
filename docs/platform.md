@@ -363,8 +363,9 @@ The Portal is a confidential client of Agora SSO (`https://sso2.agora.io`).
 stores a single-use transaction bound to the account, like sign-in, in an
 HttpOnly `__Host-portal_connect` cookie (`portal_connect` over http), and sends
 the browser to `GET /api/v0/oauth/authorize` with `response_type=code`,
-`client_id`, `redirect_uri`, `scope`, `state` and PKCE (`code_challenge`, S256;
-Agora accepts it). The callback, `/connect/agora/callback`, refuses a
+`client_id`, `redirect_uri`, `scope` and `state`, and no PKCE: Agora refuses it
+for confidential clients ("PKCE is not supported for confidential client"); the
+client secret and the single-use, account-bound state protect the code. The callback, `/connect/agora/callback`, refuses a
 transaction that belongs to another account or a state that does not match,
 redeems the code and redirects to `/account/?connected=agora` (or
 `?connected=failed`).
@@ -394,7 +395,7 @@ Endpoints used, all on `AGORA_SSO_BASE_URL`:
 
 | Call | Use |
 | --- | --- |
-| `POST /api/v0/oauth/token` `grant_type=authorization_code` | Redeems the code with `client_id`, `client_secret`, `code`, `redirect_uri` (and `code_verifier`) in the form body |
+| `POST /api/v0/oauth/token` `grant_type=authorization_code` | Redeems the code with `client_id`, `client_secret`, `code`, `redirect_uri` in the form body (no `code_verifier`) |
 | `POST /api/v0/oauth/token` `grant_type=refresh_token` | Renews the access token with `client_id`, `client_secret`, `refresh_token`: a minute before it expires, and once after a 401 |
 | `GET /api/v0/customer/company/basic-info`, then `GET /api/v0/customer/user-auth` | The display name shown on the account page (company name, else the user's name), read once at connect |
 | `GET /api/v0/customer/project` | The project list; `GET /api/v0/project` is used when it answers 404 |

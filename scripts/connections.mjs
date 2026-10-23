@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from "node:crypto";
 import { AppError } from "./store.mjs";
 
 // Agora SSO (sso2.agora.io), used only to authorise Console access for an account that is already signed in. The
@@ -242,20 +242,21 @@ export function createConnections(store, config = connectionsConfig(), { request
       }
       return { agora: status };
     },
-    // Starts Agora's authorization-code flow (PKCE S256) for a signed-in account. The caller stores the transaction,
+    // Starts Agora's authorization-code flow for a signed-in account. No PKCE: Agora refuses it for confidential clients
+    // ("PKCE is not supported for confidential client"); the client secret and the single-use, account-bound state protect the code. The caller stores the transaction,
     // which is bound to the account, and keeps its ID in a short-lived cookie.
     beginConnect(accountId) {
       if (!config.connect?.ready) throw new ConnectError("unavailable");
-      const transaction = { id: randomBytes(32).toString("base64url"), kind: CONNECT_KIND, accountId, state: randomBytes(32).toString("base64url"), verifier: randomBytes(32).toString("base64url"), createdAt: now() };
+      const transaction = { id: randomBytes(32).toString("base64url"), kind: CONNECT_KIND, accountId, state: randomBytes(32).toString("base64url"), createdAt: now() };
       const url = new URL(config.sso.baseUrl + AGORA_PATHS.authorize);
-      for (const [name, value] of Object.entries({ response_type: "code", client_id: config.sso.clientId, redirect_uri: config.connect.redirectUri, scope: config.sso.scope, state: transaction.state, code_challenge: createHash("sha256").update(transaction.verifier).digest("base64url"), code_challenge_method: "S256" })) url.searchParams.set(name, value);
+      for (const [name, value] of Object.entries({ response_type: "code", client_id: config.sso.clientId, redirect_uri: config.connect.redirectUri, scope: config.sso.scope, state: transaction.state })) url.searchParams.set(name, value);
       return { url: url.href, transaction };
     },
     // Completes the flow: the transaction must be a connect transaction for this same signed-in account, with the
     // state Agora returned. The code is redeemed only after those checks; the tokens are stored sealed.
     async completeConnect(transaction, parameters, accountId) {
       if (!config.connect?.ready) throw new ConnectError("unavailable");
-      if (!transaction || transaction.kind !== CONNECT_KIND || typeof transaction.state !== "string" || typeof transaction.verifier !== "string") throw new ConnectError("transaction");
+      if (!transaction || transaction.kind !== CONNECT_KIND || typeof transaction.state !== "string") throw new ConnectError("transaction");
       if (!accountId || transaction.accountId !== accountId) throw new ConnectError("account");
       const states = parameters.getAll("state");
       if (states.length !== 1 || !same(states[0], transaction.state)) throw new ConnectError("state");
@@ -264,7 +265,7 @@ export function createConnections(store, config = connectionsConfig(), { request
       if (!code || code.length > 4096) throw new ConnectError("code");
       let result;
       try {
-        const response = await tokenRequest({ grant_type: "authorization_code", code, redirect_uri: config.connect.redirectUri, code_verifier: transaction.verifier });
+        const response = await tokenRequest({ grant_type: "authorization_code", code, redirect_uri: config.connect.redirectUri });
         if (!response.ok) throw new Error("refused");
         result = await response.json();
       } catch { throw new ConnectError("token"); }
