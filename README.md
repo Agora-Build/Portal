@@ -32,14 +32,14 @@ Without `DATABASE_URL`, state is stored in `/app/.data`. Mount a volume there so
 
 ## Pages and data
 
-Each page is served at a clean address ending in `/`: `/` (home), `/explore/`, `/stoa/`, `/radar/`, `/services/` and `/account/`, from the matching `<name>.html`. `/<name>` and the old `/<name>.html` redirect there with `308`, keeping the query string; other names stay `404`.
+Each page is served at a clean address ending in `/`: `/` (home), `/explore/`, `/stoa/`, `/radar/`, `/marketplaces/` and `/account/`, from the matching `<name>.html`. `/<name>` and the old `/<name>.html` redirect there with `308`, keeping the query string; other names stay `404`.
 
 - `index.html` / `people.js`: people discovery, skills, natural-language search, and public profiles.
 - `activity.js` / `scripts/activity.mjs`: public GitHub events and actual community actions, with timestamps and source links.
 - `explore.html` / `explore.js`: 16 verified GitHub projects, categories, search, and sorting.
 - `stoa.html` / `stoa.js` / `stoa/` / `world/`: the Stoa — a walkable plaza with first-come rooms and your own spaces, live presence and messages over Agora Signaling, and calls over Agora RTC.
 - `radar.html` / `radar.js`: intent-driven web research with source links and reasons.
-- `services.html` / `services.js`: language-model and text-to-speech playgrounds, plus verified offers.
+- `marketplaces.html` / `marketplaces.js`: the marketplaces, with language-model and text-to-speech playgrounds, plus verified offers.
 - `account.html` / `account.js`: shared identity, credits, membership plans, purchases, and Agora Console connections.
 
 Sign-in comes from auth.agora.build; the portal owns the account's credit ledger,
@@ -65,7 +65,7 @@ Joining requires a name, bio, skills, a public contact link, and a real intent. 
 
 Every "Sign in" link goes straight to auth.agora.build (`/auth/login?returnTo=<this page>`), one step with no dialog in between. Signed out, the account page's "01 / Identity" card is the sign-in, with "Continue with this browser" for a browser-only profile; the header's "Take a seat" and the Stoa's "Sign in to walk and talk" send visitors there (`/account/?returnTo=<this page>`), and a browser-only profile saved there returns to that same-site page. GitHub, Google, and any later logins are chosen on auth.agora.build, and linked logins, devices, and "sign out everywhere" are managed on the IdP's account page ("Manage sign-in"). The account ID is the IdP's `ab…` ID (`ab` followed by a 26-character ULID), the same in every Agora Build app. A browser-only profile that signs in is kept by its account when the account has none yet. Account sessions last 30 days; signing out ends both the portal session and the IdP session, and the IdP's back-channel logout ends portal sessions too. Emails and session hashes stay private. Removing a public profile also removes its radar and owned spaces, while the private account remains available to start a new profile.
 
-"Continue with this browser" is still available for looking around: walking the Stoa, appearing on the radar, and keeping a public profile. Its editing access belongs to that browser; clearing the cookie loses access. Credits, services, billing, Agora Console, and owning spaces need a signed-in account. Public GitHub contributor snapshots are not authenticated accounts.
+"Continue with this browser" is still available for looking around: walking the Stoa, appearing on the radar, and keeping a public profile. Its editing access belongs to that browser; clearing the cookie loses access. Credits, the marketplaces, billing, Agora Console, and owning spaces need a signed-in account. Public GitHub contributor snapshots are not authenticated accounts.
 
 Profiles, rooms, accounts, credits, billing, and private radar persist in PostgreSQL when `DATABASE_URL` is set, or `.data/community.json` for local development. Protect and back up this state. Deleting a profile removes its radar, rooms it created, and its entries on other room rosters, while preserving its private account and purchases. Public profile text may be sent to the model for directory search; disclose only information you intend to share.
 

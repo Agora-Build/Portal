@@ -1,5 +1,5 @@
 // The site's pages, each served at /<name>/ from <name>.html; the home page is "/", and the Stoa has its own routes under /stoa/.
-export const pages = ["explore", "services", "radar", "account"];
+export const pages = ["explore", "marketplaces", "radar", "account"];
 // Where an old (/<name>.html) or slash-less (/<name>) page address now lives, or null when it isn't one.
 export function cleanPagePath(path) {
   if (path === "/index" || path === "/index.html") return "/";

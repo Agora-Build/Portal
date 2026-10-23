@@ -10,8 +10,8 @@ test("return paths stay on allowlisted same-site pages and drop a stale signin o
   assert.equal(returnPath("/stoa/s/11111111-1111-1111-1111-111111111111?invite=abc&signin=failed"), "/stoa/s/11111111-1111-1111-1111-111111111111?invite=abc");
   assert.equal(returnPath("/meetings.html"), "/");
   assert.equal(returnPath("/stoa/s/not-a-uuid"), "/");
-  for (const [old, clean] of [["/account.html?connected=agora", "/account/?connected=agora"], ["/account", "/account/"], ["/explore.html?q=voice#top", "/explore/?q=voice#top"], ["/index.html", "/"], ["/stoa.html", "/stoa/"], ["/services/", "/services/"], ["/radar/?x=1", "/radar/?x=1"]]) assert.equal(returnPath(old), clean, old);
-  for (const value of ["/unknown/", "/unknown.html", "/account/../scripts/serve.mjs", "/account//"]) assert.equal(returnPath(value), "/", value);
+  for (const [old, clean] of [["/account.html?connected=agora", "/account/?connected=agora"], ["/account", "/account/"], ["/explore.html?q=voice#top", "/explore/?q=voice#top"], ["/index.html", "/"], ["/stoa.html", "/stoa/"], ["/marketplaces/", "/marketplaces/"], ["/radar/?x=1", "/radar/?x=1"]]) assert.equal(returnPath(old), clean, old);
+  for (const value of ["/unknown/", "/unknown.html", "/services/", "/services", "/services.html", "/account/../scripts/serve.mjs", "/account//"]) assert.equal(returnPath(value), "/", value);
 });
 
 test("withSignin adds the outcome and keeps the query and fragment", () => {

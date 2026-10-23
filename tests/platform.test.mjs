@@ -41,11 +41,11 @@ test("credit reservations serialize competing spends, preserve double-entry bala
   assert.equal((await ledger.balance(other.account.id)).credits, 0);
 });
 
-test("failed services and abandoned holds return credits without duplicate usage; retry keys do not rerun completed work", async () => {
+test("failed marketplace requests and abandoned holds return credits without duplicate usage; retry keys do not rerun completed work", async () => {
   let clock = Date.now(), actions = 0;
   const store = newStore(), ledger = createLedger(store, { now: () => clock }), login = await signIn(store);
   await ledger.deposit(login.account.id, 20, "Test balance", "balance");
-  const credits = createCredits(creditsConfig({ SERVICE_CHAT_CREDITS: "3" }), { ledger });
+  const credits = createCredits(creditsConfig({ MARKETPLACE_CHAT_CREDITS: "3" }), { ledger });
   await assert.rejects(credits.run(login.account.id, "chat", "request-failed-001", async () => { throw new Error("provider unavailable"); }));
   assert.equal((await ledger.balance(login.account.id)).credits, 20);
   await credits.run(login.account.id, "chat", "request-success-001", async () => { actions++; return "answer"; });

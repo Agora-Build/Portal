@@ -155,7 +155,7 @@ async function signInFlow(viewport) {
       const manage = page.getByRole("link", { name: /Manage sign-in/ });
       check(await manage.isVisible() && (await manage.getAttribute("href")) === stack.issuer + "/account", tag + "\"Manage sign-in\" links to " + stack.issuer + "/account");
       await page.locator("#credit-balance").filter({ hasNotText: "--" }).waitFor({ timeout: 5000 });
-      check(await page.getByRole("heading", { name: "Credits for the work." }).isVisible() && /^\d[\d,]*$/.test((await page.locator("#credit-balance").textContent()) || ""), tag + "the credits section shows a balance");
+      check(await page.getByRole("heading", { name: "Credits for your next creation." }).isVisible() && /^\d[\d,]*$/.test((await page.locator("#credit-balance").textContent()) || ""), tag + "the credits section shows a balance");
       check(await tabTo(page, page.locator("#account-logout")), tag + "Tab reaches \"Sign out\" on the account page");
     }, page);
 
@@ -217,11 +217,11 @@ async function guestFlow(viewport) {
       await page.waitForURL((url) => url.pathname === "/explore/", { timeout: 5000 });
       check(true, tag + "after saving, the guest is back on the page that sent them (/explore/)");
     }, page);
-    await step(tag + "services", async () => {
-      await page.goto(stack.site + "/services/");
-      const notes = page.locator(".service-note");
+    await step(tag + "marketplaces", async () => {
+      await page.goto(stack.site + "/marketplaces/");
+      const notes = page.locator(".marketplace-note");
       await notes.first().filter({ hasText: "Sign in to use credits." }).waitFor({ timeout: 5000 });
-      check((await notes.allTextContents()).every((text) => text === "Sign in to use credits."), tag + "the services page says \"Sign in to use credits.\"");
+      check((await notes.allTextContents()).every((text) => text === "Sign in to use credits."), tag + "the marketplaces page says \"Sign in to use credits.\"");
     }, page);
     await step(tag + "account", async () => {
       await page.goto(stack.site + "/account/");

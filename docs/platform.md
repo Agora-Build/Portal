@@ -134,7 +134,7 @@ logs counts only.
 
 "Continue with this browser" stays for looking around: a browser-only profile
 can walk the Stoa, appear on the radar and keep a public profile. Credits,
-services (chat and TTS), billing, Agora Console and owning spaces need a
+the marketplaces (chat and TTS), billing, Agora Console and owning spaces need a
 signed-in account; guests see "Sign in to use credits" and similar prompts
 instead. A guest who signs in keeps their profile when the account has none yet.
 
@@ -206,7 +206,7 @@ bearer token never falls back to the cookie. The token must be a JWT with `typ`
 | --- | --- | --- |
 | `GET /api/me` | account or guest | any (an `openid`-only token is enough) |
 | `GET /api/credits/balance`, `/api/credits/statement` | account | `credits` |
-| `POST /api/services/chat`, `/api/services/tts` | account (no guests) | `credits` |
+| `POST /api/marketplaces/chat`, `/api/marketplaces/tts` | account (no guests) | `credits` |
 | `GET /api/connections`, `/api/connections/agora/projects`, `DELETE /api/connections/agora` | account | `agora:projects` |
 | `POST /api/connections/agora/certificate` | account | `agora:certificates` |
 | `POST /api/platform/credits/reserve`, `/settle` | not accepted | `credits`, from a client in `PORTAL_BILLING_FILE` |
@@ -269,8 +269,8 @@ Caveats:
   including holds for a service later removed from the file (they can no longer
   be settled, because settling needs a listed service).
 
-Portal chat and TTS prices are separate: `SERVICE_CHAT_CREDITS` and
-`SERVICE_TTS_CREDITS` (zero means no charge). Paid requests need a signed-in
+Portal chat and TTS prices are separate: `MARKETPLACE_CHAT_CREDITS` and
+`MARKETPLACE_TTS_CREDITS` (zero means no charge). Paid requests need a signed-in
 account (or a `credits` token) and an `Idempotency-Key` header; failed model
 requests release their hold. No browser or native endpoint can grant credits.
 The ledger uses whole credits and balanced entries across user, escrow and
@@ -406,7 +406,7 @@ the scopes they need. Map existing Vox identities by exact verified provider
 subjects, never email; existing Vox balances and history need an explicit,
 backed-up migration with idempotent opening balances before spending moves to
 this ledger. Astation keeps its Agora BFF session separate from its Agora Build
-token, so Portal services and credits coexist with Agora Console access.
+token, so Portal marketplaces and credits coexist with Agora Console access.
 
 ## Verification
 
