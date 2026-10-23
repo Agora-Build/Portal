@@ -83,7 +83,7 @@ export function openJoin(callback, browserOnly = false) {
   afterJoin = typeof callback === "function" ? callback : null;
   if (!state.profile && !state.account && !browserOnly) {
     // Not here yet: the account page offers Sign in and Continue with this browser.
-    const here = document.querySelector("#account-signin:not([hidden]) a[data-signin]");
+    const here = document.querySelector("#account-login:not([hidden])");
     if (here) here.focus(); else location.assign(seatHref());
     return;
   }

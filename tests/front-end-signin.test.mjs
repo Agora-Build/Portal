@@ -53,20 +53,21 @@ test("the account page never waits on an event: a failed auth config still settl
   assert.match(script, /signInUnavailable\(\)/);
   assert.match(script, /a\[data-signin\]\[aria-disabled=true\]/);
 });
-test("the signed-out account page shows the sign-in section inline, with the guest choice", async () => {
+test("signed out, the account page's one identity card is the sign-in, with the guest choice", async () => {
   const html = await read("account.html");
-  const section = html.match(/<section id="account-signin"[\s\S]*?<\/section>/)?.[0] || "";
-  assert.match(section, /class="account-card signin-card"/);
-  assert.match(section, /YOUR PLACE, ON EVERY DEVICE/);
-  assert.match(section, /<h2 id="signin-title">A seat at the workbench\.<\/h2>/);
-  assert.match(section, /One Agora\.Build account for your profile, services, subscription, and credits\./);
-  assert.match(section, /<a class="button" id="account-login" href="\/auth\/login" data-signin>Sign in<\/a>/);
-  assert.match(section, /<button class="inline-link signin-guest" id="account-guest" type="button">Continue with this browser<\/button>/);
-  assert.match(section, /Browser-only profiles stay linked to this browser\./);
+  assert.doesNotMatch(html, /account-signin|signin-card|YOUR PLACE, ON EVERY DEVICE|A seat at the workbench|Sign in, or start with this browser/);
+  const card = html.match(/<section class="account-card identity-card"[\s\S]*?<\/section>/)?.[0] || "";
+  const order = ["01 / IDENTITY", "<h2 id=\"identity-title\">Your builder account.</h2>", "id=\"account-identity\"", "id=\"account-login\"", "id=\"account-guest\"", "id=\"signin-note\""].map((part) => card.indexOf(part));
+  assert.ok(order.every((index) => index >= 0) && order.every((index, at) => !at || index > order[at - 1]), "kicker, heading, text, Sign in, Continue with this browser, note, in order: " + order);
+  assert.match(card, /<a class="button" id="account-login" href="\/auth\/login" data-signin hidden>Sign in<\/a>/);
+  assert.match(card, /<button class="inline-link signin-guest" id="account-guest" type="button" hidden>Continue with this browser<\/button>/);
+  assert.match(card, /Browser-only profiles stay linked to this browser\. Sign in later to keep access\. Your email and sign-in identity are never published\./);
+  assert.ok(html.indexOf("identity-card") < html.indexOf("credits-card") && html.indexOf('<div class="account-workbench">') < html.indexOf("identity-card"), "the card sits in the 01 slot beside the wallet");
   assert.equal((html.match(/id="account-login"/g) || []).length, 1, "one Sign in on the account page");
   assert.doesNotMatch(html, /<dialog id="login-dialog"/);
   const account = await read("account.js");
-  assert.match(account, /#account-signin"\)\.hidden = Boolean\(account\)/);
+  assert.match(account, /One Agora\.Build account for your profile, services, subscription, and credits, on every device\. It stays separate from your public community profile\./);
+  assert.match(account, /#account-login"\)\.hidden = Boolean\(account\)/);
   assert.match(account, /#account-guest"\)\.hidden = Boolean\(account \|\| profile\)/);
   assert.match(account, /openJoin\(back \? \(\) => location\.assign\(back\) : null, true\)/);
   assert.match(account, /samePath\(new URLSearchParams\(location\.search\)\.get\("returnTo"\)\)/);

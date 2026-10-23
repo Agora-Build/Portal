@@ -11,7 +11,7 @@
 //     TEST_DATABASE_URL=postgres://… node scripts/browser-smoke.mjs
 //
 // At a desktop (1280×800) and a mobile (390×844) viewport it checks: "Take a seat" on the home page leads to the
-// account page's inline sign-in section (no dialog), whose one keyboard-reachable "Sign in" link goes straight to the
+// account page's identity card, which is the sign-in (no dialog), whose one keyboard-reachable "Sign in" link goes straight to the
 // IdP page and back; the account page (name, Manage sign-in, credits); "Continue with this browser" making a guest
 // profile and returning to the page that sent the visitor; a guest's sign-in prompts; the account page when
 // /api/auth/config fails; and signing out of the Portal and the IdP. With SCREENSHOT_DIR set, it saves the signed-out
@@ -95,18 +95,25 @@ const visibleSignIns = async (page) => {
 };
 // Signed out: Tab to "Take a seat" on the home page, Enter goes to the account page with no dialog; Tab to its one
 // "Sign in" link, which points at /auth/login with returnTo, and Enter.
-async function keyboardSignIn(page, tag) {
+async function keyboardSignIn(page, tag, viewport) {
   await page.goto(stack.site + "/");
   const seat = page.locator(".header-actions [data-join]");
   check(await tabTo(page, seat), tag + "Tab reaches \"Take a seat\" on the home page");
   await page.keyboard.press("Enter");
   await page.waitForURL((url) => url.pathname === "/account/", { timeout: 5000 });
   check(new URL(page.url()).searchParams.get("returnTo") === "/", tag + "\"Take a seat\" goes to /account/?returnTo=/");
-  const section = page.locator("#account-signin");
-  await section.waitFor({ state: "visible", timeout: 5000 });
+  const section = page.locator(".identity-card");
+  await section.locator("#account-login").waitFor({ state: "visible", timeout: 5000 });
   check(await page.locator("dialog[open]").count() === 0 && await page.locator("#login-dialog").count() === 0, tag + "no sign-in dialog exists or opens");
-  check(await section.getByText("YOUR PLACE, ON EVERY DEVICE").isVisible() && await section.getByRole("heading", { name: "A seat at the workbench." }).isVisible(), tag + "the account page shows \"Your place, on every device\" inline");
-  check(await section.getByRole("button", { name: "Continue with this browser" }).isVisible(), tag + "the section offers \"Continue with this browser\"");
+  check(await page.locator("#account-signin").count() === 0 && await section.getByText("01 / IDENTITY").isVisible() && await section.getByRole("heading", { name: "Your builder account." }).isVisible() && await section.getByText(/on every device\. It stays separate from your public community profile\./).isVisible(), tag + "one \"01 / Identity\" card holds the sign-in, with no separate card");
+  check(await section.getByRole("button", { name: "Continue with this browser" }).isVisible() && await section.getByText(/^Browser-only profiles stay linked/).isVisible() && !(await page.locator("#signin-status").isVisible()), tag + "the card offers \"Continue with this browser\" and the note, without the redundant status line");
+  if (viewport.name === "desktop") {
+    const [identity, wallet] = await Promise.all([section.boundingBox(), page.locator(".credits-card").boundingBox()]);
+    check(Math.abs(identity.y - wallet.y) < 2 && Math.abs(identity.height - wallet.height) < 2 && wallet.x > identity.x, tag + "the identity card sits beside the wallet card at the same height");
+  } else {
+    const [identity, wallet] = await Promise.all([section.boundingBox(), page.locator(".credits-card").boundingBox()]);
+    check(wallet.y >= identity.y + identity.height, tag + "the wallet card stacks below the identity card");
+  }
   const visible = await visibleSignIns(page);
   check(visible.length === 1, tag + "the account page shows one \"Sign in\" control (" + visible.length + ")");
   const signIn = section.getByRole("link", { name: "Sign in", exact: true });
@@ -124,7 +131,7 @@ async function signInFlow(viewport) {
   const page = await context.newPage();
   try {
     await step(tag + "sign in", async () => {
-      await keyboardSignIn(page, tag);
+      await keyboardSignIn(page, tag, viewport);
       await page.waitForURL((url) => url.origin === stack.issuer && url.pathname.startsWith("/interaction/"), { timeout: 10000 });
       check(true, tag + "\"Sign in\" opens the auth.agora.build sign-in page (" + new URL(page.url()).pathname.replace(/\/interaction\/[^/]+/, "/interaction/<uid>") + ")");
       // The portal client is first-party, so the IdP asks no consent: the stand-in GitHub approves and the IdP sends
@@ -193,7 +200,7 @@ async function guestFlow(viewport) {
       await page.goto(stack.site + "/explore/");
       await page.locator(".header-actions [data-join]").click();
       await page.waitForURL((url) => url.pathname === "/account/", { timeout: 5000 });
-      await page.locator("#signin-status").filter({ hasText: /./ }).waitFor({ timeout: 5000 });
+      await page.locator("#account-guest").waitFor({ state: "visible", timeout: 5000 });
       check(await page.locator("dialog[open]").count() === 0, tag + "\"Take a seat\" opens no dialog");
       await page.getByRole("button", { name: "Continue with this browser" }).click();
       const form = page.locator("#profile-form");

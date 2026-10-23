@@ -87,7 +87,7 @@ async function loadAccount() {
   const version = ++renderVersion;
   const account = state.account;
   status.textContent = account ? "Signed in as " + (account.name || "your account") : "Sign in to manage your account, membership, and credits.";
-  document.querySelector("#account-identity").replaceChildren(account ? el("div", { class: "account-person" }, [avatar({ name: account.name || "Account", avatar: account.avatar }), el("div", {}, [el("h3", { text: account.name || "Your account" }), el("p", { class: "account-user-id mono", text: account.id }), ...(account.email ? [el("p", { class: "muted", text: "Email (private): " + account.email })] : [])])]) : el("p", { text: "Your private account is separate from your public community profile. Sign in to use credits, membership, and connections." }));
+  document.querySelector("#account-identity").replaceChildren(account ? el("div", { class: "account-person" }, [avatar({ name: account.name || "Account", avatar: account.avatar }), el("div", {}, [el("h3", { text: account.name || "Your account" }), el("p", { class: "account-user-id mono", text: account.id }), ...(account.email ? [el("p", { class: "muted", text: "Email (private): " + account.email })] : [])])]) : el("p", { text: state.profile ? "Your private account is separate from your public community profile. Sign in to use credits, membership, and connections." : "One Agora.Build account for your profile, services, subscription, and credits, on every device. It stays separate from your public community profile." }));
   renderSignInSection();
   document.querySelector("#account-logout").hidden = !account;
   const manage = document.querySelector("#manage-signin");
@@ -128,12 +128,15 @@ async function loadAccount() {
   }
   for (const result of results) if (result.status === "rejected") notify(result.reason.message);
 }
-// Signed out or browser-only, the page itself is the sign-in: one link to auth.agora.build, or start with this browser.
+// Signed out or browser-only, the identity card is the sign-in: one link to auth.agora.build, or start with this browser.
 function renderSignInSection() {
   const account = state.account, profile = state.profile, available = Boolean(state.authConfig?.issuer);
-  document.querySelector("#account-signin").hidden = Boolean(account);
+  const signinStatus = document.querySelector("#signin-status");
+  document.querySelector("#account-login").hidden = Boolean(account);
   document.querySelector("#account-guest").hidden = Boolean(account || profile);
-  document.querySelector("#signin-status").textContent = !available ? "Sign-in is temporarily unavailable." + (profile ? "" : " You can start with this browser.") : profile ? "Sign in to keep this profile and its rooms across devices." : "Sign in, or start with this browser.";
+  document.querySelector("#signin-note").hidden = Boolean(account);
+  signinStatus.textContent = account ? "" : !available ? "Sign-in is temporarily unavailable." + (profile ? "" : " You can start with this browser.") : profile ? "Sign in to keep this profile and its rooms across devices." : "";
+  signinStatus.hidden = !signinStatus.textContent;
 }
 // After the browser-only profile is saved, go back to the page that sent the visitor here (same-site paths only).
 document.querySelector("#account-guest").addEventListener("click", () => {
