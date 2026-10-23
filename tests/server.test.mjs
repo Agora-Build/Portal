@@ -147,14 +147,14 @@ test("cross-origin mutations, invalid JSON, and oversized bodies are rejected", 
   assert.equal((await request("/api/people/search", { method: "POST", data: "x".repeat(17000) })).status, 413);
   assert.equal((await request("/api/profile", { method: "POST" })).status, 415);
 });
-test("unconfigured model services report their status and do not fake results", async () => {
-  const config = await (await request("/api/services")).json();
+test("unconfigured marketplaces report their status and do not fake results", async () => {
+  const config = await (await request("/api/marketplaces")).json();
   assert.equal(config.language.ready, false);
   assert.equal(config.speech.ready, false);
   assert.equal(config.radar.ready, false);
   assert.deepEqual(config.offers, []);
-  assert.equal((await request("/api/services/chat", { method: "POST", data: { message: "Help me" } })).status, 503);
-  assert.equal((await request("/api/services/tts", { method: "POST", data: { text: "Hello" } })).status, 503);
+  assert.equal((await request("/api/marketplaces/chat", { method: "POST", data: { message: "Help me" } })).status, 503);
+  assert.equal((await request("/api/marketplaces/tts", { method: "POST", data: { text: "Hello" } })).status, 503);
   assert.equal((await request("/api/radar", { method: "POST" })).status, 503);
 });
 test("old meeting links and the rooms API point people to the Stoa", async () => {
@@ -183,23 +183,23 @@ test("existing room IDs and rosters survive the call provider change without pub
   assert.ok(!("videoUrl" in room));
   assert.deepEqual(room.participants, [person.person.id]);
 });
-test("connected service API preserves provider privacy, requires a signed-in account, and enforces allowances", async () => {
+test("the marketplace API preserves provider privacy, requires a signed-in account, and enforces allowances", async () => {
   const config = modelConfig({ OPENAI_API_KEY: "test-only-provider-secret" });
   const models = { config, chat: async () => "Mocked workshop answer", speak: async () => Buffer.from("ID3-mocked-audio"), research: async () => ({ items: [{ kind: "resource", title: "Test source", url: "https://example.com/source", reason: "Relevant to voice agents" }] }), search: async (people) => people };
-  const store = createStore(resolve(root, "data/people.json"), resolve(temporary, "services.json"), { log: () => {} });
+  const store = createStore(resolve(root, "data/people.json"), resolve(temporary, "marketplaces.json"), { log: () => {} });
   const isolated = await start({ models, modelLimit: 3, store });
   try {
-    const publicConfig = await (await request("/api/services", { base: isolated.url })).text();
+    const publicConfig = await (await request("/api/marketplaces", { base: isolated.url })).text();
     assert.ok(!publicConfig.includes("test-only-provider-secret") && !publicConfig.includes("api.openai.com"));
-    assert.equal((await request("/api/services/chat", { base: isolated.url, method: "POST", data: { message: "Help" } })).status, 401);
+    assert.equal((await request("/api/marketplaces/chat", { base: isolated.url, method: "POST", data: { message: "Help" } })).status, 401);
     const visitor = await join("Guest tester", isolated.url);
-    assert.equal((await request("/api/services/chat", { base: isolated.url, cookie: visitor.cookie, method: "POST", data: { message: "Help" } })).status, 401, "guests can't use services");
-    const { token } = await store.signIn({ sub: "ab" + "T".repeat(26), sid: "sid", name: "Service tester", idToken: "id-token" });
-    const joined = await request("/api/profile", { base: isolated.url, cookie: "house_session=" + token, method: "POST", data: profile("Service tester") });
+    assert.equal((await request("/api/marketplaces/chat", { base: isolated.url, cookie: visitor.cookie, method: "POST", data: { message: "Help" } })).status, 401, "guests can't use the marketplaces");
+    const { token } = await store.signIn({ sub: "ab" + "T".repeat(26), sid: "sid", name: "Marketplace tester", idToken: "id-token" });
+    const joined = await request("/api/profile", { base: isolated.url, cookie: "house_session=" + token, method: "POST", data: profile("Marketplace tester") });
     const member = { cookie: joined.headers.get("set-cookie").split(";")[0] };
-    const chat = await request("/api/services/chat", { base: isolated.url, cookie: member.cookie, method: "POST", data: { message: "Help" } });
+    const chat = await request("/api/marketplaces/chat", { base: isolated.url, cookie: member.cookie, method: "POST", data: { message: "Help" } });
     assert.equal((await chat.json()).answer, "Mocked workshop answer");
-    const speech = await request("/api/services/tts", { base: isolated.url, cookie: member.cookie, method: "POST", data: { text: "Hello", voice: "coral" } });
+    const speech = await request("/api/marketplaces/tts", { base: isolated.url, cookie: member.cookie, method: "POST", data: { text: "Hello", voice: "coral" } });
     assert.equal(speech.headers.get("content-type"), "audio/mpeg");
     assert.equal(await speech.text(), "ID3-mocked-audio");
     assert.equal((await request("/api/radar", { base: isolated.url, cookie: member.cookie, method: "POST" })).status, 200);
@@ -207,7 +207,7 @@ test("connected service API preserves provider privacy, requires a signed-in acc
     assert.equal(privateRadar.result.items.length, 1);
     assert.equal((await (await request("/api/radar", { base: isolated.url })).json()).result, null);
     assert.equal((await request("/api/radar", { base: isolated.url, cookie: member.cookie, method: "POST" })).status, 429);
-    assert.equal((await request("/api/services/chat", { base: isolated.url, cookie: member.cookie, method: "POST", data: { message: "More" } })).status, 429);
+    assert.equal((await request("/api/marketplaces/chat", { base: isolated.url, cookie: member.cookie, method: "POST", data: { message: "More" } })).status, 429);
   } finally { await close(isolated.instance); }
 });
 test("profile intent updates discard earlier radar results and stale in-flight scans", async () => {
@@ -247,6 +247,8 @@ test("the marketplaces page replaced the services page; its old addresses are 40
   assert.match(html, /<a href="\/marketplaces\/" class="is-active" aria-current="page">Marketplaces<\/a>/);
   assert.match(html, /src="\/marketplaces\.js"/);
   for (const old of ["/services/", "/services", "/services.html", "/services.js"]) assert.equal((await fetch(origin + old, { redirect: "manual" })).status, 404, old);
+  assert.equal((await request("/api/services")).status, 404, "the old API route is gone");
+  assert.equal((await request("/api/services/chat", { method: "POST", data: { message: "Help me" } })).status, 404, "the old chat route is gone");
 });
 test("production output includes six pages, platform backend, seed data, and no private state", async () => {
   await import("../scripts/build.mjs");

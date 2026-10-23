@@ -272,9 +272,9 @@ test("back-channel logout ends a session by sid, or every session of a sub; it i
 test("the same-origin checks on cookie POSTs are unchanged", async (t) => {
   const app = await start(t);
   const { cookie } = await browserSignIn(app);
-  assert.equal((await call(app.base, "/api/services/chat", { cookie, method: "POST", data: { message: "Hi there" }, headers: { Origin: "https://evil.example" } })).status, 403);
-  assert.equal((await call(app.base, "/api/services/chat", { cookie, method: "POST", data: { message: "Hi there" }, headers: { "Sec-Fetch-Site": "cross-site" } })).status, 403);
-  assert.equal((await call(app.base, "/api/services/chat", { cookie, method: "POST", data: { message: "Hi there" }, headers: { Origin: app.base } })).status, 200);
+  assert.equal((await call(app.base, "/api/marketplaces/chat", { cookie, method: "POST", data: { message: "Hi there" }, headers: { Origin: "https://evil.example" } })).status, 403);
+  assert.equal((await call(app.base, "/api/marketplaces/chat", { cookie, method: "POST", data: { message: "Hi there" }, headers: { "Sec-Fetch-Site": "cross-site" } })).status, 403);
+  assert.equal((await call(app.base, "/api/marketplaces/chat", { cookie, method: "POST", data: { message: "Hi there" }, headers: { Origin: app.base } })).status, 200);
 });
 
 test("the matrix for a browser account session", async (t) => {
@@ -284,8 +284,8 @@ test("the matrix for a browser account session", async (t) => {
   await ok("/api/me");
   await ok("/api/credits/balance");
   await ok("/api/credits/statement");
-  assert.equal((await ok("/api/services/chat", { method: "POST", data: { message: "Hi there" } })).status, 200);
-  assert.equal((await ok("/api/services/tts", { method: "POST", data: { text: "Hello" } })).status, 200);
+  assert.equal((await ok("/api/marketplaces/chat", { method: "POST", data: { message: "Hi there" } })).status, 200);
+  assert.equal((await ok("/api/marketplaces/tts", { method: "POST", data: { text: "Hello" } })).status, 200);
   assert.equal((await ok("/api/billing/account")).status, 200);
   await ok("/api/billing/manage", { method: "POST", data: {} });
   assert.equal((await ok("/api/connections")).status, 200);
@@ -300,15 +300,15 @@ test("the matrix for a browser account session", async (t) => {
   assert.equal((await ok("/api/radar")).status, 200);
 });
 
-test("the matrix for a guest: Stoa and the radar, but no credits, services, billing, connections or owned spaces", async (t) => {
+test("the matrix for a guest: Stoa and the radar, but no credits, marketplaces, billing, connections or owned spaces", async (t) => {
   const app = await start(t);
   const cookie = await guest(app);
   const refused = async (path, options = {}) => assert.equal((await call(app.base, path, { cookie, ...options })).status, 401, path);
   assert.equal((await call(app.base, "/api/me", { cookie })).status, 200);
   await refused("/api/credits/balance");
   await refused("/api/credits/statement");
-  await refused("/api/services/chat", { method: "POST", data: { message: "Hi there" } });
-  await refused("/api/services/tts", { method: "POST", data: { text: "Hello" } });
+  await refused("/api/marketplaces/chat", { method: "POST", data: { message: "Hi there" } });
+  await refused("/api/marketplaces/tts", { method: "POST", data: { text: "Hello" } });
   await refused("/api/billing/account");
   await refused("/api/billing/checkout", { method: "POST", data: { productId: "builder-pack" } });
   await refused("/api/billing/manage", { method: "POST", data: {} });
@@ -341,10 +341,10 @@ test("the matrix for bearer tokens: scopes per route, and routes that take only 
   assert.equal((await call(app.base, "/api/credits/statement", { bearer: credits })).status, 200);
   await assertScope(await call(app.base, "/api/credits/balance", { bearer: openid }), "credits");
   await assertScope(await call(app.base, "/api/credits/statement", { bearer: openid }), "credits");
-  assert.equal((await call(app.base, "/api/services/chat", { bearer: credits, method: "POST", data: { message: "Hi there" } })).status, 200);
-  assert.equal((await call(app.base, "/api/services/tts", { bearer: credits, method: "POST", data: { text: "Hello" } })).status, 200);
-  await assertScope(await call(app.base, "/api/services/chat", { bearer: openid, method: "POST", data: { message: "Hi there" } }), "credits");
-  await assertScope(await call(app.base, "/api/services/tts", { bearer: openid, method: "POST", data: { text: "Hello" } }), "credits");
+  assert.equal((await call(app.base, "/api/marketplaces/chat", { bearer: credits, method: "POST", data: { message: "Hi there" } })).status, 200);
+  assert.equal((await call(app.base, "/api/marketplaces/tts", { bearer: credits, method: "POST", data: { text: "Hello" } })).status, 200);
+  await assertScope(await call(app.base, "/api/marketplaces/chat", { bearer: openid, method: "POST", data: { message: "Hi there" } }), "credits");
+  await assertScope(await call(app.base, "/api/marketplaces/tts", { bearer: openid, method: "POST", data: { text: "Hello" } }), "credits");
 
   const projects = await token("agora:projects"), certificates = await token("agora:certificates");
   assert.equal((await call(app.base, "/api/connections", { bearer: projects })).status, 200);
@@ -448,7 +448,7 @@ test("a bearer token reads its own account even with another account's cookie", 
 test("bearer requests skip the same-origin check; unknown /api paths are 404 for them", async (t) => {
   const app = await start(t);
   const token = await bearerToken(app, { scope: "credits" });
-  assert.equal((await call(app.base, "/api/services/chat", { bearer: token, method: "POST", data: { message: "Hi there" }, headers: { Origin: "https://app.example", "Sec-Fetch-Site": "cross-site" } })).status, 200);
+  assert.equal((await call(app.base, "/api/marketplaces/chat", { bearer: token, method: "POST", data: { message: "Hi there" }, headers: { Origin: "https://app.example", "Sec-Fetch-Site": "cross-site" } })).status, 200);
   const missing = await call(app.base, "/api/nothing-here", { bearer: token });
   assert.equal(missing.status, 404);
   assert.equal((await call(app.base, "/api/credits/balance", { bearer: token, method: "DELETE" })).status, 404);

@@ -61,9 +61,9 @@ const invalidToken = (message = "A valid auth.agora.build access token is requir
 const insufficientScope = (scope) => Object.assign(new AppError(403, "This access token needs the " + scope + " scope."), { headers: { "WWW-Authenticate": 'Bearer error="insufficient_scope", scope="' + scope + '"' } });
 const browserOnly = () => new AppError(403, "This feature needs a browser session on the Agora.Build website; access tokens are not accepted here.");
 // Reads that need no caller; a valid access token is allowed on them but changes nothing.
-const publicRoutes = new Set(["GET /api/people", "GET /api/activity", "GET /api/projects", "GET /api/services", "GET /api/billing/catalog", "GET /api/auth/config", "POST /api/people/search", "GET /api/themes"]);
+const publicRoutes = new Set(["GET /api/people", "GET /api/activity", "GET /api/projects", "GET /api/marketplaces", "GET /api/billing/catalog", "GET /api/auth/config", "POST /api/people/search", "GET /api/themes"]);
 // Routes that accept an auth.agora.build access token (each checks its own scope).
-const bearerRoutes = new Set(["GET /api/me", "GET /api/credits/balance", "GET /api/credits/statement", "POST /api/services/chat", "POST /api/services/tts", "GET /api/connections", "GET /api/connections/agora/projects", "POST /api/connections/agora/certificate", "DELETE /api/connections/agora", "POST /api/platform/credits/reserve", "POST /api/platform/credits/settle"]);
+const bearerRoutes = new Set(["GET /api/me", "GET /api/credits/balance", "GET /api/credits/statement", "POST /api/marketplaces/chat", "POST /api/marketplaces/tts", "GET /api/connections", "GET /api/connections/agora/projects", "POST /api/connections/agora/certificate", "DELETE /api/connections/agora", "POST /api/platform/credits/reserve", "POST /api/platform/credits/settle"]);
 // Routes that exist for the browser session only; a bearer token there gets 403, and on any other path 404.
 const browserRoutes = new Set(["GET /api/billing/account", "POST /api/billing/checkout", "POST /api/billing/manage", "POST /api/profile", "PUT /api/profile", "DELETE /api/profile", "GET /api/radar", "POST /api/radar", "POST /api/auth/logout", "POST /api/signaling/token"]);
 // Over https the session cookie was renamed from house_session to __Host-house_session. Until this date a guest's
@@ -373,18 +373,18 @@ export function createAppServer(directory = root, options = {}) {
           else matches = basicSearch(people, query, skill);
           json(response, 200, { people: matches, mode: query && models.config.language.ready ? "llm" : "basic" });
         } else if (path === "/api/projects" && request.method === "GET") json(response, 200, { projects: JSON.parse(await readFile(resolve(dataDirectory, "projects.json"), "utf8")) });
-        else if (path === "/api/services" && request.method === "GET") {
+        else if (path === "/api/marketplaces" && request.method === "GET") {
           const offers = JSON.parse(await readFile(resolve(dataDirectory, "offers.json"), "utf8"));
           json(response, 200, { language: { ready: models.config.language.ready, model: models.config.language.model }, speech: { ready: models.config.speech.ready, model: models.config.speech.model }, radar: { ready: models.config.radar.ready }, credits: { ready: credits.config.ready, costs: credits.config.costs }, offers: offers.filter((offer) => !offer.expiresAt || Date.parse(offer.expiresAt) > Date.now()) });
-        } else if (["/api/services/chat", "/api/services/tts"].includes(path) && request.method === "POST") {
+        } else if (["/api/marketplaces/chat", "/api/marketplaces/tts"].includes(path) && request.method === "POST") {
           const speech = path.endsWith("tts");
-          if (!(speech ? models.config.speech.ready : models.config.language.ready)) throw new AppError(503, "This service is not available yet. A provider connection is needed.");
-          const userId = await accountUser("credits", "Sign in to use builder services.");
+          if (!(speech ? models.config.speech.ready : models.config.language.ready)) throw new AppError(503, "This marketplace is not available yet. A provider connection is needed.");
+          const userId = await accountUser("credits", "Sign in to use the marketplaces.");
           const data = await body(request);
           const input = text(data, speech ? "text" : "message", speech ? 1200 : 3000);
           allowance(request);
-          const service = speech ? "tts" : "chat";
-          const run = (action) => credits.run(userId, service, request.headers["idempotency-key"], action);
+          const marketplace = speech ? "tts" : "chat";
+          const run = (action) => credits.run(userId, marketplace, request.headers["idempotency-key"], action);
           if (speech) {
             const audio = await run(() => models.speak(input, typeof data.voice === "string" ? data.voice : "coral"));
             response.writeHead(200, { "Content-Type": "audio/mpeg", "Content-Length": audio.length, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });

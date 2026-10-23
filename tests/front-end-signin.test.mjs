@@ -40,7 +40,7 @@ test("the account page links to Manage sign-in from /api/auth/config and reports
   assert.match(script, /searchParams\.get\("connected"\)/);
   assert.match(await read("script.js"), /\/api\/auth\/config/);
 });
-test("guests are told to sign in for credits, services, and creating spaces", async () => {
+test("guests are told to sign in for credits, the marketplaces, and creating spaces", async () => {
   assert.match(await read("marketplaces.js"), /Sign in to use credits\./);
   assert.match(await read("stoa.js"), /state\.account \? spacesUi\.openCreate/);
 });

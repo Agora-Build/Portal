@@ -219,7 +219,7 @@ async function guestFlow(viewport) {
     }, page);
     await step(tag + "marketplaces", async () => {
       await page.goto(stack.site + "/marketplaces/");
-      const notes = page.locator(".service-note");
+      const notes = page.locator(".marketplace-note");
       await notes.first().filter({ hasText: "Sign in to use credits." }).waitFor({ timeout: 5000 });
       check((await notes.allTextContents()).every((text) => text === "Sign in to use credits."), tag + "the marketplaces page says \"Sign in to use credits.\"");
     }, page);
