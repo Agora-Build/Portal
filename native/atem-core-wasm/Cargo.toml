@@ -1,0 +1,26 @@
+# The Portal's WebAssembly build of Atem's token library. It links atem-core-ffi at the revision Astation pins
+# (Astation Config/atem-core.json), so agora.build and Astation sign tokens with the same code through C ABI 1.
+# Rebuild with `npm run build:atem-core`; the output is scripts/vendor/atem-core.wasm.
+[package]
+name = "portal-atem-core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+atem-core-ffi = { git = "https://github.com/Agora-Build/Atem.git", rev = "929909e9506d95e555779b9c58163f762e962cd1" }
+getrandom = { version = "0.2", features = ["custom"] }
+# As Astation does (scripts/setup-atem-core.py): real zlib instead of flate2's default miniz_oxide, so tokens are
+# byte-identical to Astation's and to Agora's own builders. zlib's C source is compiled into the module (static).
+flate2 = { version = "1.0", default-features = false, features = ["zlib"] }
+libz-sys = { version = "1", default-features = false, features = ["static"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

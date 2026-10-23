@@ -6,3 +6,4 @@ test-results/
 .env
 .env.*
 !.env.example
+native/atem-core-wasm/target/

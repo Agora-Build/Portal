@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import agoraToken from "agora-token";
+import { buildRtcToken } from "./atem-core.mjs";
 import { AppError } from "./store.mjs";
 
 export function agoraConfig(env = process.env) {
@@ -16,7 +16,8 @@ export function createAgoraCalls(config = agoraConfig(), { now = Date.now } = {}
     const uid = input.uid === undefined ? prefix + randomBytes(6).toString("hex") : input.uid;
     if (typeof uid !== "string" || !uid.startsWith(prefix) || !/^[a-f0-9]{12}$/.test(uid.slice(prefix.length))) throw new AppError(422, "This call identity does not belong to your profile.");
     const screenUid = uid + "_screen";
-    const sign = (account) => agoraToken.RtcTokenBuilder.buildTokenWithUserAccount(config.appId, config.certificate, channel, account, agoraToken.RtcRole.PUBLISHER, config.ttl, config.ttl);
+    // Signed with atem-core, the library Astation uses.
+    const sign = (account) => buildRtcToken({ appId: config.appId, certificate: config.certificate, channel, account, role: "publisher", tokenExpire: config.ttl, privilegeExpire: config.ttl, issuedAt: Math.floor(now() / 1000) });
     return { provider: "agora", appId: config.appId, channel, uid, screenUid, token: sign(uid), screenToken: sign(screenUid), expiresAt: new Date(now() + config.ttl * 1000).toISOString() };
   }
   return {

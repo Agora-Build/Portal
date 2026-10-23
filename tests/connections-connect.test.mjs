@@ -15,6 +15,7 @@ import { createIdp } from "../scripts/idp.mjs";
 import { createFakeIdp } from "./helpers/fake-idp.mjs";
 import { createFakeAgora, listShapes } from "./helpers/fake-agora.mjs";
 import { describeShape, probeShapes } from "../scripts/agora-shapes.mjs";
+import { decodeToken, verifyTokenSignature } from "../scripts/atem-core.mjs";
 
 const root = new URL("../", import.meta.url).pathname;
 const issuer = "https://auth.example";
@@ -451,4 +452,58 @@ test("the shape probe prints key names and types only, never values", async () =
   const text = output.join("\n");
   for (const path of ["/api/v0/customer/user-auth", "/api/v0/customer/company/basic-info", "/api/v0/account/companies", "BFF /api/cli/v1/projects"]) assert.ok(output.some((line) => line.startsWith("GET " + path + ": ")), path);
   for (const value of ["vendor-1", "agora-app-id", "private-test-certificate", "Private project", "Agora Builder", "agora-user-1", "probe-token", "agora-access-", "2023-11-14", "1001", "42"]) assert.ok(!text.includes(value), "the probe never prints " + value);
+});
+
+test("an account signs RTC and RTM tokens for its project on agora.build; the certificate never leaves", async (t) => {
+  const app = await start(t);
+  const session = await signIn(app);
+  assert.equal((await connect(app, session)).location, "/account/?connected=agora");
+  const appId = "0123456789abcdef0123456789abcdef", certificate = "abcdef0123456789abcdef0123456789";
+  app.agora.state.items.push({ projectId: "tokens-1", name: "Tokens", appId, signKey: certificate, status: "1", createdAt: "2024-01-02T03:04:05Z" }, { projectId: "no-cert", name: "Testing mode", appId, signKey: "", status: "1" });
+  const origin = { Origin: new URL(app.base).origin };
+  const sign = (data, options = { cookie: session.cookie, headers: origin }) => call(app.base, "/api/connections/agora/token", { method: "POST", data, ...options });
+
+  const rtc = await sign({ projectId: "tokens-1", type: "rtc", channel: "demo", account: "builder_42", rtm: { expire: 600 } });
+  assert.equal(rtc.status, 200);
+  const reply = await rtc.json();
+  assert.deepEqual(Object.keys(reply).sort(), ["account", "appId", "channel", "expiresAt", "issuedAt", "privileges", "projectId", "role", "rtm", "token", "type"]);
+  assert.deepEqual([reply.projectId, reply.appId, reply.type, reply.channel, reply.account, reply.role, reply.rtm.userId], ["tokens-1", appId, "rtc", "demo", "builder_42", "publisher", "builder_42"]);
+  assert.equal(Date.parse(reply.expiresAt) - Date.parse(reply.issuedAt), 3600000);
+  assert.equal(verifyTokenSignature(reply.token, certificate), true, "signed with the project's certificate");
+  const decoded = decodeToken(reply.token);
+  assert.deepEqual(decoded.services.map((service) => service.details), [{ kind: "rtc", channel: "demo", account: "builder_42" }, { kind: "rtm", user_id: "builder_42" }]);
+  assert.ok(!JSON.stringify(reply).includes(certificate), "the reply has no certificate");
+
+  const subscriber = await (await sign({ projectId: "tokens-1", type: "rtc", channel: "demo", uid: 0, role: "subscriber", tokenExpire: 600, privilegeExpire: 300 })).json();
+  assert.deepEqual([subscriber.uid, Object.keys(subscriber.privileges)], [0, ["join"]]);
+  assert.deepEqual(decodeToken(subscriber.token).services[0].privileges, { 1: 300 });
+  const explicit = await (await sign({ projectId: "tokens-1", type: "rtc", channel: "demo", uid: 7, role: "explicit", privileges: { join: 600, audio: 300, video: 200, data: 100 } })).json();
+  assert.deepEqual(decodeToken(explicit.token).services[0].privileges, { 1: 600, 2: 300, 3: 200, 4: 100 });
+  const rtm = await (await sign({ projectId: "tokens-1", type: "rtm", userId: "alice", expire: 120 })).json();
+  assert.deepEqual([rtm.type, rtm.userId, decodeToken(rtm.token).services[0].details], ["rtm", "alice", { kind: "rtm", user_id: "alice" }]);
+
+  // Apps: a bearer token with agora:tokens; agora:certificates alone is not enough.
+  const bearer = await sign({ projectId: "tokens-1", type: "rtm", userId: "app-user" }, { bearer: await app.fake.issueAccessToken({ sub: session.sub, scope: "agora:tokens" }) });
+  assert.equal(bearer.status, 200);
+  const wrongScope = await sign({ projectId: "tokens-1", type: "rtm", userId: "app-user" }, { bearer: await app.fake.issueAccessToken({ sub: session.sub, scope: "agora:projects agora:certificates" }) });
+  assert.equal(wrongScope.status, 403);
+  assert.match(wrongScope.headers.get("www-authenticate"), /scope="agora:tokens"/);
+  assert.equal((await sign({ projectId: "tokens-1", type: "rtm", userId: "x" }, { cookie: session.cookie, headers: { Origin: "https://elsewhere.example" } })).status, 403, "a cookie POST from another site is refused");
+
+  const refused = [
+    [{ projectId: "no-cert", type: "rtc", channel: "demo" }, 409],
+    [{ projectId: "missing", type: "rtc", channel: "demo" }, 404],
+    [{ projectId: "tokens-1", type: "rtc", channel: "c".repeat(65) }, 422],
+    [{ projectId: "tokens-1", type: "rtc", channel: "demo", uid: 1, account: "a" }, 422],
+    [{ projectId: "tokens-1", type: "rtc", channel: "demo", uid: -1 }, 422],
+    [{ projectId: "tokens-1", type: "rtc", channel: "demo", role: "owner" }, 422],
+    [{ projectId: "tokens-1", type: "rtc", channel: "demo", tokenExpire: 86401 }, 422],
+    [{ projectId: "tokens-1", type: "rtc", channel: "demo", uid: 5, rtm: true }, 422],
+    [{ projectId: "tokens-1", type: "rtm" }, 422],
+    [{ projectId: "tokens-1", type: "video" }, 422],
+    [{ type: "rtm", userId: "u" }, 422]
+  ];
+  for (const [data, status] of refused) assert.equal((await sign(data)).status, status, JSON.stringify(data));
+  const logged = app.logs.join("\n");
+  assert.ok(!logged.includes(certificate) && !logged.includes(reply.token), "no certificate or token in the log");
 });
