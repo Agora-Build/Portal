@@ -155,7 +155,7 @@ async function signInFlow(viewport) {
       const manage = page.getByRole("link", { name: /Manage sign-in/ });
       check(await manage.isVisible() && (await manage.getAttribute("href")) === stack.issuer + "/account", tag + "\"Manage sign-in\" links to " + stack.issuer + "/account");
       await page.locator("#credit-balance").filter({ hasNotText: "--" }).waitFor({ timeout: 5000 });
-      check(await page.getByRole("heading", { name: "Credits for the work." }).isVisible() && /^\d[\d,]*$/.test((await page.locator("#credit-balance").textContent()) || ""), tag + "the credits section shows a balance");
+      check(await page.getByRole("heading", { name: "Credits for your next creation." }).isVisible() && /^\d[\d,]*$/.test((await page.locator("#credit-balance").textContent()) || ""), tag + "the credits section shows a balance");
       check(await tabTo(page, page.locator("#account-logout")), tag + "Tab reaches \"Sign out\" on the account page");
     }, page);
 
