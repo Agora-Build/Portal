@@ -9,3 +9,4 @@ node_modules
 test-results
 Dockerfile
 .dockerignore
+native/atem-core-wasm/target

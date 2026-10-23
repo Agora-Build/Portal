@@ -60,7 +60,7 @@ the API resource and its scopes. The secret is named, never written there:
 ```json
 {
   "resources": [
-    { "indicator": "https://api.agora.build", "name": "Agora Build API", "scopes": ["credits", "agora:projects", "agora:certificates"] }
+    { "indicator": "https://api.agora.build", "name": "Agora Build API", "scopes": ["credits", "agora:projects", "agora:certificates", "agora:tokens"] }
   ],
   "clients": [
     {
@@ -81,9 +81,9 @@ the API resource and its scopes. The secret is named, never written there:
 ```
 
 The production IdP's `https://api.agora.build` resource must include
-`agora:certificates` as well as `credits` and `agora:projects`; without it no
-token can carry that scope, and `POST /api/connections/agora/certificate`
-answers 403 to every app. Put the same `PORTAL_CLIENT_SECRET` value in the IdP's
+`agora:certificates` and `agora:tokens` as well as `credits` and
+`agora:projects`; without them no token can carry those scopes, and
+`POST /api/connections/agora/certificate` and `/token` answer 403 to every app. Put the same `PORTAL_CLIENT_SECRET` value in the IdP's
 environment and the Portal's. Locally the URIs are `http://localhost:3080/...` against
 `http://auth.localhost:3090`; the IdP accepts plain http only on local host
 names (`localhost`, `*.localhost`, `127.0.0.1`) and only with an http issuer.
@@ -209,6 +209,7 @@ bearer token never falls back to the cookie. The token must be a JWT with `typ`
 | `POST /api/marketplaces/chat`, `/api/marketplaces/tts` | account (no guests) | `credits` |
 | `GET /api/connections`, `/api/connections/agora/projects`, `DELETE /api/connections/agora` | account | `agora:projects` |
 | `POST /api/connections/agora/certificate` | account | `agora:certificates` |
+| `POST /api/connections/agora/token` | account | `agora:tokens` |
 | `POST /api/platform/credits/reserve`, `/settle` | not accepted | `credits`, from a client in `PORTAL_BILLING_FILE` |
 | Billing account, checkout and manage | account | not accepted |
 | Stoa spaces (create, own, admin), profile, radar, signaling | account (spaces) or guest | not accepted |
@@ -434,7 +435,46 @@ certificate. Lists omit certificates; credentials never appear in public
 profiles or logs. The browser clears revealed certificates after 30 seconds or
 when its tab is hidden. Disconnecting removes the authorization at Agora when it
 can and always removes the stored connection; it does not sign anyone out. Apps
-reach the same routes with `agora:projects` and `agora:certificates` tokens.
+reach the same routes with `agora:projects`, `agora:certificates` and
+`agora:tokens` tokens.
+
+### Agora Tokens
+
+`POST /api/connections/agora/token` signs an Agora RTC or RTM token for one of
+the account's projects on agora.build, so an app never needs the App
+Certificate. The certificate comes from the BFF project list for this request
+and is neither cached nor returned. Rate limit: 60 a minute per account.
+
+| Field | Meaning |
+| --- | --- |
+| `projectId` | A `projectId` from `GET /api/connections/agora/projects` |
+| `type` | `rtc` or `rtm` |
+| `channel` | RTC: 1 to 64 bytes |
+| `uid` or `account` | RTC: a number 0 to 4294967295 (0 means any user, the default) or a 1 to 255 byte string account, not both |
+| `role` | RTC: `publisher` (default: join and publish audio, video and data), `subscriber` (join only) or `explicit` |
+| `tokenExpire`, `privilegeExpire` | RTC: seconds after issue, 1 to 86400, default 3600 |
+| `privileges` | RTC `explicit`: `{ join, audio, video, data }` expiries, each 1 to 86400, default 3600 |
+| `rtm` | RTC: `{ userId?, expire? }` adds an RTM login; `userId` defaults to `account` and is required with a numeric `uid` |
+| `userId`, `expire` | RTM: a 1 to 64 byte user ID and its expiry, default 3600 |
+
+The reply is `{ projectId, appId, type, token, issuedAt, expiresAt }`, plus for
+RTC `channel`, `uid` or `account`, `role`, `privileges` (expiry times) and
+`rtm`, and for RTM `userId`. Errors: 404 for a project not in the account, 409
+for a project without an App Certificate, 422 for invalid fields (with the same
+wording Astation shows), and the connection errors above.
+
+Tokens are signed with Atem's `atem-core`, the library Astation uses, so
+agora.build and Astation produce identical tokens. `native/atem-core-wasm` links
+`atem-core-ffi` at the Atem revision Astation pins (`Config/atem-core.json`)
+with real zlib, as Astation builds it, and compiles to WebAssembly;
+`scripts/atem-core.mjs` calls its C ABI 1 exactly as Astation's Swift does. The
+committed module is `scripts/vendor/atem-core.wasm`, with its checksum, Atem
+revision and compilers in `scripts/vendor/atem-core.json`; the server and
+Docker image need no Rust. Rebuild it with `npm run build:atem-core` (Rust with
+the `wasm32-unknown-unknown` target, and clang with `llvm-ar` for zlib). The
+tests rebuild Astation's eight captured tokens byte for byte. Stoa's call and
+signaling tokens use the same module; only the opt-in RTM channel permissions
+(`AGORA_RTM_PERMISSIONS`) still use `agora-token`, which atem-core doesn't cover.
 
 ## Vox, Atem And Astation
 
@@ -446,8 +486,9 @@ in `PORTAL_BILLING_FILE`. Native apps such as Atem use the device-code flow with
 the scopes they need. Map existing Vox identities by exact verified provider
 subjects, never email; existing Vox balances and history need an explicit,
 backed-up migration with idempotent opening balances before spending moves to
-this ledger. Astation keeps its Agora BFF session separate from its Agora Build
-token, so Portal marketplaces and credits coexist with Agora Console access.
+this ledger. Astation signs in with the IdP (the `astation` native client, with
+`agora:projects`, `agora:certificates` and `agora:tokens`) and reads projects
+and tokens from the routes above instead of its own Agora SSO session.
 
 ## Verification
 

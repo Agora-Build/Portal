@@ -63,7 +63,7 @@ const browserOnly = () => new AppError(403, "This feature needs a browser sessio
 // Reads that need no caller; a valid access token is allowed on them but changes nothing.
 const publicRoutes = new Set(["GET /api/people", "GET /api/activity", "GET /api/projects", "GET /api/marketplaces", "GET /api/billing/catalog", "GET /api/auth/config", "POST /api/people/search", "GET /api/themes"]);
 // Routes that accept an auth.agora.build access token (each checks its own scope).
-const bearerRoutes = new Set(["GET /api/me", "GET /api/credits/balance", "GET /api/credits/statement", "POST /api/marketplaces/chat", "POST /api/marketplaces/tts", "GET /api/connections", "GET /api/connections/agora/projects", "POST /api/connections/agora/certificate", "DELETE /api/connections/agora", "POST /api/platform/credits/reserve", "POST /api/platform/credits/settle"]);
+const bearerRoutes = new Set(["GET /api/me", "GET /api/credits/balance", "GET /api/credits/statement", "POST /api/marketplaces/chat", "POST /api/marketplaces/tts", "GET /api/connections", "GET /api/connections/agora/projects", "POST /api/connections/agora/certificate", "POST /api/connections/agora/token", "DELETE /api/connections/agora", "POST /api/platform/credits/reserve", "POST /api/platform/credits/settle"]);
 // Routes that exist for the browser session only; a bearer token there gets 403, and on any other path 404.
 const browserRoutes = new Set(["GET /api/billing/account", "POST /api/billing/checkout", "POST /api/billing/manage", "POST /api/profile", "PUT /api/profile", "DELETE /api/profile", "GET /api/radar", "POST /api/radar", "POST /api/auth/logout", "POST /api/signaling/token"]);
 // Over https the session cookie was renamed from house_session to __Host-house_session. Until this date a guest's
@@ -320,6 +320,10 @@ export function createAppServer(directory = root, options = {}) {
         else if (path === "/api/connections/agora/certificate" && request.method === "POST") {
           const userId = await accountUser("agora:certificates"); limit("certificates:" + userId, 20, 60000);
           json(response, 200, await connections.certificate(userId, (await body(request)).projectId));
+        }
+        else if (path === "/api/connections/agora/token" && request.method === "POST") {
+          const userId = await accountUser("agora:tokens"); limit("agora-tokens:" + userId, 60, 60000);
+          json(response, 200, await connections.token(userId, await body(request)));
         }
         else if (path === "/api/connections/agora" && request.method === "DELETE") { await connections.disconnect(await accountUser("agora:projects")); json(response, 200, { disconnected: true }); }
         else if (["/api/credits/balance", "/api/credits/statement"].includes(path) && request.method === "GET") {

@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from "node:crypto";
 import { AppError } from "./store.mjs";
+import { parseTokenRequest, signToken } from "./agora-tokens.mjs";
 
 // Agora SSO (sso2.agora.io), used only to authorise Console access for an account that is already signed in. The
 // Portal is a confidential client: the code exchange and refresh send client_id and client_secret in the form body.
@@ -300,6 +301,15 @@ export function createConnections(store, config = connectionsConfig(), { request
       const project = (await listProjects(userId)).find((entry) => entry.projectId === projectId);
       if (!project) throw new AppError(404, "This Agora project was not found in your account.");
       return { projectId, appId: project.appId, certificate: project.certificate || null };
+    },
+    // An RTC or RTM token for one project, signed here with atem-core from the BFF list's certificate (never cached).
+    async token(userId, input) {
+      const projectId = input?.projectId;
+      if (typeof projectId !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(projectId)) throw new AppError(422, "Choose a project.");
+      const request = parseTokenRequest(input);
+      const project = (await listProjects(userId)).find((entry) => entry.projectId === projectId);
+      if (!project) throw new AppError(404, "This Agora project was not found in your account.");
+      return signToken(project, request, { now });
     },
     // Revokes the authorization at Agora (DELETE /api/v0/customer/user-auth, best effort), then forgets it.
     async disconnect(userId) {

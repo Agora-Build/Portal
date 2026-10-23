@@ -54,6 +54,24 @@
     <p id="agora-dialog-status" class="dialog-intro"></p>
     <div class="agora-toolbar"><button id="agora-refresh" class="inline-link" type="button">Refresh list</button><button id="agora-hide-all" class="inline-link" type="button" hidden>Hide all certificates</button><button id="agora-dialog-reconnect" class="button button-secondary" type="button" hidden>Reconnect Agora Console</button></div>
     <div id="agora-projects" class="agora-projects" aria-live="polite"></div>
+    <form id="agora-token-form" class="stack-form agora-token-form" aria-labelledby="agora-token-title" hidden>
+      <div><h3 id="agora-token-title">Create a token</h3><p id="agora-token-project" class="mono"></p></div>
+      <fieldset class="token-choice"><legend>Token type</legend><label><input type="radio" name="type" value="rtc" checked> RTC</label><label><input type="radio" name="type" value="rtm"> RTM</label></fieldset>
+      <div class="token-fields" data-for="rtc">
+        <label>Channel<input name="channel" maxlength="64" autocomplete="off" spellcheck="false" placeholder="The channel the client joins"></label>
+        <div class="form-row"><label>Identity<select name="identity"><option value="uid">Numeric UID</option><option value="account">User account</option></select></label><label><span id="agora-token-identity-label">UID <span class="optional">0 allows any user</span></span><input name="identityValue" value="0" maxlength="255" autocomplete="off" spellcheck="false" aria-describedby="agora-token-identity-label"></label></div>
+        <div class="form-row"><label>Role<select name="role"><option value="publisher">Publisher</option><option value="subscriber">Subscriber</option><option value="explicit">Custom privileges</option></select></label><label>Token expiry <span class="optional">seconds</span><input name="tokenExpire" type="number" min="1" max="86400" step="1" value="3600"></label></div>
+        <label data-for="standard">Privilege expiry <span class="optional">seconds</span><input name="privilegeExpire" type="number" min="1" max="86400" step="1" value="3600"></label>
+        <div class="form-row token-privileges" data-for="explicit" hidden><label>Join <span class="optional">seconds</span><input name="join" type="number" min="1" max="86400" step="1" value="3600"></label><label>Publish audio <span class="optional">seconds</span><input name="audio" type="number" min="1" max="86400" step="1" value="3600"></label><label>Publish video <span class="optional">seconds</span><input name="video" type="number" min="1" max="86400" step="1" value="3600"></label><label>Publish data <span class="optional">seconds</span><input name="data" type="number" min="1" max="86400" step="1" value="3600"></label></div>
+        <label class="checkbox-label"><input name="withRtm" type="checkbox"><span>Include an RTM login in this token</span></label>
+        <div class="form-row" data-for="with-rtm" hidden><label>RTM user ID <span class="optional">defaults to the account</span><input name="rtmUserId" maxlength="64" autocomplete="off" spellcheck="false"></label><label>RTM expiry <span class="optional">seconds</span><input name="rtmExpire" type="number" min="1" max="86400" step="1" value="3600"></label></div>
+      </div>
+      <div class="form-row token-fields" data-for="rtm" hidden><label>User ID<input name="userId" maxlength="64" autocomplete="off" spellcheck="false"></label><label>Expiry <span class="optional">seconds</span><input name="expire" type="number" min="1" max="86400" step="1" value="3600"></label></div>
+      <p id="agora-token-error" class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button class="button" type="submit">Create token</button><button id="agora-token-close" class="inline-link" type="button">Close form</button></div>
+      <div id="agora-token-result" class="agora-token-result" hidden><code id="agora-token-value" class="project-secret"></code><p id="agora-token-facts" class="muted"></p><button id="agora-token-copy" class="inline-link" type="button">Copy token</button></div>
+      <p class="form-note">Signed on agora.build with Atem's atem-core, the library Astation uses. The App Certificate stays on the server. Tokens aren't stored, and clear when you change the form or close this window.</p>
+    </form>
     <p class="form-note">A certificate is fetched only when you choose Show, hides again after 30 seconds or when this window closes, and is never stored by this page.</p>
   </dialog>
   <dialog id="person-dialog" aria-labelledby="person-title"><div class="dialog-head"><span class="kicker">BUILDER PROFILE</span><button class="close-button" type="button" data-close aria-label="Close builder profile">&times;</button></div><div id="profile-content"></div></dialog>
