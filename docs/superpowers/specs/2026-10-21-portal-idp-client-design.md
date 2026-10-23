@@ -16,7 +16,7 @@ Portal stops being an identity provider or an OAuth server. Its APIs accept the 
 | Question | Decision |
 | --- | --- |
 | Client model | Confidential OIDC client `portal`: Authorization Code + PKCE (S256), state and nonce. The Portal keeps its own session cookie, keyed by the IdP `sub`. The IdP is not called per request. |
-| Account ID | The IdP `sub` (`acct_…`) is the Portal account ID. `PLATFORM_ADMINS` lists `acct_…` IDs. |
+| Account ID | The IdP `sub` (`ab…`: `ab` + 26 Crockford base32 characters, `^ab[0-9A-HJKMNP-TV-Z]{26}$`) is the Portal account ID. `PLATFORM_ADMINS` lists `ab…` IDs. (Earlier drafts used `acct_…`; the IdP changed the format before production.) |
 | Provider sign-in in the Portal | Removed: Google, GitHub, Apple, the Agora OIDC and OAuth modes, and email linking with pending links. |
 | Portal OAuth server (`/oauth/*`) | Removed in this change, along with its client registry, codes, grants and access/refresh tokens, and the identity lookup endpoint. |
 | API callers | The browser uses the cookie session, with the same-origin checks unchanged. Apps and servers use `Authorization: Bearer <IdP access token>`. |
@@ -99,18 +99,22 @@ It returns `{ sub, clientId, scopes }`.
 - **New:** `authTransactions`.
 - **Sessions** gain `sid` and `idToken`. The ID token is not a credential that any API accepts, and it holds only what
   the account record already has. It is kept for `id_token_hint` and deleted with the session.
-- **Accounts** are `{id: "acct_…", name, avatar, email, profileId, createdAt, updatedAt, …}`. Billing, ledger and
+- **Accounts** are `{id: "ab…", name, avatar, email, profileId, createdAt, updatedAt, …}`. Billing, ledger and
   connection fields are unchanged.
 - **Removed:** `identities`, `pendingLinks`, `authorizationCodes`, `grants` and `sessionEpoch`.
 - **API callers get an account automatically.** The first access token for a `sub` that has no Portal account
   creates a minimal one, `{id: sub, name: null}`, so app users get a wallet. Its name and picture fill in at their
   first browser sign-in.
 - **One-time migration at load** (state version 2):
-  - delete `sessions`, `authorizationCodes`, `grants`, `pendingLinks` and every account whose ID isn't `acct_…`,
+  - delete `sessions`, `authorizationCodes`, `grants`, `pendingLinks` and every account whose ID isn't `ab…`,
     together with their ledger/billing rows and the spaces they own;
   - keep `people` (guests), `rooms` and the radar;
   - log counts only.
   - This is the spec's "starts empty". There are no production users.
+- **Second migration at load** (state version 3), because the IdP's account IDs changed from `acct_<ULID>` to
+  `ab<ULID>`: delete every account whose ID isn't `ab…`, with its sessions, profile, owned spaces, orders and ledger
+  rows, using the same removal helpers as version 2; accounts already in the `ab…` format keep their sessions.
+  Idempotent; a version 1 state runs both steps; counts-only log.
 - **`actor()`** resolves a Portal session to an account, or a guest profile session to a guest.
 
 ### 3.3 Routes and authorisation (`scripts/serve.mjs`)
@@ -233,7 +237,7 @@ resource scopes they need.
     non-allowlisted web client.
 - **Flows, driven over real HTTP with a cookie-jar browser:**
   1. **Sign in:** a fresh browser on the Portal goes to the IdP sign-in with a stand-in GitHub user, back to the
-     Portal, and `/api/me` shows the account `acct_…` with name and email.
+     Portal, and `/api/me` shows the account `ab…` with name and email.
   2. **SSO:** a second app (the sample client) in the same browser signs in without a login page, with the same `sub`.
   3. **Sign out:** RP-initiated logout ends the Portal session and the IdP session (the IdP account page then needs
      sign-in).
