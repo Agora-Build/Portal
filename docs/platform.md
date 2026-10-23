@@ -18,6 +18,19 @@ with PKCE (S256), state and nonce. Google, GitHub and every other login live on
 the IdP; linked logins, devices and "sign out everywhere" are managed at
 `<AUTH_ISSUER>/account`, which the account page links to as "Manage sign-in".
 
+**Signed in elsewhere, signed in here.** Once per browser session, a page that
+has no account session asks the IdP quietly whether the person is already
+signed in there, for example through Astation or another Agora Build app:
+`/auth/login?prompt=none&returnTo=<page>`. If they are, they come back to the
+same page signed in, without a click or a message; if not (`login_required` and
+the other OIDC "not signed in" answers), they come back to the same page
+unchanged. A session cookie, `ab_sso_checked`, keeps it to one check per browser
+session across tabs, and "Sign out" sets it so the person isn't signed straight
+back in. Other failures of a quiet check are logged by reason and also leave the
+page as it was; the explicit "Sign in" still reports failures. Desktop apps that
+requested `offline_access` (Astation) keep their own sign-in when the browser
+signs out; "sign out everywhere" on the IdP ends those too.
+
 | Setting | Meaning |
 | --- | --- |
 | `AUTH_ISSUER` | The IdP, `https://auth.agora.build` (locally `http://auth.localhost:3090`; plain http only on a local host) |

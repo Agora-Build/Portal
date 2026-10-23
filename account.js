@@ -1,4 +1,4 @@
-import { api, el, avatar, authConfigReady, state, notify, openJoin, refreshSession, samePath, sessionReady, signIn, requestKey } from "./script.js";
+import { api, el, avatar, authConfigReady, state, notify, openJoin, markSsoChecked, refreshSession, samePath, sessionReady, signIn, requestKey } from "./script.js";
 
 const status = document.querySelector("#account-status");
 const purchaseStatus = document.querySelector("#purchase-status");
@@ -301,6 +301,7 @@ document.querySelector("#manage-billing").addEventListener("click", async () => 
 });
 document.querySelector("#account-logout").addEventListener("click", async () => {
   try {
+    markSsoChecked();
     const result = await api("/api/auth/logout", { method: "POST" });
     if (result.endSessionUrl) { location.assign(result.endSessionUrl); return; }
     await refreshSession(); notify("You are signed out.");

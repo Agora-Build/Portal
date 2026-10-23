@@ -476,6 +476,49 @@ test("apps use the versioned /api/v1; it holds only the access-token routes, and
   assert.equal((await call(app.base, "/api/people", { bearer: token })).status, 200);
 });
 
+test("the once-per-session check (prompt=none) signs a person in quietly, or returns them to the page without a message", async (t) => {
+  const app = await start(t);
+  const begin = async (returnTo) => {
+    const login = await call(app.base, "/auth/login?prompt=none&returnTo=" + encodeURIComponent(returnTo));
+    assert.equal(login.status, 303);
+    assert.equal(new URL(login.headers.get("location")).searchParams.get("prompt"), "none");
+    return { login, transaction: pair(cookieNamed(login, "portal_auth")) };
+  };
+  // Not signed in at the IdP: back to the same page, no ?signin, no session, nothing logged.
+  const quiet = await begin("/stoa/?space=lobby");
+  const authorize = new URL(quiet.login.headers.get("location"));
+  const answer = new URL(authorize.searchParams.get("redirect_uri"));
+  answer.search = new URLSearchParams({ error: "login_required", state: authorize.searchParams.get("state"), iss: issuer }).toString();
+  const back = await call(app.base, answer.pathname + answer.search, { cookie: quiet.transaction });
+  assert.equal(back.status, 303);
+  assert.equal(back.headers.get("location"), "/stoa/?space=lobby");
+  assert.equal(cookieNamed(back, "house_session"), undefined);
+  assert.ok(!app.logs.some((line) => line.includes("Sign-in failed") || line.includes("Silent sign-in failed")), "not signed in is not logged");
+  // Signed in at the IdP (e.g. through Astation): back signed in, still without ?signin.
+  const signedIn = await begin("/explore/");
+  const callback = new URL(app.fake.authorize(signedIn.login.headers.get("location"), { name: "Quiet Builder" }));
+  const done = await call(app.base, callback.pathname + callback.search, { cookie: signedIn.transaction });
+  assert.equal(done.headers.get("location"), "/explore/");
+  const session = pair(cookieNamed(done, "house_session"));
+  assert.equal((await (await call(app.base, "/api/me", { cookie: session })).json()).account.name, "Quiet Builder");
+  // Any other failure of a silent check also leaves the page as it was, but is logged.
+  const broken = await begin("/radar/");
+  const forged = new URL(app.fake.authorize(broken.login.headers.get("location")));
+  forged.searchParams.set("state", "forged");
+  const after = await call(app.base, forged.pathname + forged.search, { cookie: broken.transaction });
+  assert.equal(after.headers.get("location"), "/radar/");
+  assert.ok(app.logs.includes("Silent sign-in failed: state."));
+  // An ordinary sign-in still asks normally and reports failures.
+  const ordinary = await call(app.base, "/auth/login?returnTo=%2F");
+  assert.equal(new URL(ordinary.headers.get("location")).searchParams.has("prompt"), false);
+});
+test("a silent check with sign-in unavailable returns to the page without the unavailable message", async (t) => {
+  const app = await start(t, { idp: null });
+  const login = await call(app.base, "/auth/login?prompt=none&returnTo=%2Fstoa%2F");
+  assert.equal(login.headers.get("location"), "/stoa/");
+  assert.match((await call(app.base, "/auth/login?returnTo=%2Fstoa%2F")).headers.get("location"), /signin=unavailable/);
+});
+
 test("over https the session cookie is __Host-house_session", async (t) => {
   const app = await start(t, { siteUrl: "https://portal.example" });
   const response = await call(app.base, "/api/profile", { method: "POST", data: profile("Secure guest") });

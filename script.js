@@ -33,6 +33,7 @@ export async function refreshSession() {
   const result = await api("/api/me");
   state.profile = result.profile;
   state.account = result.account;
+  state.sessionLoaded = true;
   document.querySelectorAll("[data-join]").forEach((button) => {
     button.textContent = state.profile ? button.dataset.memberLabel || "Your profile" : button.dataset.guestLabel || "Join the house";
   });
@@ -191,6 +192,18 @@ document.querySelector("#profile-delete").addEventListener("click", async () => 
   } catch (error) { document.querySelector("#profile-error").textContent = error.message; }
 });
 export const sessionReady = refreshSession().catch((error) => { notify(error.message); return null; });
+// Once per browser session, a page without an account asks auth.agora.build quietly (prompt=none) whether the person is
+// already signed in there, for example through Astation or another tab. If so they come back signed in; if not, to the
+// same page, unchanged and without a message. A session cookie, shared by the tabs, keeps it to one check per browser
+// session, and signing out sets it so the person isn't signed straight back in.
+const SSO_CHECKED = "ab_sso_checked";
+export const markSsoChecked = () => { document.cookie = SSO_CHECKED + "=1; Path=/; SameSite=Lax" + (location.protocol === "https:" ? "; Secure" : ""); };
+Promise.all([sessionReady, authConfigReady]).then(() => {
+  if (!state.sessionLoaded || state.account || !state.authConfig?.issuer) return;
+  if (document.cookie.split("; ").includes(SSO_CHECKED + "=1") || new URL(location.href).searchParams.has("signin")) return;
+  markSsoChecked();
+  location.replace("/auth/login?prompt=none&returnTo=" + encodeURIComponent(returnTarget()));
+});
 sessionReady.then(() => {
   const url = new URL(location.href);
   const result = url.searchParams.get("signin");

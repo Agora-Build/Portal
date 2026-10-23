@@ -190,12 +190,14 @@ export function createAppServer(directory = root, options = {}) {
       if (path === "/auth/login" && request.method === "GET") {
         limit("login:" + clientAddress(request), 20, 60000);
         const returnTo = returnPath(requestUrl.searchParams.get("returnTo") || "/");
+        // prompt=none is the pages' once-per-browser-session check: signed in at auth.agora.build already, or not.
+        const silent = requestUrl.searchParams.get("prompt") === "none";
         let started = null;
         if (idp && await idp.available()) {
-          try { started = await idp.beginLogin({ returnTo }); }
+          try { started = await idp.beginLogin({ returnTo, silent }); }
           catch (error) { if (!(error instanceof LoginError)) throw error; }
         }
-        if (!started) { redirect(response, withSignin(returnTo, "unavailable")); return; }
+        if (!started) { redirect(response, silent ? returnTo : withSignin(returnTo, "unavailable")); return; }
         await store.saveAuthTransaction(started.transaction);
         redirect(response, started.url, [transactionCookie(started.transaction.id)]);
         return;
@@ -209,10 +211,12 @@ export function createAppServer(directory = root, options = {}) {
           if (!idp) throw new LoginError("unavailable");
           const result = await idp.completeLogin(request.url, transaction);
           const { token } = await store.signIn({ sub: result.sub, sid: result.sid, name: result.name, picture: result.picture ?? undefined, email: result.email, idToken: result.idToken, guestToken: cookieToken || undefined });
-          redirect(response, withSignin(transaction.returnTo, "success"), [clear, sessionCookie(token)]);
+          redirect(response, transaction.silent ? transaction.returnTo : withSignin(transaction.returnTo, "success"), [clear, sessionCookie(token)]);
         } catch (error) {
-          log("Sign-in failed: " + (error instanceof LoginError ? error.reason : "error") + ".");
-          redirect(response, withSignin(transaction?.returnTo || "/", "failed"), [clear]);
+          // A silent check never shows a message: not signed in at the IdP is the usual answer, and any other failure
+          // leaves the page as it was, with the Sign in button.
+          if (!(transaction?.silent && error instanceof LoginError && error.reason === "not_signed_in")) log((transaction?.silent ? "Silent sign-in failed: " : "Sign-in failed: ") + (error instanceof LoginError ? error.reason : "error") + ".");
+          redirect(response, transaction?.silent ? transaction.returnTo : withSignin(transaction?.returnTo || "/", "failed"), [clear]);
         }
         return;
       }
