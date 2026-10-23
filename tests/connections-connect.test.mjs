@@ -52,7 +52,7 @@ const join = (...parts) => parts.filter(Boolean).join("; ");
 
 async function signIn(app, prefix = "") {
   const sub = app.fake.accountId();
-  const login = await call(app.base, "/auth/login?returnTo=%2Faccount.html");
+  const login = await call(app.base, "/auth/login?returnTo=%2Faccount%2F");
   const callback = new URL(app.fake.authorize(login.headers.get("location"), { sub }));
   const back = await call(app.base, callback.pathname + callback.search, { cookie: pair(cookieNamed(login, prefix + "portal_auth")) });
   return { sub, cookie: pair(cookieNamed(back, prefix + "house_session")) };
@@ -94,7 +94,7 @@ test("a signed-in account connects Agora Console; the tokens are stored sealed a
   const callback = new URL(app.agora.authorize(begun.headers.get("location")));
   const back = await call(app.base, callback.pathname + callback.search, { cookie: join(pair(cookie), session.cookie) });
   assert.equal(back.status, 303);
-  assert.equal(back.headers.get("location"), "/account.html?connected=agora");
+  assert.equal(back.headers.get("location"), "/account/?connected=agora");
   assertCleared(back, "success");
   assert.equal(cookieNamed(back, "house_session"), undefined, "connecting is not signing in");
 
@@ -131,7 +131,7 @@ test("a guest, a visitor without a session and a bearer token can't start a conn
   for (const [label, cookie] of [["guest", guest], ["no session", undefined]]) {
     const response = await call(app.base, "/connect/agora", { cookie });
     assert.equal(response.status, 303, label);
-    assert.equal(response.headers.get("location"), "/auth/login?returnTo=%2Faccount.html", label);
+    assert.equal(response.headers.get("location"), "/auth/login?returnTo=%2Faccount%2F", label);
     assert.equal(cookieNamed(response, "portal_connect"), undefined, label);
   }
   const bearer = await app.fake.issueAccessToken({ scope: "agora:projects agora:certificates" });
@@ -144,7 +144,7 @@ test("a guest, a visitor without a session and a bearer token can't start a conn
   const started = await call(app.base, "/connect/agora", { cookie: session.cookie });
   const callback = new URL(app.agora.authorize(started.headers.get("location")));
   const back = await call(app.base, callback.pathname + callback.search, { cookie: join(pair(cookieNamed(started, "portal_connect")), guest) });
-  assert.equal(back.headers.get("location"), "/account.html?connected=failed");
+  assert.equal(back.headers.get("location"), "/account/?connected=failed");
   assertCleared(back, "guest callback");
   assert.equal(app.agora.counts.code, 0, "the code is never redeemed");
 });
@@ -154,7 +154,7 @@ test("a callback for another account's transaction fails and saves nothing", asy
   const owner = await signIn(app), other = await signIn(app);
   const result = await connect(app, owner, { callbackCookie: other.cookie });
   assert.equal(result.back.status, 303);
-  assert.equal(result.location, "/account.html?connected=failed");
+  assert.equal(result.location, "/account/?connected=failed");
   assertCleared(result.back, "other account");
   assert.equal(app.agora.counts.code, 0, "the code is never redeemed for the wrong account");
   assert.equal((await account(app, owner.sub)).connections?.agora, undefined);
@@ -168,7 +168,7 @@ test("every failed callback redirects with ?connected=failed and clears the cook
   const session = await signIn(app);
   const check = (response, label) => {
     assert.equal(response.status, 303, label);
-    assert.equal(response.headers.get("location"), "/account.html?connected=failed", label);
+    assert.equal(response.headers.get("location"), "/account/?connected=failed", label);
     assertCleared(response, label);
   };
   // No transaction cookie, or an unknown one.
@@ -183,10 +183,10 @@ test("every failed callback redirects with ?connected=failed and clears the cook
   check(await call(app.base, forged.pathname + forged.search, { cookie: join(pair(cookieNamed(started, "portal_connect")), session.cookie) }), "state");
   // A replayed callback finds its transaction consumed.
   const first = await connect(app, session);
-  assert.equal(first.location, "/account.html?connected=agora");
+  assert.equal(first.location, "/account/?connected=agora");
   check(await call(app.base, first.callback.pathname + first.callback.search, { cookie: join(pair(first.transaction), session.cookie) }), "replay");
   // A sign-in transaction is not a connect transaction.
-  const login = await call(app.base, "/auth/login?returnTo=%2Faccount.html");
+  const login = await call(app.base, "/auth/login?returnTo=%2Faccount%2F");
   const loginId = pair(cookieNamed(login, "portal_auth")).slice("portal_auth=".length);
   check(await call(app.base, "/connect/agora/callback?code=x&state=" + new URL(login.headers.get("location")).searchParams.get("state"), { cookie: join("portal_connect=" + loginId, session.cookie) }), "sign-in transaction");
   // Agora refuses the code, or can't be reached.
@@ -216,13 +216,13 @@ test("connect is unavailable, not broken, without the AGORA_OAUTH_* settings, an
   const app = await start(t, { agoraEnv: { AGORA_OAUTH_CLIENT_ID: "", AGORA_OAUTH_CLIENT_SECRET: "" } });
   const session = await signIn(app);
   const response = await call(app.base, "/connect/agora", { cookie: session.cookie });
-  assert.deepEqual([response.status, response.headers.get("location")], [303, "/account.html?connected=unavailable"]);
+  assert.deepEqual([response.status, response.headers.get("location")], [303, "/account/?connected=unavailable"]);
   assert.equal(cookieNamed(response, "portal_connect"), undefined);
   const status = await (await call(app.base, "/api/connections", { cookie: session.cookie })).json();
   assert.equal(status.agora.connect, false);
   assert.equal(status.agora.connected, false);
   const callback = await call(app.base, "/connect/agora/callback?code=x&state=y", { cookie: join("portal_connect=abc", session.cookie) });
-  assert.equal(callback.headers.get("location"), "/account.html?connected=failed");
+  assert.equal(callback.headers.get("location"), "/account/?connected=failed");
   assertCleared(callback, "unavailable callback");
   const logged = app.logs.join("\n");
   assert.match(logged, /Agora Console connect is unavailable: set AGORA_OAUTH_CLIENT_ID, AGORA_OAUTH_CLIENT_SECRET\./);
@@ -244,7 +244,7 @@ test("the connect settings name what is missing", () => {
 test("disconnect removes the connection, from the same origin only", async (t) => {
   const app = await start(t);
   const session = await signIn(app);
-  assert.equal((await connect(app, session)).location, "/account.html?connected=agora");
+  assert.equal((await connect(app, session)).location, "/account/?connected=agora");
   const crossSite = await call(app.base, "/api/connections/agora", { cookie: session.cookie, method: "DELETE", headers: { Origin: "https://evil.example" } });
   assert.equal(crossSite.status, 403);
   assert.ok((await account(app, session.sub)).connections.agora, "still connected");
@@ -257,7 +257,7 @@ test("disconnect removes the connection, from the same origin only", async (t) =
 test("an expiring connection is refreshed with the AGORA_OAUTH_* settings and keeps its name", async (t) => {
   const app = await start(t, { agoraOptions: { expiresIn: 30 } });
   const session = await signIn(app);
-  assert.equal((await connect(app, session)).location, "/account.html?connected=agora");
+  assert.equal((await connect(app, session)).location, "/account/?connected=agora");
   const before = JSON.stringify((await account(app, session.sub)).connections.agora);
   app.agora.state.expiresIn = 7200;
   const response = await call(app.base, "/api/connections/agora/projects", { cookie: session.cookie });
@@ -272,7 +272,7 @@ test("an expiring connection is refreshed with the AGORA_OAUTH_* settings and ke
 test("projects and certificates are read with a bearer token carrying agora:projects or agora:certificates", async (t) => {
   const app = await start(t);
   const session = await signIn(app);
-  assert.equal((await connect(app, session)).location, "/account.html?connected=agora");
+  assert.equal((await connect(app, session)).location, "/account/?connected=agora");
   const token = (scope) => app.fake.issueAccessToken({ sub: session.sub, scope });
   const projects = await call(app.base, "/api/connections/agora/projects", { bearer: await token("agora:projects") });
   assert.equal(projects.status, 200);

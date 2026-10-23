@@ -310,7 +310,7 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
           addSession(state, account, token, { sid: current?.sid, idToken: current?.idToken, expiresAt: current?.expiresAt });
         }
         state.people.unshift(person);
-        record(state, person, "member", "took a seat in", "the foundry", { url: "index.html#people" });
+        record(state, person, "member", "took a seat in", "the foundry", { url: "/#people" });
       });
       return { person: publicProfile(person), token };
     },
@@ -321,7 +321,7 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
         const changedIntent = person.intent !== value.intent;
         Object.assign(person, value);
         for (const entry of state.activity || []) if (entry.actorId === person.id) entry.actorName = person.name;
-        if (changedIntent) record(state, person, "intent", "shared a new intent in", "the foundry", { url: "index.html#people" });
+        if (changedIntent) record(state, person, "intent", "shared a new intent in", "the foundry", { url: "/#people" });
         delete state.radar[person.id];
         return publicProfile(person);
       });

@@ -132,7 +132,7 @@ test("HTTP payment webhooks verify the raw body signature and browser return URL
   try {
     const forged = await fetch(base + "/api/billing/webhook", { method: "POST", headers: { "Content-Type": "application/json", "Stripe-Signature": "invalid" }, body: payload });
     assert.equal(forged.status, 400);
-    await fetch(base + "/account.html?checkout=success", { headers: { Cookie: "house_session=" + f.login.token } });
+    await fetch(base + "/account/?checkout=success", { headers: { Cookie: "house_session=" + f.login.token } });
     assert.equal((await createLedger(f.store).balance(id)).credits, 0);
     const verified = await fetch(base + "/api/billing/webhook", { method: "POST", headers: { "Content-Type": "application/json", "Stripe-Signature": signature }, body: payload });
     assert.equal(verified.status, 200);

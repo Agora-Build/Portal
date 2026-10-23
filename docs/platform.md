@@ -355,7 +355,7 @@ stores a transaction bound to the account, like sign-in, in an HttpOnly
 browser to Agora with scope `basic_info,console` and PKCE. The callback,
 `/connect/agora/callback`, refuses a transaction that belongs to another account,
 stores `{accessToken, refreshToken, expiresAt}` sealed, and redirects to
-`/account.html?connected=agora` (or `?connected=failed`).
+`/account/?connected=agora` (or `?connected=failed`).
 
 Register a dedicated, confidential Portal client with Agora's OAuth service and
 allow the redirect URI `<SITE_URL>/connect/agora/callback` (for production

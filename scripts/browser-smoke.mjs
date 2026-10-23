@@ -100,8 +100,8 @@ async function keyboardSignIn(page, tag) {
   const seat = page.locator(".header-actions [data-join]");
   check(await tabTo(page, seat), tag + "Tab reaches \"Take a seat\" on the home page");
   await page.keyboard.press("Enter");
-  await page.waitForURL((url) => url.pathname === "/account.html", { timeout: 5000 });
-  check(new URL(page.url()).searchParams.get("returnTo") === "/", tag + "\"Take a seat\" goes to /account.html?returnTo=/");
+  await page.waitForURL((url) => url.pathname === "/account/", { timeout: 5000 });
+  check(new URL(page.url()).searchParams.get("returnTo") === "/", tag + "\"Take a seat\" goes to /account/?returnTo=/");
   const section = page.locator("#account-signin");
   await section.waitFor({ state: "visible", timeout: 5000 });
   check(await page.locator("dialog[open]").count() === 0 && await page.locator("#login-dialog").count() === 0, tag + "no sign-in dialog exists or opens");
@@ -140,7 +140,7 @@ async function signInFlow(viewport) {
     }, page);
 
     await step(tag + "account page", async () => {
-      await page.goto(stack.site + "/account.html");
+      await page.goto(stack.site + "/account/");
       const name = page.locator("#account-identity h3");
       await name.waitFor({ timeout: 5000 });
       check((await name.textContent()) === user.name, tag + "the account page shows the account's name");
@@ -156,7 +156,7 @@ async function signInFlow(viewport) {
       // Regression (Task 5): if /api/auth/config fails, the account page still loads, without "Manage sign-in".
       const second = await context.newPage();
       await second.route("**/api/auth/config", (route) => route.abort());
-      await second.goto(stack.site + "/account.html");
+      await second.goto(stack.site + "/account/");
       const name = second.locator("#account-identity h3");
       const loaded = await name.waitFor({ timeout: 5000 }).then(() => true, () => false);
       check(loaded && (await name.textContent()) === user.name, tag + "with /api/auth/config blocked, the account page still loads the account");
@@ -166,7 +166,7 @@ async function signInFlow(viewport) {
     }, page);
 
     await step(tag + "sign out", async () => {
-      await page.goto(stack.site + "/account.html");
+      await page.goto(stack.site + "/account/");
       await page.locator("#account-identity h3").waitFor({ timeout: 5000 });
       await page.locator("#account-logout").focus();
       await page.keyboard.press("Enter");
@@ -190,9 +190,9 @@ async function guestFlow(viewport) {
   const page = await context.newPage();
   try {
     await step(tag + "continue with this browser", async () => {
-      await page.goto(stack.site + "/explore.html");
+      await page.goto(stack.site + "/explore/");
       await page.locator(".header-actions [data-join]").click();
-      await page.waitForURL((url) => url.pathname === "/account.html", { timeout: 5000 });
+      await page.waitForURL((url) => url.pathname === "/account/", { timeout: 5000 });
       await page.locator("#signin-status").filter({ hasText: /./ }).waitFor({ timeout: 5000 });
       check(await page.locator("dialog[open]").count() === 0, tag + "\"Take a seat\" opens no dialog");
       await page.getByRole("button", { name: "Continue with this browser" }).click();
@@ -207,23 +207,23 @@ async function guestFlow(viewport) {
       await form.waitFor({ state: "hidden", timeout: 5000 });
       const session = await me(page);
       check(Boolean(session.profile) && session.account === null, tag + "\"Continue with this browser\" makes a guest profile without an account");
-      await page.waitForURL((url) => url.pathname === "/explore.html", { timeout: 5000 });
-      check(true, tag + "after saving, the guest is back on the page that sent them (/explore.html)");
+      await page.waitForURL((url) => url.pathname === "/explore/", { timeout: 5000 });
+      check(true, tag + "after saving, the guest is back on the page that sent them (/explore/)");
     }, page);
     await step(tag + "services", async () => {
-      await page.goto(stack.site + "/services.html");
+      await page.goto(stack.site + "/services/");
       const notes = page.locator(".service-note");
       await notes.first().filter({ hasText: "Sign in to use credits." }).waitFor({ timeout: 5000 });
       check((await notes.allTextContents()).every((text) => text === "Sign in to use credits."), tag + "the services page says \"Sign in to use credits.\"");
     }, page);
     await step(tag + "account", async () => {
-      await page.goto(stack.site + "/account.html");
+      await page.goto(stack.site + "/account/");
       await page.locator("#credit-statement").filter({ hasText: "Sign in to see your credit statement." }).waitFor({ timeout: 5000 });
       check(true, tag + "the account page says \"Sign in to see your credit statement.\"");
       check((await page.locator("#credit-balance").textContent()) === "--", tag + "the account page shows no balance");
       check(await page.locator("#account-login").isVisible() && !(await page.locator("#manage-signin").isVisible()), tag + "the account page offers \"Sign in\" and no \"Manage sign-in\"");
       check(!(await page.locator("#account-guest").isVisible()) && /keep this profile/.test((await page.locator("#signin-status").textContent()) || ""), tag + "a guest is offered Sign in to upgrade, not \"Continue with this browser\"");
-      check((await page.locator("#account-login").getAttribute("href")) === "/auth/login?returnTo=%2Faccount.html", tag + "the guest's \"Sign in\" links straight to /auth/login with returnTo");
+      check((await page.locator("#account-login").getAttribute("href")) === "/auth/login?returnTo=%2Faccount%2F", tag + "the guest's \"Sign in\" links straight to /auth/login with returnTo");
       check(await tabTo(page, page.locator("#account-login")), tag + "Tab reaches \"Sign in\" on the account page");
     }, page);
   } finally {

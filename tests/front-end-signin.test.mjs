@@ -19,13 +19,13 @@ test("sign-in is one step: no modal anywhere, and every Sign in goes to /auth/lo
   }
   const script = await read("script.js");
   assert.match(script, /export const signInHref = \(\) => "\/auth\/login\?returnTo=" \+ encodeURIComponent\(returnTarget\(\)\)/);
-  assert.match(script, /export const seatHref = \(\) => "\/account\.html\?returnTo=" \+ encodeURIComponent\(location\.pathname \+ location\.search\)/);
+  assert.match(script, /export const seatHref = \(\) => "\/account\/\?returnTo=" \+ encodeURIComponent\(location\.pathname \+ location\.search\)/);
   assert.match(script, /location\.assign\(signInHref\(\)\)/);
   assert.match(script, /link\.href = seat \? seatHref\(\) : signInHref\(\)/);
   assert.doesNotMatch(script, /innerHTML/);
   for (const file of ["services.js", "stoa.js", "account.js"]) assert.match(await read(file), /signIn\(\)/, file);
   const stoa = await read("stoa.html");
-  assert.match(stoa, /<a class="button button-secondary button-small" id="stoa-signin-button" href="\/account\.html" data-signin="seat">Sign in<\/a>/);
+  assert.match(stoa, /<a class="button button-secondary button-small" id="stoa-signin-button" href="\/account\/" data-signin="seat">Sign in<\/a>/);
   assert.doesNotMatch(await read("stoa/panel.js"), /signin\(\)/);
   assert.match(await read("account.js"), /endSessionUrl/);
   assert.match(script, /Sign-in didn't complete\. Try again\./);
@@ -77,6 +77,18 @@ test("a guest's returnTo is only ever a same-site path", async () => {
   const source = script.match(/export const samePath = (.*);\n/)[1];
   const samePath = new Function("return " + source)();
   assert.equal(samePath("/stoa/"), "/stoa/");
-  assert.equal(samePath("/explore.html?q=voice"), "/explore.html?q=voice");
+  assert.equal(samePath("/explore/?q=voice"), "/explore/?q=voice");
   for (const bad of ["//evil.example", "https://evil.example", "/\\evil.example", "evil", "", null, undefined]) assert.equal(samePath(bad), null, String(bad));
+});
+test("pages link to each other at clean /name/ URLs, never /name.html", async () => {
+  for (const file of files) {
+    const source = await read(file);
+    assert.doesNotMatch(source, /["'`]\/?(?:index|explore|services|radar|account|stoa)\.html/, file);
+  }
+  for (const file of ["index.html", "explore.html", "account.html", "services.html", "radar.html", "stoa.html"]) {
+    const html = await read(file);
+    assert.match(html, /<a href="\/explore\/"[^>]*>Projects<\/a>/, file);
+    assert.match(html, /<a href="\/account\/"[^>]*>Account<\/a>/, file);
+    for (const [, link] of html.matchAll(/(?:src|href)="([^"#]+)"/g)) assert.ok(/^(\/|https:\/\/)/.test(link), file + " " + link + " is absolute");
+  }
 });

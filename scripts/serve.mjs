@@ -9,7 +9,7 @@ import { basicSearch, createModelClient, modelConfig } from "./models.mjs";
 import { createActivityFeed } from "./activity.mjs";
 import { createAgoraCalls } from "./calls.mjs";
 import { createIdp, LoginError, TokenError } from "./idp.mjs";
-import { returnPath, withSignin } from "./return-path.mjs";
+import { cleanPagePath, pages, returnPath, withSignin } from "./return-path.mjs";
 import { billingClients as parseBillingClients, loadBillingClients, priceFor } from "./billing-clients.mjs";
 import { createCredits } from "./credits.mjs";
 import { createLedger } from "./ledger.mjs";
@@ -205,9 +205,9 @@ export function createAppServer(directory = root, options = {}) {
         // Authorises Console access for the signed-in account; it never signs anyone in. Browser account sessions only.
         if (request.headers.authorization) throw browserOnly();
         const accountId = (await store.session(browserToken)).account?.id;
-        if (!accountId) { redirect(response, "/auth/login?returnTo=%2Faccount.html"); return; }
+        if (!accountId) { redirect(response, "/auth/login?returnTo=%2Faccount%2F"); return; }
         limit("connect:" + accountId, 10, 60000);
-        if (!connections.config.connect?.ready) { redirect(response, "/account.html?connected=unavailable"); return; }
+        if (!connections.config.connect?.ready) { redirect(response, "/account/?connected=unavailable"); return; }
         const started = connections.beginConnect(accountId);
         await store.saveAuthTransaction(started.transaction);
         redirect(response, started.url, [connectCookie(started.transaction.id)]);
@@ -220,10 +220,10 @@ export function createAppServer(directory = root, options = {}) {
           const transaction = await store.takeAuthTransaction(cookieValue(request, connectName));
           const accountId = (await store.session(browserToken)).account?.id;
           await connections.completeConnect(transaction, requestUrl.searchParams, accountId);
-          redirect(response, "/account.html?connected=agora", [clear]);
+          redirect(response, "/account/?connected=agora", [clear]);
         } catch (error) {
           log("Agora connect failed: " + (error instanceof ConnectError ? error.reason : "error") + ".");
-          redirect(response, "/account.html?connected=failed", [clear]);
+          redirect(response, "/account/?connected=failed", [clear]);
         }
         return;
       }
@@ -403,9 +403,13 @@ export function createAppServer(directory = root, options = {}) {
       const meeting = /^\/meet\/([a-f0-9-]{36})$/.exec(path);
       if (meeting) { response.writeHead(308, { Location: "/stoa/s/" + meeting[1] + requestUrl.search }).end(); return; }
       if (path === "/meetings.html") { const room = requestUrl.searchParams.get("room"); response.writeHead(308, { Location: /^[a-f0-9-]{36}$/.test(room || "") ? "/stoa/s/" + room : "/stoa/" }).end(); return; }
+      // Pages live at clean URLs ending in "/": /<name> and /<name>.html redirect there, keeping the query string.
+      const clean = cleanPagePath(path);
+      if (clean) { response.writeHead(308, { Location: clean + requestUrl.search }).end(); return; }
+      const page = /^\/([a-z]+)\/$/.exec(path);
       const stoa = /^\/stoa(?:\/|\/room\/([a-z0-9-]{2,40})|\/s\/([a-f0-9-]{36}))$/.exec(path);
       if (stoa && ((stoa[1] && !worlds.plaza.map.lots.some((lot) => lot.slug === stoa[1])) || (stoa[2] && !(await spaces.visible(browserToken, stoa[2], requestUrl.searchParams.get("invite")))))) { response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("This space was not found."); return; }
-      const filename = stoa ? "stoa.html" : path === "/" ? "index.html" : path.slice(1);
+      const filename = stoa ? "stoa.html" : path === "/" ? "index.html" : page && pages.includes(page[1]) ? page[1] + ".html" : path.endsWith(".html") ? "" : path.slice(1);
       if (!publicFiles.has(filename)) { response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found"); return; }
       const file = resolve(directory, filename);
       const content = await readFile(Object.hasOwn(vendor, filename) && !existsSync(file) ? vendor[filename] : file);

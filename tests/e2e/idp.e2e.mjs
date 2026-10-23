@@ -71,7 +71,7 @@ describe("the Portal against the real auth.agora.build", { skip: skip || false }
   test("1. sign in: a fresh browser goes through the IdP with GitHub and comes back signed in to the Portal", async () => {
     const browser = createBrowser(stack);
     assert.equal((await meOf(browser)).account, null, "a fresh browser has no account");
-    const login = await browser.request(stack.site + "/auth/login?returnTo=" + encodeURIComponent("/account.html"));
+    const login = await browser.request(stack.site + "/auth/login?returnTo=" + encodeURIComponent("/account/"));
     assert.equal(login.status, 303);
     assert.equal(new URL(login.location).origin, stack.issuer, "the Portal sends the browser to auth.agora.build");
     const authorize = new URL(login.location);
@@ -85,7 +85,7 @@ describe("the Portal against the real auth.agora.build", { skip: skip || false }
     assert.match(signIn.text, /Continue with GitHub/, "the IdP shows its sign-in page");
     const done = await completeSignIn(browser, stack, signIn, person(5101, "Grace"));
     assert.equal(done.status, 200);
-    assert.equal(done.url, stack.site + "/account.html?signin=success", "back on the Portal page that started sign-in");
+    assert.equal(done.url, stack.site + "/account/?signin=success", "back on the Portal page that started sign-in");
     assert.ok(browser.history.some((url) => url.startsWith(stack.site + "/auth/callback?code=")), "the IdP returned to the Portal callback with a code");
     assert.ok(!browser.hasCookie("127.0.0.1", "portal_auth"), "the transaction cookie is cleared");
     assert.ok(browser.hasCookie("127.0.0.1", "house_session"));
@@ -322,15 +322,15 @@ describe("the Portal against the real auth.agora.build", { skip: skip || false }
       assert.equal((await browser.api("/api/credits/balance")).status, 200);
       // A Portal that starts while the IdP is down.
       const cold = await own.extraPortal();
-      const login = () => fetch(cold.site + "/auth/login?returnTo=%2Faccount.html", { redirect: "manual" });
+      const login = () => fetch(cold.site + "/auth/login?returnTo=%2Faccount%2F", { redirect: "manual" });
       const firstAttempt = Date.now();
       const refused = await login();
       assert.equal(refused.status, 303);
-      assert.equal(refused.headers.get("location"), "/account.html?signin=unavailable", "sign-in reports itself unavailable");
+      assert.equal(refused.headers.get("location"), "/account/?signin=unavailable", "sign-in reports itself unavailable");
       // The IdP comes back. Discovery is retried at most every 30 s, so sign-in stays unavailable until then.
       await own.front.restart();
       assert.equal((await fetch(own.issuer + "/jwks")).status, 200, "the IdP answers again");
-      assert.equal((await login()).headers.get("location"), "/account.html?signin=unavailable", "within 30 s of the failed discovery the Portal doesn't retry");
+      assert.equal((await login()).headers.get("location"), "/account/?signin=unavailable", "within 30 s of the failed discovery the Portal doesn't retry");
       await sleep(Math.max(0, firstAttempt + 30500 - Date.now()));
       const recovered = await login();
       assert.equal(recovered.status, 303);
@@ -355,11 +355,11 @@ describe("the Portal against the real auth.agora.build", { skip: skip || false }
       await sleep(Math.max(0, signedInAt + 30500 - Date.now()));
       assert.equal((await meOf(browser)).account.name, "Sophie", "the existing session still works");
       const newcomer = createBrowser(own);
-      const login = await newcomer.request(own.site + "/auth/login?returnTo=%2Faccount.html");
+      const login = await newcomer.request(own.site + "/auth/login?returnTo=%2Faccount%2F");
       assert.equal(login.status, 303);
       // Reported without the authorize URL's query (state, nonce, PKCE challenge).
       const sentTo = login.location?.startsWith(own.issuer) ? "the unreachable IdP at " + new URL(login.location).pathname : login.location;
-      assert.equal(sentTo, own.site + "/account.html?signin=unavailable", "a new sign-in on the running Portal shows the unavailable message");
+      assert.equal(sentTo, own.site + "/account/?signin=unavailable", "a new sign-in on the running Portal shows the unavailable message");
     } finally {
       await own.close();
     }

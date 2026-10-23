@@ -45,10 +45,10 @@ state.authConfig = null;
 // A same-site path ("/..." but never "//host" or a backslash trick), or null.
 export const samePath = (value) => typeof value === "string" && value.startsWith("/") && !value.startsWith("//") && !/[\\\r\n]/.test(value) ? value : null;
 // Where sign-in returns to: this page, or on the account page the page that sent the visitor there.
-export const returnTarget = () => (location.pathname === "/account.html" && samePath(new URLSearchParams(location.search).get("returnTo"))) || location.pathname + location.search;
+export const returnTarget = () => (location.pathname === "/account/" && samePath(new URLSearchParams(location.search).get("returnTo"))) || location.pathname + location.search;
 // Sign in is one step: straight to auth.agora.build through /auth/login. The account page also offers the browser-only choice.
 export const signInHref = () => "/auth/login?returnTo=" + encodeURIComponent(returnTarget());
-export const seatHref = () => "/account.html?returnTo=" + encodeURIComponent(location.pathname + location.search);
+export const seatHref = () => "/account/?returnTo=" + encodeURIComponent(location.pathname + location.search);
 const signInUnavailable = () => Boolean(state.authConfig) && !state.authConfig.issuer;
 export function signIn() {
   if (signInUnavailable()) { notify("Sign-in is temporarily unavailable. Try again in a little while."); return; }
@@ -67,13 +67,13 @@ export function syncSignInLinks() {
 // The address can change without a reload (the Stoa rewrites it), so a link's returnTo is refreshed just before it is used.
 for (const type of ["pointerdown", "focusin"]) document.addEventListener(type, (event) => { if (event.target.closest?.("a[data-signin]")) syncSignInLinks(); }, true);
 document.addEventListener("click", (event) => { if (event.target.closest("a[data-signin][aria-disabled=true]")) event.preventDefault(); });
-const manageLogin = el("a", { class: "inline-link profile-login-control", href: "/account.html", text: "Sign in" });
+const manageLogin = el("a", { class: "inline-link profile-login-control", href: "/account/", text: "Sign in" });
 document.querySelector("#profile-form .dialog-actions").append(manageLogin);
 
 function renderSignIn() {
   const account = state.account;
   manageLogin.textContent = account ? "Account & sign out" : "Sign in";
-  if (account) { manageLogin.removeAttribute("data-signin"); manageLogin.removeAttribute("aria-disabled"); manageLogin.classList.remove("is-disabled"); manageLogin.href = "/account.html"; }
+  if (account) { manageLogin.removeAttribute("data-signin"); manageLogin.removeAttribute("aria-disabled"); manageLogin.classList.remove("is-disabled"); manageLogin.href = "/account/"; }
   else manageLogin.setAttribute("data-signin", "");
   syncSignInLinks();
 }
@@ -200,7 +200,7 @@ sessionReady.then(() => {
   if (result === "failed") { notify("Sign-in didn't complete. Try again."); return; }
   if (result === "unavailable") { notify("Sign-in is temporarily unavailable. Try again in a little while."); return; }
   if (result !== "success") return;
-  if (state.account && !state.profile && location.pathname !== "/account.html" && location.pathname !== "/services.html") {
+  if (state.account && !state.profile && location.pathname !== "/account/" && location.pathname !== "/services/") {
     openJoin();
   } else notify("You are signed in. Your profile and spaces are ready.");
 });

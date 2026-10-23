@@ -14,7 +14,7 @@ async function setup(options = {}) {
   const idp = createIdp({ issuer, clientId: "portal", clientSecret, siteUrl, audience, request: fake.request, ...options });
   return { fake, idp };
 }
-async function signIn(fake, idp, claims = {}, { returnTo = "/account.html", tamper } = {}) {
+async function signIn(fake, idp, claims = {}, { returnTo = "/account/", tamper } = {}) {
   const { url, transaction } = await idp.beginLogin({ returnTo });
   let callback = fake.authorize(url, claims);
   if (tamper) callback = tamper(callback);
@@ -133,7 +133,7 @@ test("bearer: after a rotation a new kid is refetched 5 s after the last JWKS fe
 
 test("beginLogin builds a code + PKCE S256 request with state, nonce and the openid profile email scopes", async () => {
   const { idp } = await setup({ now: () => 1234 });
-  const { url, transaction } = await idp.beginLogin({ returnTo: "/explore.html?q=voice" });
+  const { url, transaction } = await idp.beginLogin({ returnTo: "/explore/?q=voice" });
   const parsed = new URL(url);
   assert.equal(parsed.origin + parsed.pathname, issuer + "/authorize");
   const params = parsed.searchParams;
@@ -148,7 +148,7 @@ test("beginLogin builds a code + PKCE S256 request with state, nonce and the ope
   assert.equal(params.has("code_verifier"), false);
   assert.ok(!url.includes(transaction.verifier));
   assert.deepEqual(Object.keys(transaction).sort(), ["createdAt", "id", "nonce", "returnTo", "state", "verifier"]);
-  assert.equal(transaction.returnTo, "/explore.html?q=voice");
+  assert.equal(transaction.returnTo, "/explore/?q=voice");
   assert.equal(transaction.createdAt, 1234);
   for (const name of ["id", "state", "nonce", "verifier"]) assert.ok(transaction[name].length >= 32, name);
   assert.notEqual(transaction.id, transaction.state);
