@@ -10,7 +10,7 @@ export function createPanel(doc = document) {
   const roomRows = new Map();
   let signedIn = false, canDecorate = false, decorating = false;
   const syncDecor = () => { $("#stoa-decor-open").hidden = !canDecorate || decorating; };
-  const handlers = { go() {}, say() { return false; }, topic() {}, leave() {}, start() {}, signin() {}, decorate() {}, manage() {}, makeHost() {}, remove() {} };
+  const handlers = { go() {}, say() { return false; }, topic() {}, leave() {}, start() {}, decorate() {}, manage() {}, makeHost() {}, remove() {} };
   sayForm.addEventListener("submit", (event) => { event.preventDefault(); if (handlers.say(sayInput.value)) sayInput.value = ""; });
   topicForm.addEventListener("submit", (event) => { event.preventDefault(); handlers.topic(topicForm.elements.topic.value, topicForm.elements.tags.value); });
   $("#stoa-leave").addEventListener("click", () => handlers.leave());
@@ -18,7 +18,6 @@ export function createPanel(doc = document) {
   $("#stoa-new").addEventListener("click", () => handlers.start());
   $("#stoa-decor-open").addEventListener("click", () => handlers.decorate());
   $("#stoa-manage").addEventListener("click", () => handlers.manage());
-  signinButton.addEventListener("click", () => handlers.signin());
   return {
     // The Decorate button is for hosts, and hidden while the editor is open.
     decorating(on) { decorating = Boolean(on); syncDecor(); },

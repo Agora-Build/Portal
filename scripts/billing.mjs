@@ -82,14 +82,14 @@ export function createBilling(store, config = billingConfig(), { stripe = config
       });
       if (order.url && order.expiresAt > now()) return { url: order.url };
       try {
-        const session = await stripe.checkout.sessions.create({ mode: product.plan ? "subscription" : "payment", customer, line_items: [{ price: order.priceId, quantity: 1 }], client_reference_id: userId, metadata: { portal_order_id: order.id, portal_user_id: userId }, ...(product.plan ? { subscription_data: { metadata: { portal_user_id: userId, portal_order_id: order.id } } } : { payment_intent_data: { metadata: { portal_user_id: userId, portal_order_id: order.id } } }), success_url: config.origin + "/account.html?checkout=success", cancel_url: config.origin + "/account.html?checkout=cancelled", expires_at: Math.floor(order.expiresAt / 1000) }, { idempotencyKey: "portal-checkout:" + order.id });
+        const session = await stripe.checkout.sessions.create({ mode: product.plan ? "subscription" : "payment", customer, line_items: [{ price: order.priceId, quantity: 1 }], client_reference_id: userId, metadata: { portal_order_id: order.id, portal_user_id: userId }, ...(product.plan ? { subscription_data: { metadata: { portal_user_id: userId, portal_order_id: order.id } } } : { payment_intent_data: { metadata: { portal_user_id: userId, portal_order_id: order.id } } }), success_url: config.origin + "/account/?checkout=success", cancel_url: config.origin + "/account/?checkout=cancelled", expires_at: Math.floor(order.expiresAt / 1000) }, { idempotencyKey: "portal-checkout:" + order.id });
         await store.transaction((state) => { const saved = state.orders.find((value) => value.id === order.id); saved.stripeId = session.id; saved.url = session.url; });
         return { url: session.url };
       } catch { throw new AppError(503, "Checkout could not be created. Retry with the same request key."); }
     },
     async manage(userId) {
       ready(); const customer = await customerFor(userId);
-      const session = await stripe.billingPortal.sessions.create({ customer, return_url: config.origin + "/account.html" });
+      const session = await stripe.billingPortal.sessions.create({ customer, return_url: config.origin + "/account/" });
       return { url: session.url };
     },
     verify(payload, signature) {

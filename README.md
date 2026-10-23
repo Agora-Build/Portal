@@ -32,6 +32,8 @@ Without `DATABASE_URL`, state is stored in `/app/.data`. Mount a volume there so
 
 ## Pages and data
 
+Each page is served at a clean address ending in `/`: `/` (home), `/explore/`, `/stoa/`, `/radar/`, `/services/` and `/account/`, from the matching `<name>.html`. `/<name>` and the old `/<name>.html` redirect there with `308`, keeping the query string; other names stay `404`.
+
 - `index.html` / `people.js`: people discovery, skills, natural-language search, and public profiles.
 - `activity.js` / `scripts/activity.mjs`: public GitHub events and actual community actions, with timestamps and source links.
 - `explore.html` / `explore.js`: 16 verified GitHub projects, categories, search, and sorting.
@@ -61,7 +63,7 @@ Joining the foundry and changing an intent also produce public activity entries.
 
 Joining requires a name, bio, skills, a public contact link, and a real intent. Profiles are public. Signing in creates a private account first; nothing is published until the person supplies their intent and saves a profile. Signing in with the same Agora Build account on another device restores the same profile, space ownership, and private radar.
 
-The sign-in dialog has one "Sign in" button, which goes to auth.agora.build; GitHub, Google, and any later logins are chosen there, and linked logins, devices, and "sign out everywhere" are managed on the IdP's account page ("Manage sign-in"). The account ID is the IdP's `acct_…` ID, the same in every Agora Build app. A browser-only profile that signs in is kept by its account when the account has none yet. Account sessions last 30 days; signing out ends both the portal session and the IdP session, and the IdP's back-channel logout ends portal sessions too. Emails and session hashes stay private. Removing a public profile also removes its radar and owned spaces, while the private account remains available to start a new profile.
+Every "Sign in" link goes straight to auth.agora.build (`/auth/login?returnTo=<this page>`), one step with no dialog in between. Signed out, the account page's "01 / Identity" card is the sign-in, with "Continue with this browser" for a browser-only profile; the header's "Take a seat" and the Stoa's "Sign in to walk and talk" send visitors there (`/account/?returnTo=<this page>`), and a browser-only profile saved there returns to that same-site page. GitHub, Google, and any later logins are chosen on auth.agora.build, and linked logins, devices, and "sign out everywhere" are managed on the IdP's account page ("Manage sign-in"). The account ID is the IdP's `acct_…` ID, the same in every Agora Build app. A browser-only profile that signs in is kept by its account when the account has none yet. Account sessions last 30 days; signing out ends both the portal session and the IdP session, and the IdP's back-channel logout ends portal sessions too. Emails and session hashes stay private. Removing a public profile also removes its radar and owned spaces, while the private account remains available to start a new profile.
 
 "Continue with this browser" is still available for looking around: walking the Stoa, appearing on the radar, and keeping a public profile. Its editing access belongs to that browser; clearing the cookie loses access. Credits, services, billing, Agora Console, and owning spaces need a signed-in account. Public GitHub contributor snapshots are not authenticated accounts.
 

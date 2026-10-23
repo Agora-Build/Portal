@@ -50,7 +50,7 @@ const cookieNamed = (response, name) => cookies(response).find((line) => line.st
 const pair = (line) => line.split(";")[0];
 
 // Runs /auth/login → the stand-in IdP's /authorize → /auth/callback, as a browser would.
-async function browserSignIn(app, { claims = {}, cookie, returnTo = "/account.html" } = {}) {
+async function browserSignIn(app, { claims = {}, cookie, returnTo = "/account/" } = {}) {
   const login = await call(app.base, "/auth/login?returnTo=" + encodeURIComponent(returnTo), { cookie });
   assert.equal(login.status, 303);
   const transaction = cookieNamed(login, "portal_auth");
@@ -99,7 +99,7 @@ test("over https the transaction cookie is __Host- prefixed and Secure", async (
 
 test("returnTo must pass the same-site path allowlist; /oauth/authorize is no longer allowed", async (t) => {
   const app = await start(t);
-  for (const [returnTo, expected] of [["https://evil.example/", "/"], ["//evil.example", "/"], ["/oauth/authorize?client_id=x", "/"], ["/scripts/serve.mjs", "/"], ["/radar.html?signin=success#top", "/radar.html#top"], ["/stoa/", "/stoa/"]]) {
+  for (const [returnTo, expected] of [["https://evil.example/", "/"], ["//evil.example", "/"], ["/oauth/authorize?client_id=x", "/"], ["/scripts/serve.mjs", "/"], ["/radar/?signin=success#top", "/radar/#top"], ["/stoa/", "/stoa/"]]) {
     await call(app.base, "/auth/login?returnTo=" + encodeURIComponent(returnTo));
     const saved = (await app.store.snapshot()).authTransactions.at(-1);
     assert.equal(saved.returnTo, expected, returnTo);
@@ -108,8 +108,8 @@ test("returnTo must pass the same-site path allowlist; /oauth/authorize is no lo
 
 test("sign-in is unavailable, not broken, while the IdP is unconfigured or unreachable", async (t) => {
   const missing = await start(t, { idp: null });
-  const login = await call(missing.base, "/auth/login?returnTo=%2Fexplore.html");
-  assert.deepEqual([login.status, login.headers.get("location")], [303, "/explore.html?signin=unavailable"]);
+  const login = await call(missing.base, "/auth/login?returnTo=%2Fexplore%2F");
+  assert.deepEqual([login.status, login.headers.get("location")], [303, "/explore/?signin=unavailable"]);
   assert.equal((await call(missing.base, "/")).status, 200, "static pages still work");
   assert.equal((await call(missing.base, "/api/auth/config")).status, 200);
   assert.deepEqual(await (await call(missing.base, "/api/auth/config")).json(), { issuer: null, accountUrl: null });
@@ -156,9 +156,9 @@ test("login is rate-limited per IP at 20 a minute, before any transaction is sto
 test("login → callback → /api/me signs the browser in with the IdP's name, picture and verified email", async (t) => {
   const app = await start(t);
   const sub = app.fake.accountId();
-  const result = await browserSignIn(app, { claims: { sub, name: "Ada Builder", email: "Ada@Example.com", email_verified: true }, returnTo: "/account.html#credits" });
+  const result = await browserSignIn(app, { claims: { sub, name: "Ada Builder", email: "Ada@Example.com", email_verified: true }, returnTo: "/account/#credits" });
   assert.equal(result.back.status, 303);
-  assert.equal(result.location, "/account.html?signin=success#credits");
+  assert.equal(result.location, "/account/?signin=success#credits");
   assert.match(cookieNamed(result.back, "house_session"), /HttpOnly; SameSite=Lax; Path=\/; Max-Age=2592000$/);
   assert.match(cookieNamed(result.back, "portal_auth"), /^portal_auth=; .*Max-Age=0/);
   const me = await (await call(app.base, "/api/me", { cookie: result.cookie })).json();
@@ -180,27 +180,27 @@ test("an unverified email is not stored, and a sign-in without a picture keeps t
 
 test("callback failures redirect with ?signin=failed, create no session, clear the cookie and log only the reason", async (t) => {
   const app = await start(t);
-  const check = async (response, label, returnTo = "/account.html") => {
+  const check = async (response, label, returnTo = "/account/") => {
     assert.equal(response.status, 303, label);
     assert.equal(response.headers.get("location"), returnTo + "?signin=failed", label);
     assert.equal(cookieNamed(response, "house_session"), undefined, label);
     assert.match(cookieNamed(response, "portal_auth") || "", /^portal_auth=; .*Max-Age=0/, label);
   };
   // No transaction cookie at all.
-  const login = await call(app.base, "/auth/login?returnTo=%2Faccount.html");
+  const login = await call(app.base, "/auth/login?returnTo=%2Faccount%2F");
   const callback = new URL(app.fake.authorize(login.headers.get("location")));
   await check(await call(app.base, callback.pathname + callback.search), "no cookie", "/");
   // The IdP returned an error.
-  const errored = await call(app.base, "/auth/login?returnTo=%2Faccount.html");
+  const errored = await call(app.base, "/auth/login?returnTo=%2Faccount%2F");
   const state = new URL(errored.headers.get("location")).searchParams.get("state");
   await check(await call(app.base, "/auth/callback?error=access_denied&state=" + state, { cookie: pair(cookieNamed(errored, "portal_auth")) }), "idp error");
   // A replayed callback finds its transaction already consumed.
   const first = await browserSignIn(app);
-  assert.equal(first.location, "/account.html?signin=success");
+  assert.equal(first.location, "/account/?signin=success");
   const replay = new URL(app.fake.authorize(first.login.headers.get("location")));
   await check(await call(app.base, replay.pathname + replay.search, { cookie: pair(first.transaction) }), "replay", "/");
   // A wrong state with a live transaction.
-  const other = await call(app.base, "/auth/login?returnTo=%2Faccount.html");
+  const other = await call(app.base, "/auth/login?returnTo=%2Faccount%2F");
   const forged = new URL(app.fake.authorize(other.headers.get("location")));
   forged.searchParams.set("state", "forged-state");
   await check(await call(app.base, forged.pathname + forged.search, { cookie: pair(cookieNamed(other, "portal_auth")) }), "state");

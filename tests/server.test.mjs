@@ -32,7 +32,7 @@ before(async () => { temporary = await mkdtemp(resolve(tmpdir(), "agora-house-te
 after(async () => { await close(server); await rm(temporary, { recursive: true, force: true }); });
 
 test("six pages, internal links, assets, and section anchors load", async () => {
-  for (const page of ["/", "/explore.html", "/services.html", "/radar.html", "/account.html"]) {
+  for (const page of ["/", "/explore/", "/services/", "/radar/", "/account/"]) {
     const response = await request(page);
     assert.equal(response.status, 200);
     assert.match(response.headers.get("content-type"), /text\/html/);
@@ -41,6 +41,35 @@ test("six pages, internal links, assets, and section anchors load", async () => 
     for (const link of links) assert.equal((await fetch(new URL(link, origin + page))).status, 200, link);
     for (const [, target] of html.matchAll(/href="#([^"]+)"/g)) assert.ok(html.includes('id="' + target + '"'), target);
   }
+});
+test("pages live at clean /name/ URLs; /name and /name.html redirect there with 308, keeping the query", async () => {
+  for (const name of ["account", "explore", "services", "radar"]) {
+    const page = await request("/" + name + "/");
+    assert.equal(page.status, 200, name);
+    assert.match(page.headers.get("content-type"), /text\/html/);
+    const html = await page.text();
+    // Every internal link and asset is absolute and served directly from the page at /name/, with no redirect.
+    for (const [, link] of html.matchAll(/(?:src|href)="([^"#]+)"/g)) {
+      if (link.startsWith("https://")) continue;
+      assert.ok(link.startsWith("/"), name + " " + link + " is absolute");
+      assert.equal((await fetch(new URL(link, origin + "/" + name + "/"), { redirect: "manual" })).status, link.startsWith("/auth/login") ? 303 : 200, name + " " + link);
+    }
+    for (const old of ["/" + name, "/" + name + ".html"]) {
+      const moved = await fetch(origin + old + "?connected=agora&x=1", { redirect: "manual" });
+      assert.deepEqual([moved.status, moved.headers.get("location")], [308, "/" + name + "/?connected=agora&x=1"], old);
+    }
+  }
+  for (const [old, clean] of [["/index.html", "/"], ["/index", "/"], ["/stoa", "/stoa/"], ["/stoa.html?x=1", "/stoa/?x=1"]]) {
+    const moved = await fetch(origin + old, { redirect: "manual" });
+    assert.deepEqual([moved.status, moved.headers.get("location")], [308, clean], old);
+  }
+  for (const path of ["/unknown", "/unknown/", "/unknown.html", "/account//", "/account/x", "/Account/", "/styles.css/", "/meetings", "/account.js/"]) assert.equal((await fetch(origin + path, { redirect: "manual" })).status, 404, path);
+  assert.equal((await fetch(origin + "/styles.css", { redirect: "manual" })).status, 200, "assets are not redirected");
+  assert.equal((await fetch(origin + "/api/projects", { redirect: "manual" })).status, 200, "/api is untouched");
+  assert.equal((await fetch(origin + "/api", { redirect: "manual" })).status, 404, "/api is not a page");
+  const login = await fetch(origin + "/auth/login?returnTo=%2Faccount.html", { redirect: "manual" });
+  assert.deepEqual([login.status, login.headers.get("location")], [303, "/account/?signin=unavailable"], "/auth is untouched and an old returnTo comes back clean");
+  assert.equal((await fetch(origin + "/connect/agora", { redirect: "manual" })).headers.get("location"), "/auth/login?returnTo=%2Faccount%2F", "/connect is untouched");
 });
 test("only allowlisted public files are served", async () => {
   for (const path of ["/AGENTS.md", "/README.md", "/package.json", "/scripts/serve.mjs", "/.env", "/.env.example", "/.data/community.json", "/data/people.json", "/missing", "/%2e%2e/package.json"]) assert.equal((await request(path)).status, 404, path);
@@ -220,7 +249,7 @@ test("production output includes six pages, platform backend, seed data, and no 
   for (const file of [".env", ".data/community.json", "scripts/auth.mjs", "scripts/identity.mjs"]) await assert.rejects(readFile(resolve(root, "dist", file)), { code: "ENOENT" });
   const built = await start({}, resolve(root, "dist"));
   try {
-    assert.equal((await request("/account.html", { base: built.url })).status, 200);
+    assert.equal((await request("/account/", { base: built.url })).status, 200);
     assert.equal((await request("/assets/agora-rtc.js", { base: built.url })).status, 200);
     assert.equal((await request("/assets/agora-rtm.js", { base: built.url })).status, 200);
     for (const file of ["meetings.html", "meetings.js", "call.js"]) await assert.rejects(readFile(resolve(root, "dist", file)), { code: "ENOENT" });

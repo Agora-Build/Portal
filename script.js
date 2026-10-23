@@ -42,55 +42,51 @@ export async function refreshSession() {
 }
 let afterJoin;
 state.authConfig = null;
-const signInButton = el("a", { class: "button login-start", href: "/auth/login", text: "Sign in" });
-signInButton.addEventListener("click", (event) => {
-  event.preventDefault();
-  if (signInButton.getAttribute("aria-disabled") === "true") return;
-  const url = new URL("/auth/login", location.origin);
-  url.searchParams.set("returnTo", location.pathname + location.search);
-  location.assign(url.href);
-});
-const loginStatus = el("p", { class: "login-status", role: "status", text: "Checking sign-in..." });
-const guest = el("button", { class: "inline-link login-guest", type: "button", text: "Continue with this browser", onclick: () => { loginDialog.close(); openJoin(afterJoin, true); } });
-const accountLink = el("a", { class: "inline-link", href: "/account.html", text: "Account, membership & credits" });
-const signOut = el("button", { class: "button button-secondary", type: "button", text: "Sign out", onclick: async () => {
-  signOut.disabled = true;
-  try {
-    const result = await api("/api/auth/logout", { method: "POST" });
-    if (result.endSessionUrl) { location.assign(result.endSessionUrl); return; }
-    await refreshSession(); loginDialog.close(); notify("You are signed out. Your public profile and spaces remain available.");
-  } catch (error) { notify(error.message); }
-  finally { signOut.disabled = false; }
-} });
-const loginDialog = el("dialog", { id: "login-dialog", "aria-labelledby": "login-title" }, [
-  el("div", { class: "dialog-head" }, [el("span", { class: "kicker", text: "YOUR PLACE, ON EVERY DEVICE" }), el("button", { class: "close-button", type: "button", "data-close": "", "aria-label": "Close sign-in", text: "×" })]),
-  el("h2", { id: "login-title", text: "A seat at the workbench." }),
-  el("p", { class: "dialog-intro", text: "One Agora.Build account for your profile, services, subscription, and credits." }), signInButton, loginStatus, accountLink, signOut, guest,
-  el("p", { class: "form-note login-note", text: "Browser-only profiles stay linked to this browser. Sign in later to keep access. Your email and sign-in identity are never published." })
-]);
-document.body.append(loginDialog);
-const manageLogin = el("button", { class: "inline-link profile-login-control", type: "button", text: "Sign in", onclick: () => { document.querySelector("#join-dialog").close(); openSignIn(); } });
+// A same-site path ("/..." but never "//host" or a backslash trick), or null.
+export const samePath = (value) => typeof value === "string" && value.startsWith("/") && !value.startsWith("//") && !/[\\\r\n]/.test(value) ? value : null;
+// Where sign-in returns to: this page, or on the account page the page that sent the visitor there.
+export const returnTarget = () => (location.pathname === "/account/" && samePath(new URLSearchParams(location.search).get("returnTo"))) || location.pathname + location.search;
+// Sign in is one step: straight to auth.agora.build through /auth/login. The account page also offers the browser-only choice.
+export const signInHref = () => "/auth/login?returnTo=" + encodeURIComponent(returnTarget());
+export const seatHref = () => "/account/?returnTo=" + encodeURIComponent(location.pathname + location.search);
+const signInUnavailable = () => Boolean(state.authConfig) && !state.authConfig.issuer;
+export function signIn() {
+  if (signInUnavailable()) { notify("Sign-in is temporarily unavailable. Try again in a little while."); return; }
+  location.assign(signInHref());
+}
+// Links marked data-signin go to the IdP; data-signin="seat" goes to the account page, where a visitor can also continue with this browser.
+export function syncSignInLinks() {
+  for (const link of document.querySelectorAll("a[data-signin]")) {
+    const seat = link.dataset.signin === "seat";
+    link.href = seat ? seatHref() : signInHref();
+    const disabled = !seat && signInUnavailable();
+    if (disabled) link.setAttribute("aria-disabled", "true"); else link.removeAttribute("aria-disabled");
+    link.classList.toggle("is-disabled", disabled);
+  }
+}
+// The address can change without a reload (the Stoa rewrites it), so a link's returnTo is refreshed just before it is used.
+for (const type of ["pointerdown", "focusin"]) document.addEventListener(type, (event) => { if (event.target.closest?.("a[data-signin]")) syncSignInLinks(); }, true);
+document.addEventListener("click", (event) => { if (event.target.closest("a[data-signin][aria-disabled=true]")) event.preventDefault(); });
+const manageLogin = el("a", { class: "inline-link profile-login-control", href: "/account/", text: "Sign in" });
 document.querySelector("#profile-form .dialog-actions").append(manageLogin);
 
 function renderSignIn() {
   const account = state.account;
-  const available = Boolean(state.authConfig?.issuer);
   manageLogin.textContent = account ? "Account & sign out" : "Sign in";
-  guest.hidden = Boolean(account || state.profile);
-  signOut.hidden = !account;
-  accountLink.hidden = !account;
-  signInButton.hidden = Boolean(account);
-  signInButton.href = "/auth/login?returnTo=" + encodeURIComponent(location.pathname + location.search);
-  signInButton.setAttribute("aria-disabled", String(!available));
-  signInButton.classList.toggle("is-disabled", !available);
-  loginStatus.textContent = account ? "Signed in as " + (account.name || "your account") + "." : !state.authConfig ? "Checking sign-in..." : !available ? "Sign-in is temporarily unavailable." + (state.profile ? "" : " You can start with this browser.") : state.profile ? "Sign in to keep this profile and its rooms across devices." : "Sign in, or start with this browser.";
+  if (account) { manageLogin.removeAttribute("data-signin"); manageLogin.removeAttribute("aria-disabled"); manageLogin.classList.remove("is-disabled"); manageLogin.href = "/account/"; }
+  else manageLogin.setAttribute("data-signin", "");
+  syncSignInLinks();
 }
-export function openSignIn() { renderSignIn(); loginDialog.showModal(); }
 export const authConfigReady = api("/api/auth/config").catch(() => ({ issuer: null, accountUrl: null })).then((result) => { state.authConfig = result; renderSignIn(); return result; });
 
 export function openJoin(callback, browserOnly = false) {
   afterJoin = typeof callback === "function" ? callback : null;
-  if (!state.profile && !state.account && !browserOnly) { openSignIn(); return; }
+  if (!state.profile && !state.account && !browserOnly) {
+    // Not here yet: the account page offers Sign in and Continue with this browser.
+    const here = document.querySelector("#account-login:not([hidden])");
+    if (here) here.focus(); else location.assign(seatHref());
+    return;
+  }
   const form = document.querySelector("#profile-form");
   const person = state.profile;
   form.reset();
@@ -204,7 +200,7 @@ sessionReady.then(() => {
   if (result === "failed") { notify("Sign-in didn't complete. Try again."); return; }
   if (result === "unavailable") { notify("Sign-in is temporarily unavailable. Try again in a little while."); return; }
   if (result !== "success") return;
-  if (state.account && !state.profile && location.pathname !== "/account.html" && location.pathname !== "/services.html") {
+  if (state.account && !state.profile && location.pathname !== "/account/" && location.pathname !== "/services/") {
     openJoin();
   } else notify("You are signed in. Your profile and spaces are ready.");
 });

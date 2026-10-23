@@ -26,8 +26,8 @@ the IdP; linked logins, devices and "sign out everywhere" are managed at
 | `PORTAL_API_AUDIENCE` | The resource the Portal's APIs accept tokens for (default `https://api.agora.build`) |
 | `SITE_URL` | The Portal's public origin; the redirect URIs below are built from it |
 
-1. `GET /auth/login?returnTo=<path>` (the sign-in dialog's one "Sign in"
-   button) checks `returnTo` against the same-site path allowlist, stores the
+1. `GET /auth/login?returnTo=<path>` (every "Sign in" link on the site goes
+   here directly) checks `returnTo` against the same-site path allowlist, stores the
    transaction (state, nonce, PKCE verifier, `returnTo`) in the store for ten
    minutes, and sets an HttpOnly `__Host-portal_auth` cookie (`portal_auth` over
    plain http) naming it. Because transactions live in the store, any Portal
@@ -355,7 +355,7 @@ stores a transaction bound to the account, like sign-in, in an HttpOnly
 browser to Agora with scope `basic_info,console` and PKCE. The callback,
 `/connect/agora/callback`, refuses a transaction that belongs to another account,
 stores `{accessToken, refreshToken, expiresAt}` sealed, and redirects to
-`/account.html?connected=agora` (or `?connected=failed`).
+`/account/?connected=agora` (or `?connected=failed`).
 
 Register a dedicated, confidential Portal client with Agora's OAuth service and
 allow the redirect URI `<SITE_URL>/connect/agora/callback` (for production

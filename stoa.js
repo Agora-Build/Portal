@@ -1,4 +1,4 @@
-import { api, openSignIn, sessionReady, state } from "./script.js";
+import { api, sessionReady, signIn, state } from "./script.js";
 import { parseMap } from "./world/map.js";
 import { createEngine } from "./world/engine.js";
 import { createLive } from "./world/signaling.js";
@@ -103,7 +103,7 @@ panel.setPeople([], self.name);
 panel.canTalk(self.signedIn);
 let live = null, stage = null;
 const unavailable = "The Stoa view isn't available, so there's nothing to walk or talk in.";
-const startSpace = (prefill) => state.account ? spacesUi.openCreate(prefill) : (panel.say("Sign in to start a space."), openSignIn());
+const startSpace = (prefill) => state.account ? spacesUi.openCreate(prefill) : (panel.say("Sign in to start a space."), signIn());
 // Controls work even without the canvas: Go to explains where the door is, Sign in and Start a space still do their jobs.
 panel.on({
   go: (target) => {
@@ -128,8 +128,7 @@ panel.on({
     canvas.focus();
   },
   start: () => startSpace(),
-  manage: () => spaceId && spacesUi.openManage(spaceId),
-  signin: () => openSignIn()
+  manage: () => spaceId && spacesUi.openManage(spaceId)
 });
 // Your own spaces show on the plaza right away (with or without the canvas); ?start= (from the home page) opens the create dialog with that name.
 if (!spaceId && self.signedIn) { if (!engine) panel.showPlaza(); api("/api/spaces/mine").then((mine) => spacesUi.showMine(mine)).catch(() => {}); }

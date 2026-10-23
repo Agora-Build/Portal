@@ -280,7 +280,7 @@ export async function completeSignIn(browser, stack, page, user) {
 }
 
 // A fresh browser signs in to the Portal through the IdP as `user`.
-export async function portalSignIn(stack, user, { browser = createBrowser(stack), returnTo = "/account.html" } = {}) {
+export async function portalSignIn(stack, user, { browser = createBrowser(stack), returnTo = "/account/" } = {}) {
   const page = await browser.visit(stack.site + "/auth/login?returnTo=" + encodeURIComponent(returnTo));
   const done = page.location ? page : await completeSignIn(browser, stack, page, user);
   return { browser, page: done };

@@ -1,4 +1,4 @@
-import { api, el, state, notify, openSignIn, sessionReady, requestKey } from "./script.js";
+import { api, el, state, notify, sessionReady, signIn, requestKey } from "./script.js";
 const config = await api("/api/services").catch((error) => { notify(error.message); return null; });
 if (config) {
   for (const service of ["language", "speech"]) {
@@ -20,7 +20,7 @@ if (config) {
 document.querySelector("#llm-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   await sessionReady;
-  if (!state.account) { notify("Sign in to use credits."); openSignIn(); return; }
+  if (!state.account) { notify("Sign in to use credits."); signIn(); return; }
   const button = event.currentTarget.querySelector("[type=submit]");
   const output = document.querySelector("#llm-output");
   button.disabled = true;
@@ -33,7 +33,7 @@ let audioUrl;
 document.querySelector("#speech-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   await sessionReady;
-  if (!state.account) { notify("Sign in to use credits."); openSignIn(); return; }
+  if (!state.account) { notify("Sign in to use credits."); signIn(); return; }
   const form = event.currentTarget;
   const button = form.querySelector("[type=submit]");
   button.disabled = true;
