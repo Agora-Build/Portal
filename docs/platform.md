@@ -204,15 +204,28 @@ bearer token never falls back to the cookie. The token must be a JWT with `typ`
 `resource=<the Portal origin>` and the scopes below; see Auth's
 `docs/integrating.md` for the flows (web code + PKCE, native device code).
 
+**Apps call the versioned API, `<origin>/api/v1/...`** (for example
+`https://agora.build/api/v1/connections/agora/projects`), so an app needs only
+one base URL, the same one it requests tokens for. `/api/v1` holds exactly the
+routes in the table below, served by the same handlers as the browser's
+`/api/...`; any other `/api/v1` path is 404. An access token sent to an
+unversioned `/api/...` route in the table gets 404 naming its `/api/v1` path;
+the browser keeps using `/api/...` with its cookie (it may also use `/api/v1`).
+`v1` may gain routes and fields but never loses or renames any; a breaking
+change becomes `/api/v2`, with `v1` kept through a deprecation period.
+
+The table names each route by its path after `/api/v1` for apps and `/api` for
+the browser:
+
 | Route | Browser (cookie) | Bearer scope |
 | --- | --- | --- |
-| `GET /api/me` | account or guest | any (an `openid`-only token is enough) |
-| `GET /api/credits/balance`, `/api/credits/statement` | account | `credits` |
-| `POST /api/marketplaces/chat`, `/api/marketplaces/tts` | account (no guests) | `credits` |
-| `GET /api/connections`, `/api/connections/agora/projects`, `DELETE /api/connections/agora` | account | `agora:projects` |
-| `POST /api/connections/agora/certificate` | account | `agora:certificates` |
-| `POST /api/connections/agora/token` | account | `agora:tokens` |
-| `POST /api/platform/credits/reserve`, `/settle` | not accepted | `credits`, from a client in `PORTAL_BILLING_FILE` |
+| `GET /me` | account or guest | any (an `openid`-only token is enough) |
+| `GET /credits/balance`, `/credits/statement` | account | `credits` |
+| `POST /marketplaces/chat`, `/marketplaces/tts` | account (no guests) | `credits` |
+| `GET /connections`, `/connections/agora/projects`, `DELETE /connections/agora` | account | `agora:projects` |
+| `POST /connections/agora/certificate` | account | `agora:certificates` |
+| `POST /connections/agora/token` | account | `agora:tokens` |
+| `POST /platform/credits/reserve`, `/settle` | not accepted | `credits`, from a client in `PORTAL_BILLING_FILE` |
 | Billing account, checkout and manage | account | not accepted |
 | Stoa spaces (create, own, admin), profile, radar, signaling | account (spaces) or guest | not accepted |
 
@@ -245,7 +258,7 @@ as Atem's) is public, so any program can obtain tokens under it; never list one.
 billing is off (503) and the log says why.
 
 ```http
-POST /api/platform/credits/reserve
+POST /api/v1/platform/credits/reserve
 Authorization: Bearer <the person's access token for vox>
 Content-Type: application/json
 
@@ -255,7 +268,7 @@ Content-Type: application/json
 The answer is `{ id, status }`: `reserved` for a new hold, or, for a repeated
 `idempotencyKey`, the existing hold's `pending`, `captured` or `released`; a
 repeat never charges twice. Run the work only after `reserved`. Settle with
-`POST /api/platform/credits/settle` and `{ service, reservationId, outcome }`,
+`POST /api/v1/platform/credits/settle` and `{ service, reservationId, outcome }`,
 where `outcome` is `capture` or `release`. `units` defaults to 1;
 `idempotencyKey` is 16 to 120 characters of letters, digits, `:`, `_` and `-`.
 Other answers: 403 for a client that isn't listed, 422 for an unknown service or
@@ -442,14 +455,14 @@ reach the same routes with `agora:projects`, `agora:certificates` and
 
 ### Agora Tokens
 
-`POST /api/connections/agora/token` signs an Agora RTC or RTM token for one of
+`POST /api/v1/connections/agora/token` (apps; the browser uses `/api/...`) signs an Agora RTC or RTM token for one of
 the account's projects on agora.build, so an app never needs the App
 Certificate. The certificate comes from the BFF project list for this request
 and is neither cached nor returned. Rate limit: 60 a minute per account.
 
 | Field | Meaning |
 | --- | --- |
-| `projectId` | A `projectId` from `GET /api/connections/agora/projects` |
+| `projectId` | A `projectId` from `GET /api/v1/connections/agora/projects` |
 | `type` | `rtc` or `rtm` |
 | `channel` | RTC: 1 to 64 bytes |
 | `uid` or `account` | RTC: a number 0 to 4294967295 (0 means any user, the default) or a 1 to 255 byte string account, not both |

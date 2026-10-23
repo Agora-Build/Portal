@@ -62,7 +62,10 @@ const insufficientScope = (scope) => Object.assign(new AppError(403, "This acces
 const browserOnly = () => new AppError(403, "This feature needs a browser session on the Agora.Build website; access tokens are not accepted here.");
 // Reads that need no caller; a valid access token is allowed on them but changes nothing.
 const publicRoutes = new Set(["GET /api/people", "GET /api/activity", "GET /api/projects", "GET /api/marketplaces", "GET /api/billing/catalog", "GET /api/auth/config", "POST /api/people/search", "GET /api/themes"]);
-// Routes that accept an auth.agora.build access token (each checks its own scope).
+// Routes that accept an auth.agora.build access token (each checks its own scope). Apps call them under /api/v1/, the
+// versioned API (https://agora.build/api/v1/...): v1 may gain fields but never loses or renames any; a breaking change
+// becomes /api/v2/. The browser calls the same handlers at /api/..., which carry no version and accept no tokens here.
+export const API_V1 = "/api/v1/";
 const bearerRoutes = new Set(["GET /api/me", "GET /api/credits/balance", "GET /api/credits/statement", "POST /api/marketplaces/chat", "POST /api/marketplaces/tts", "GET /api/connections", "GET /api/connections/agora/projects", "POST /api/connections/agora/certificate", "POST /api/connections/agora/token", "DELETE /api/connections/agora", "POST /api/platform/credits/reserve", "POST /api/platform/credits/settle"]);
 // Routes that exist for the browser session only; a bearer token there gets 403, and on any other path 404.
 const browserRoutes = new Set(["GET /api/billing/account", "POST /api/billing/checkout", "POST /api/billing/manage", "POST /api/profile", "PUT /api/profile", "DELETE /api/profile", "GET /api/radar", "POST /api/radar", "POST /api/auth/logout", "POST /api/signaling/token"]);
@@ -153,7 +156,10 @@ export function createAppServer(directory = root, options = {}) {
   const server = createServer(async (request, response) => {
     try {
       const requestUrl = new URL(request.url, "http://localhost");
-      const path = requestUrl.pathname;
+      // /api/v1/<route> is the versioned app API: only the bearer routes exist there, served by the /api/<route> handlers.
+      const versioned = requestUrl.pathname.startsWith(API_V1);
+      const path = versioned ? "/api/" + requestUrl.pathname.slice(API_V1.length) : requestUrl.pathname;
+      if (versioned && !bearerRoutes.has(request.method + " " + path)) throw new AppError(404, "This API was not found. See https://github.com/Agora-Build/Portal/blob/main/docs/platform.md for the /api/v1 routes.");
       const bearer = request.headers.authorization?.startsWith("Bearer ") ? request.headers.authorization.slice(7).trim() : "";
       const secure = siteUrl.startsWith("https:") || Boolean(request.socket.encrypted);
       const sessionName = secure ? "__Host-house_session" : "house_session";
@@ -277,6 +283,7 @@ export function createAppServer(directory = root, options = {}) {
         const token = caller ? "" : browserToken;
         const route = request.method + " " + path;
         if (caller && !publicRoutes.has(route) && !bearerRoutes.has(route)) throw browserRoute(route, path) ? browserOnly() : new AppError(404, "This page or service was not found.");
+        if (caller && !versioned && bearerRoutes.has(route)) throw new AppError(404, "Access tokens use the versioned API: " + API_V1 + path.slice("/api/".length) + ".");
         // Only after the route gate, so a token that reaches a 404, browser-only or public route creates nothing.
         if (caller && bearerRoutes.has(route)) caller.account = await store.ensureAccount(caller.sub);
         const scoped = (scope) => { if (!caller.scopes.includes(scope)) throw insufficientScope(scope); return caller.sub; };
