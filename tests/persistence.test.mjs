@@ -15,7 +15,7 @@ test("two PostgreSQL-backed server instances preserve identities and serialize c
   const storeA = createStore(new URL("../data/people.json", import.meta.url), "unused", { persistence: persistenceA });
   const storeB = createStore(new URL("../data/people.json", import.meta.url), "unused", { persistence: persistenceB });
   try {
-    const identity = { sub: "acct_" + "D".repeat(26), name: "Database builder", idToken: "database-id-token" };
+    const identity = { sub: "ab" + "D".repeat(26), name: "Database builder", idToken: "database-id-token" };
     // Initialize before launching parallel creators; schema DDL is a deployment operation.
     await persistenceA.read(); await persistenceB.read();
     const [signedA, signedB] = await Promise.all([storeA.signIn({ ...identity, sid: "a" }), storeB.signIn({ ...identity, sid: "b" })]);

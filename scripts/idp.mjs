@@ -6,7 +6,7 @@ import { createLocalJWKSet, createRemoteJWKSet, customFetch, errors, jwtVerify }
 
 export const DEFAULT_AUDIENCE = "https://api.agora.build";
 export const LOGOUT_EVENT = "http://schemas.openid.net/event/backchannel-logout";
-const ACCOUNT_ID = /^acct_[0-9A-HJKMNP-TV-Z]{26}$/;
+const ACCOUNT_ID = /^ab[0-9A-HJKMNP-TV-Z]{26}$/;
 const TRANSACTION_LIFETIME = 600000;
 const DISCOVERY_RETRY = 30000;
 const SCOPE = "openid profile email";

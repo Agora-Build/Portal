@@ -1,6 +1,6 @@
 import { AppError } from "../store.mjs";
 
-const SPACE = /^\/api\/spaces\/(plaza|lot-[a-z0-9-]{2,40}|[a-f0-9-]{36})(?:\/(enter|leave|heartbeat|topic|host|decor|remove|invitations|members|rtc-token)(?:\/(member:[a-f0-9-]{36}|acct_[0-9A-HJKMNP-TV-Z]{26}))?)?$/;
+const SPACE = /^\/api\/spaces\/(plaza|lot-[a-z0-9-]{2,40}|[a-f0-9-]{36})(?:\/(enter|leave|heartbeat|topic|host|decor|remove|invitations|members|rtc-token)(?:\/(member:[a-f0-9-]{36}|ab[0-9A-HJKMNP-TV-Z]{26}))?)?$/;
 
 // Maps HTTP requests to the spaces service. Returns null when the request is not a spaces route.
 export async function handleSpaces({ path, method, url, token, read: readBody, spaces, worlds, themes, limit, ip }) {

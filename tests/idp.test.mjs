@@ -231,7 +231,8 @@ test("callback validation: the ID token's nonce, iss, aud, expiry, signature, al
     "forged signature": { key: { kid: fake.keys[0].kid, privateKey: stranger.privateKey } },
     "HS256": { alg: "HS256" },
     "alg none": { alg: "none" },
-    "sub not an account ID": { claims: { sub: "github|12345" } }
+    "sub not an account ID": { claims: { sub: "github|12345" } },
+    "sub in the old acct_ format": { claims: { sub: "acct_01M5KE40Z7VPK97NJS49W8QQSD" } }
   };
   for (const [name, { claims = {}, omit, ...opts }] of Object.entries(cases)) {
     fake.tokenResponse(async ({ grant }) => ({
@@ -306,6 +307,7 @@ test("bearer: wrong typ, alg none or HS256, wrong iss or aud, expiry, forged sig
     "no exp": fake.issueAccessToken({}, { omit: ["exp"] }),
     "no sub": fake.issueAccessToken({}, { omit: ["sub"] }),
     "sub not an account ID": fake.issueAccessToken({ sub: "user-1" }),
+    "sub in the old acct_ format": fake.issueAccessToken({ sub: "acct_01M5KE40Z7VPK97NJS49W8QQSD" }),
     "forged signature": fake.issueAccessToken({}, { key: { kid: fake.keys[0].kid, privateKey: stranger.privateKey } }),
     "garbage": Promise.resolve("not.a.jwt"),
     "empty": Promise.resolve("")
@@ -426,6 +428,7 @@ test("back-channel logout: forged, misaddressed, eventless, nonce-bearing and ot
     "access token": fake.issueAccessToken({ aud: "portal", events: { [LOGOUT_EVENT]: {} }, sid: "s" }),
     "ID token": fake.issueIdToken({ events: { [LOGOUT_EVENT]: {} }, sid: "s" }),
     "sub not an account ID": fake.issueLogoutToken({ sub: "user-1" }),
+    "sub in the old acct_ format": fake.issueLogoutToken({ sub: "acct_01M5KE40Z7VPK97NJS49W8QQSD" }),
     "garbage": Promise.resolve("garbage")
   };
   for (const [name, pending] of Object.entries(tokens)) {
@@ -442,7 +445,7 @@ test("warm-up fetches discovery and the JWKS, so the first logout token is verif
   assert.deepEqual([fake.counts.discovery, fake.counts.jwks], [1, 1]);
   const attempts = fake.counts.attempts;
   const logout = await idp.verifyLogoutToken(await fake.issueLogoutToken());
-  assert.match(logout.sub, /^acct_/);
+  assert.match(logout.sub, /^ab[0-9A-HJKMNP-TV-Z]{26}$/);
   assert.equal(fake.counts.attempts, attempts, "no discovery or JWKS request while verifying");
 });
 test("a failed warm-up reports its reason only", async () => {
@@ -460,5 +463,5 @@ test("a trailing slash on AUTH_ISSUER is stripped, so tokens from the IdP's exac
   assert.equal(idp.config.issuer, issuer);
   assert.equal(idp.config.accountUrl, issuer + "/account");
   assert.equal(await idp.available(), true);
-  assert.match((await idp.verifyAccessToken(await fake.issueAccessToken())).sub, /^acct_/);
+  assert.match((await idp.verifyAccessToken(await fake.issueAccessToken())).sub, /^ab[0-9A-HJKMNP-TV-Z]{26}$/);
 });

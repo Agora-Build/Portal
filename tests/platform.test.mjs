@@ -14,7 +14,7 @@ let temp;
 before(async () => { temp = await mkdtemp(resolve(tmpdir(), "agora-platform-")); });
 after(async () => { await rm(temp, { recursive: true, force: true }); });
 const newStore = (options) => createStore(new URL("../data/people.json", import.meta.url).pathname, resolve(temp, randomBytes(8).toString("hex") + ".json"), { log: () => {}, ...options });
-const subjects = { "stable-builder": "acct_" + "1".repeat(26), other: "acct_" + "2".repeat(26), "without-agora": "acct_" + "3".repeat(26), "other-agora": "acct_" + "4".repeat(26) };
+const subjects = { "stable-builder": "ab" + "1".repeat(26), other: "ab" + "2".repeat(26), "without-agora": "ab" + "3".repeat(26), "other-agora": "ab" + "4".repeat(26) };
 // Signs in an auth.agora.build subject; the result keeps the old { token, account: { id } } shape these tests read.
 const signIn = async (store, subject = "stable-builder") => ({ ...(await store.signIn({ sub: subjects[subject], sid: "sid-" + subject, name: "Builder", idToken: "id-token" })), account: { id: subjects[subject] } });
 test("credit reservations serialize competing spends, preserve double-entry balance and reject parameter changes or another owner", async () => {

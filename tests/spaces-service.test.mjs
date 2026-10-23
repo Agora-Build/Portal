@@ -27,7 +27,7 @@ async function setup(t, { plazaCapacity, before, admins = [] } = {}) {
   const events = [];
   spaces.onEvents((list) => events.push(...list));
   const account = async (name, subject) => {
-    const login = await store.signIn({ sub: "acct_" + String(subject).padStart(26, "0"), sid: "sid-" + subject, name, idToken: "id-token" });
+    const login = await store.signIn({ sub: "ab" + String(subject).padStart(26, "0"), sid: "sid-" + subject, name, idToken: "id-token" });
     const { token } = await store.join(profile(name), login.token);
     const actor = await store.actor(token);
     return { token, id: actor.account.id, accountId: actor.account.id, memberId: actor.profile.id };
@@ -269,7 +269,7 @@ test("account-backed actors own, enter, sign tokens, and are blocked by both ids
   const admins = [];
   const { spaces, account } = await setup(t, { admins });
   const [owner, guest] = [await account("Acct Owner", 1), await account("Acct Guest", 2)];
-  assert.match(owner.id, /^acct_[0-9A-HJKMNP-TV-Z]{26}$/);
+  assert.match(owner.id, /^ab[0-9A-HJKMNP-TV-Z]{26}$/);
   const space = await spaces.create(owner.token, { title: "Account room", access: "open" });
   assert.equal(space.ownerId, owner.id);
   assert.deepEqual(space.members, [owner.id]);

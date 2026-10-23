@@ -2,12 +2,14 @@ import { createRtcClient, isScreen } from "../world/rtc-client.js";
 import { loadAgora } from "../world/sdk.js";
 
 // Calls inside rooms: native controls in the panel, video tiles over the map in the layout the theme chooses.
-// RTC uids start with the person's actor key (an account's acct_… ID, or a guest member's UUID), so tiles are named
-// and placed from presence.
-const ACCOUNT_UID = /^(acct_[0-9A-HJKMNP-TV-Z]{26})_/;
+// RTC uids are the person's actor key (an account's ab… ID, or a guest member's UUID), "_", 12 hex characters and an
+// optional "_screen", so tiles are named and placed from presence. An account ID is uppercase Crockford base32 and a
+// member UUID is lowercase hex with hyphens, so the two never overlap.
+const ACCOUNT_UID = /^(ab[0-9A-HJKMNP-TV-Z]{26})_[a-f0-9]{12}(?:_screen)?$/;
+const ACCOUNT_ID = /^ab[0-9A-HJKMNP-TV-Z]{26}$/;
 export const actorUuid = (uid) => ACCOUNT_UID.exec(String(uid))?.[1] || String(uid).split("_")[0];
-// The same key from a presence or profile ID: accounts are acct_… as they are, members are member:<uuid>.
-const actorKey = (id) => String(id).startsWith("acct_") ? String(id) : String(id).split(":")[1];
+// The same key from a presence or profile ID: accounts are ab… as they are, members are member:<uuid>.
+const actorKey = (id) => ACCOUNT_ID.test(String(id)) ? String(id) : String(id).split(":")[1];
 export function nameFor(uid, { people, self, snapshot }) {
   if (uid === snapshot.uid) return self.name + " (you)";
   if (uid === snapshot.screenUid) return "Your screen";

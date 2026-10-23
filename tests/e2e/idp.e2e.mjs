@@ -9,7 +9,7 @@ import { API, bearer, completeSignIn, createBrowser, eventually, interactionUid,
 const skip = await skipReason();
 if (skip) console.log("# Skipping the Portal ↔ auth.agora.build end-to-end suite: " + skip + ".");
 
-const ACCOUNT_ID = /^acct_[0-9A-HJKMNP-TV-Z]{26}$/;
+const ACCOUNT_ID = /^ab[0-9A-HJKMNP-TV-Z]{26}$/;
 const VOX_REDIRECT = "https://vox.test/callback";
 let lib;
 let stack;

@@ -7,8 +7,8 @@ export class AppError extends Error {
   constructor(status, message, details) { super(message); this.status = status; if (details) this.details = details; }
 }
 // Portal account IDs are the auth.agora.build subject.
-export const ACCOUNT_ID = /^acct_[0-9A-HJKMNP-TV-Z]{26}$/;
-export const STATE_VERSION = 2;
+export const ACCOUNT_ID = /^ab[0-9A-HJKMNP-TV-Z]{26}$/;
+export const STATE_VERSION = 3;
 const SESSION_LIFETIME = 30 * 86400000;
 const SESSIONS_PER_ACCOUNT = 20;
 const TRANSACTION_LIFETIME = 600000;
@@ -69,19 +69,17 @@ export function removeParticipants(state, ids) {
 }
 
 const plural = (count, word) => count + " " + word + (count === 1 ? "" : "s");
-// Version 2 starts empty: the Portal's own provider accounts, sessions, OAuth codes and grants, and pending links go,
-// with every ledger, billing and space row of those accounts. Guests' profiles, rooms and the radar stay.
-export function migrateState(state) {
+// Removes every account whose ID is not an auth.agora.build ID (ab followed by 26 Crockford base32 characters), with
+// its public profile and every space, order, ledger and billing row of those accounts. Shared by the migration steps.
+function removeForeignAccounts(state) {
   const removed = new Set((state.accounts || []).filter((account) => !ACCOUNT_ID.test(account?.id || "")).map((account) => account?.id));
   const isRemoved = (id) => typeof id === "string" && removed.has(id);
   // A removed account's public profile can no longer be signed in to, so it goes the way store.remove() takes a profile.
-  const orphans = new Set((state.people || []).filter((person) => isRemoved(person.accountId)).map((person) => person.id));
+  const linked = new Set((state.accounts || []).filter((account) => isRemoved(account?.id)).map((account) => account.profileId));
+  const orphans = new Set((state.people || []).filter((person) => isRemoved(person.accountId) || linked.has(person.id)).map((person) => person.id));
   const gone = (id) => typeof id === "string" && (removed.has(id) || orphans.has(id));
-  const counts = { accounts: removed.size, profiles: orphans.size, sessions: (state.sessions || []).length, codes: (state.authorizationCodes || []).length, grants: (state.grants || []).length, links: (state.pendingLinks || []).length, spaces: 0, orders: 0, entries: 0 };
+  const counts = { accounts: removed.size, profiles: orphans.size, spaces: 0, orders: 0, entries: 0 };
   state.accounts = (state.accounts || []).filter((account) => !gone(account?.id));
-  for (const account of state.accounts) { delete account.identities; delete account.sessionEpoch; delete account.contact; }
-  state.sessions = [];
-  delete state.authorizationCodes; delete state.grants; delete state.pendingLinks;
   state.spaces ||= []; state.spaceLeases ||= [];
   counts.spaces = removeParticipants(state, new Set([...removed, ...orphans])).spaces;
   const orders = state.orders || [];
@@ -105,6 +103,34 @@ export function migrateState(state) {
     if (book.reservations) book.reservations = book.reservations.filter((reservation) => !gone(reservation.userId));
     for (const key of Object.keys(book.debts || {})) if (gone(key)) delete book.debts[key];
   }
+  return { counts, removed };
+}
+
+// Version 2 starts empty: the Portal's own provider accounts, sessions, OAuth codes and grants, and pending links go,
+// with every ledger, billing and space row of those accounts. Guests' profiles, rooms and the radar stay.
+function toVersion2(state) {
+  const { counts } = removeForeignAccounts(state);
+  for (const account of state.accounts) { delete account.identities; delete account.sessionEpoch; delete account.contact; }
+  Object.assign(counts, { sessions: (state.sessions || []).length, codes: (state.authorizationCodes || []).length, grants: (state.grants || []).length, links: (state.pendingLinks || []).length });
+  state.sessions = [];
+  delete state.authorizationCodes; delete state.grants; delete state.pendingLinks;
+  return counts;
+}
+
+// Version 3 starts empty again because auth.agora.build account IDs changed from acct_<ULID> to ab<ULID>: every account
+// not in the new format goes, with its sessions and the same rows as in version 2. Accounts already in it stay.
+function toVersion3(state) {
+  const { counts, removed } = removeForeignAccounts(state);
+  const sessions = state.sessions || [];
+  state.sessions = sessions.filter((session) => !removed.has(session?.accountId));
+  return { ...counts, sessions: sessions.length - state.sessions.length, codes: 0, grants: 0, links: 0 };
+}
+
+// Brings a state of any earlier version to STATE_VERSION, and returns what each step removed, summed.
+export function migrateState(state) {
+  const steps = state.version === 2 ? [toVersion3] : [toVersion2, toVersion3];
+  const counts = { accounts: 0, profiles: 0, sessions: 0, codes: 0, grants: 0, links: 0, spaces: 0, orders: 0, entries: 0 };
+  for (const step of steps) for (const [key, value] of Object.entries(step(state))) counts[key] += value;
   state.version = STATE_VERSION;
   return counts;
 }
@@ -116,7 +142,7 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
     if (state.version !== STATE_VERSION) {
       const used = Object.keys(state).length > 0;
       const counts = migrateState(state);
-      if (used) log("Portal state moved to version 2 (sign-in through auth.agora.build): removed " + plural(counts.accounts, "account") + ", " + plural(counts.profiles, "account profile") + ", " + plural(counts.sessions, "session") + ", " + plural(counts.codes, "authorization code") + ", " + plural(counts.grants, "grant") + ", " + plural(counts.links, "pending link") + ", " + plural(counts.spaces, "space") + ", " + plural(counts.orders, "order") + " and " + counts.entries + (counts.entries === 1 ? " ledger entry" : " ledger entries") + "; kept " + plural((state.people || []).length, "profile") + " and " + plural((state.rooms || []).length, "room") + ".");
+      if (used) log("Portal state moved to version " + STATE_VERSION + " (auth.agora.build ab… account IDs): removed " + plural(counts.accounts, "account") + ", " + plural(counts.profiles, "account profile") + ", " + plural(counts.sessions, "session") + ", " + plural(counts.codes, "authorization code") + ", " + plural(counts.grants, "grant") + ", " + plural(counts.links, "pending link") + ", " + plural(counts.spaces, "space") + ", " + plural(counts.orders, "order") + " and " + counts.entries + (counts.entries === 1 ? " ledger entry" : " ledger entries") + "; kept " + plural((state.people || []).length, "profile") + " and " + plural((state.rooms || []).length, "room") + ".");
     }
     state.accounts ||= []; state.sessions ||= []; state.authTransactions ||= [];
     state.people ||= []; state.rooms ||= []; state.radar ||= {}; state.spaces ||= []; state.spaceLeases ||= [];

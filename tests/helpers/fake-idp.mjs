@@ -7,7 +7,7 @@ import { exportJWK, generateKeyPair, SignJWT } from "jose";
 export const LOGOUT_EVENT = "http://schemas.openid.net/event/backchannel-logout";
 export const API_AUDIENCE = "https://api.agora.build";
 const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-export const accountId = () => "acct_" + Array.from(randomBytes(26), (byte) => crockford[byte % 32]).join("");
+export const accountId = () => "ab" + Array.from(randomBytes(26), (byte) => crockford[byte % 32]).join("");
 
 async function newKey() {
   const pair = await generateKeyPair("ES256", { extractable: true });

@@ -51,7 +51,7 @@ async function step(label, run, page) {
 }
 
 const VIEWPORTS = [{ name: "desktop", width: 1280, height: 800 }, { name: "mobile", width: 390, height: 844 }];
-const ACCOUNT_ID = /^acct_[0-9A-HJKMNP-TV-Z]{26}$/;
+const ACCOUNT_ID = /^ab[0-9A-HJKMNP-TV-Z]{26}$/;
 
 const lib = await loadAuth();
 const stack = await startStack(lib);
@@ -141,7 +141,7 @@ async function signInFlow(viewport) {
       await back;
       check(new URL(page.url()).origin === stack.site && new URL(page.url()).pathname === "/", tag + "the IdP returns the browser to the page that started it (" + new URL(page.url()).pathname + ")");
       const session = await me(page);
-      check(ACCOUNT_ID.test(session.account?.id || "") && session.account?.name === user.name, tag + "/api/me shows the signed-in account acct_… with its name");
+      check(ACCOUNT_ID.test(session.account?.id || "") && session.account?.name === user.name, tag + "/api/me shows the signed-in account ab… with its name");
       await page.locator("#toast").filter({ hasText: /./ }).waitFor({ timeout: 3000 }).catch(() => {});
       check(!new URL(page.url()).searchParams.has("signin"), tag + "the Portal removes ?signin= from the address");
     }, page);

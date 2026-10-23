@@ -4,13 +4,13 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, randomBytes } from "node:crypto";
-import { createStore } from "../scripts/store.mjs";
+import { createStore, migrateState } from "../scripts/store.mjs";
 import { createLedger } from "../scripts/ledger.mjs";
 
 const root = new URL("../", import.meta.url).pathname;
 const seed = resolve(root, "data/people.json");
 const hash = (value) => createHash("sha256").update(value).digest("hex");
-const sub = (n) => "acct_" + String(n).padStart(26, "0");
+const sub = (n) => "ab" + String(n).padStart(26, "0");
 const profile = (name) => ({ name, bio: "Building voice agents with Rust.", intent: "Build a language practice voice agent with natural interruptions.", skills: ["Rust"], contact: "https://example.com/builder" });
 let temp;
 before(async () => { temp = await mkdtemp(resolve(tmpdir(), "store-identity-")); });
@@ -21,15 +21,18 @@ const silent = () => {};
 // A version 1 state as the Portal wrote it before auth.agora.build: provider accounts, OAuth data and pending links.
 const OLD = "account:11111111-1111-4111-8111-111111111111";
 const KEPT = sub(7);
+// An account in the auth.agora.build format before version 3 (acct_<ULID>); version 3 accepts only ab<ULID>.
+const LEGACY = "acct_01M5KE40Z7VPK97NJS49W8QQSD";
 const guestToken = "guest-browser-session-token";
 function v1() {
   const at = new Date(0).toISOString();
   return {
     accounts: [
       { id: OLD, identities: [{ provider: "github", issuer: "https://github.com", subject: "42", email: "old@example.com" }], name: "Old", avatar: "", contact: "", profileId: "member:linked", createdAt: at, stripeCustomerId: "cus_old", connections: { agora: { iv: "x", ciphertext: "y", tag: "z" } }, sessionEpoch: 3 },
-      { id: KEPT, identities: [{ provider: "github", issuer: "https://github.com", subject: "43" }], name: "Kept", avatar: "", profileId: null, createdAt: at, sessionEpoch: 1 }
+      { id: KEPT, identities: [{ provider: "github", issuer: "https://github.com", subject: "43" }], name: "Kept", avatar: "", profileId: null, createdAt: at, sessionEpoch: 1 },
+      { id: LEGACY, name: "Legacy", avatar: "", profileId: null, createdAt: at }
     ],
-    sessions: [{ hash: hash("old-account-session"), accountId: OLD, expiresAt: Date.now() + 86400000 }, { hash: hash("kept-account-session"), accountId: KEPT, expiresAt: Date.now() + 86400000 }],
+    sessions: [{ hash: hash("old-account-session"), accountId: OLD, expiresAt: Date.now() + 86400000 }, { hash: hash("kept-account-session"), accountId: KEPT, expiresAt: Date.now() + 86400000 }, { hash: hash("legacy-account-session"), accountId: LEGACY, expiresAt: Date.now() + 86400000 }],
     authorizationCodes: [{ hash: "code", accountId: OLD, expiresAt: Date.now() + 60000 }],
     grants: [{ id: "grant", accountId: OLD, accessHash: "a", refreshHash: "r", refreshExpiresAt: Date.now() + 86400000 }],
     pendingLinks: [{ hash: "link", accountId: OLD, identity: { provider: "google", issuer: "https://accounts.google.com", subject: "9", email: "old@example.com" }, expiresAt: Date.now() + 600000 }],
@@ -72,7 +75,7 @@ function v1() {
       deposits: { "d-old": { userId: OLD, credits: 10, reason: "Purchase", idempotencyKey: "d-old" }, "d-kept": { userId: KEPT, credits: 5, reason: "Grant", idempotencyKey: "d-kept" } },
       debts: { [OLD]: 1 }
     },
-    orders: [{ id: "o1", userId: OLD, status: "paid", credits: 10 }, { id: "o2", userId: KEPT, status: "pending", credits: 5 }],
+    orders: [{ id: "o1", userId: OLD, status: "paid", credits: 10 }, { id: "o2", userId: KEPT, status: "pending", credits: 5 }, { id: "o3", userId: LEGACY, status: "pending", credits: 1 }],
     billingEvents: { evt_1: "checkout.session.completed" },
     activity: [
       { id: "house:1", source: "community", actorId: "member:guest", actorName: "Guest", kind: "member", action: "took a seat in", subject: "the foundry", createdAt: at },
@@ -83,8 +86,8 @@ function v1() {
 }
 
 function checkMigrated(state, fixture) {
-  assert.equal(state.version, 2);
-  assert.deepEqual(state.accounts.map((account) => account.id), [KEPT], "only acct_ accounts remain");
+  assert.equal(state.version, 3);
+  assert.deepEqual(state.accounts.map((account) => account.id), [KEPT], "only ab… accounts remain");
   assert.equal("identities" in state.accounts[0], false);
   assert.equal("sessionEpoch" in state.accounts[0], false);
   assert.deepEqual(state.sessions, []);
@@ -113,21 +116,24 @@ function checkMigrated(state, fixture) {
   assert.deepEqual(state.orders.map((order) => order.id), ["o2"]);
   assert.deepEqual(state.billingEvents, fixture.billingEvents);
   assert.ok(!JSON.stringify(state).includes(OLD), "nothing refers to a removed account");
+  assert.ok(!JSON.stringify(state).includes(LEGACY), "nothing refers to an acct_ account");
   assert.ok(!JSON.stringify(state).includes("member:linked"), "nothing refers to its profile");
 }
 
-test("a version 1 state file starts empty: old accounts and their data go, guests, rooms and the radar stay", async () => {
+test("a version 1 state file moves to version 3 empty: old and acct_ accounts and their data go, guests, rooms and the radar stay", async () => {
   const path = file(), fixture = v1(), lines = [];
   await writeFile(path, JSON.stringify(fixture));
   const store = createStore(seed, path, { log: (line) => lines.push(line) });
   checkMigrated(await store.snapshot(), fixture);
   checkMigrated(JSON.parse(await readFile(path, "utf8")), fixture);
   assert.equal(lines.length, 1, "the migration logs once");
-  assert.match(lines[0], /1 account/);
-  assert.match(lines[0], /2 sessions/);
+  assert.match(lines[0], /version 3/);
+  assert.match(lines[0], /2 accounts/);
+  assert.match(lines[0], /3 sessions/);
+  assert.match(lines[0], /2 orders/);
   assert.match(lines[0], /1 account profile\b/);
   assert.match(lines[0], /2 spaces/, "the account's space and its profile's space");
-  for (const secret of [OLD, "member:", "Linked", "old@example.com", hash(guestToken), "cus_old"]) assert.ok(!lines[0].includes(secret), "the log has counts only");
+  for (const secret of [OLD, LEGACY, "member:", "Linked", "Legacy", "old@example.com", hash(guestToken), "cus_old"]) assert.ok(!lines[0].includes(secret), "the log has counts only");
   assert.equal((await store.me(guestToken)).id, "member:guest", "a guest's browser session keeps working");
   assert.equal(await store.browserToken("kept-account-session"), false, "old account sessions end");
 
@@ -156,12 +162,125 @@ test("the migration runs through a PostgreSQL-style persistence too, once", asyn
   assert.equal(writes, 1, "a migrated state is not rewritten");
 });
 
-test("a fresh store is version 2 and logs nothing", async () => {
+// A version 2 state as the Portal wrote it with acct_ account IDs: one of them signed in with an adopted guest
+// profile, spaces, an order and ledger rows, next to an account already in the ab… format.
+const GONE = "acct_" + "1".repeat(26), GONE_PROFILE = "member:44444444-4444-4444-8444-444444444444";
+function v2() {
+  const at = new Date(0).toISOString();
+  return {
+    version: 2,
+    accounts: [
+      { id: GONE, name: "Gone", avatar: "", email: "gone@example.com", profileId: GONE_PROFILE, createdAt: at, updatedAt: at, stripeCustomerId: "cus_gone", connections: { agora: { iv: "x", ciphertext: "y", tag: "z" } } },
+      { id: KEPT, name: "Kept", avatar: "", email: null, profileId: null, createdAt: at, updatedAt: at }
+    ],
+    sessions: [
+      { hash: hash("gone-session"), accountId: GONE, sid: "sid-gone", idToken: "gone-id-token", expiresAt: Date.now() + 86400000 },
+      { hash: hash("gone-session-2"), accountId: GONE, sid: "sid-gone-2", idToken: "gone-id-token-2", expiresAt: Date.now() + 86400000 },
+      { hash: hash("kept-session"), accountId: KEPT, sid: "sid-kept", idToken: "kept-id-token", expiresAt: Date.now() + 86400000 }
+    ],
+    authTransactions: [],
+    people: [
+      { id: "member:guest", name: "Guest", bio: "Guest bio here.", intent: "Guest intent here.", skills: ["Rust"], contact: "https://example.com/guest", source: "community", avatar: "", username: "", projects: [], joinedAt: at, sessionHash: hash(guestToken) },
+      { id: GONE_PROFILE, name: "Adopted", bio: "Adopted bio here.", intent: "Adopted intent here.", skills: ["Go"], contact: "https://example.com/adopted", source: "community", avatar: "", username: "", projects: [], joinedAt: at, accountId: GONE }
+    ],
+    rooms: [{ id: "22222222-2222-4222-8222-222222222222", title: "A room", intent: "Talk", ownerId: "member:guest", participants: ["member:guest", GONE_PROFILE], createdAt: at }],
+    radar: { "member:guest": { items: [], intent: "Guest intent here.", checkedAt: at }, [GONE_PROFILE]: { items: [], intent: "Adopted intent here.", checkedAt: at } },
+    spaces: [
+      { id: "plaza", type: "stoa", worldId: "plaza", ownerId: null, members: [], hostId: GONE, title: "The plaza" },
+      { id: "space-gone", type: "stoa", worldId: "room", ownerId: GONE, members: [GONE], hostId: GONE, title: "Gone's space" },
+      { id: "space-kept", type: "stoa", worldId: "room", ownerId: KEPT, members: [KEPT, GONE, GONE_PROFILE], blocked: [GONE], invitations: [{ id: "i1", createdBy: GONE }, { id: "i2", createdBy: KEPT }], hostId: GONE, title: "Kept's space" }
+    ],
+    spaceLeases: [
+      { spaceId: "space-gone", actorId: GONE, ids: [GONE], name: "Gone", enteredAt: 0, expiresAt: Date.now() + 60000 },
+      { spaceId: "space-kept", actorId: KEPT, ids: [KEPT], name: "Kept", enteredAt: 0, expiresAt: Date.now() + 60000 }
+    ],
+    ledger: {
+      balances: { "system:external": -12, [GONE]: 5, [KEPT]: 7 },
+      entries: [
+        { id: 1, account: "system:external", amount: -5, reason: "Purchase", ref: "d-gone", groupId: "g1", createdAt: at },
+        { id: 2, account: GONE, amount: 5, reason: "Purchase", ref: "d-gone", groupId: "g1", createdAt: at },
+        { id: 3, account: "system:external", amount: -7, reason: "Grant", ref: "d-kept", groupId: "g2", createdAt: at },
+        { id: 4, account: KEPT, amount: 7, reason: "Grant", ref: "d-kept", groupId: "g2", createdAt: at }
+      ],
+      reservations: [],
+      deposits: { "d-gone": { userId: GONE, credits: 5, reason: "Purchase", idempotencyKey: "d-gone" }, "d-kept": { userId: KEPT, credits: 7, reason: "Grant", idempotencyKey: "d-kept" } },
+      debts: {}
+    },
+    orders: [{ id: "o1", userId: GONE, status: "paid", credits: 5 }, { id: "o2", userId: KEPT, status: "pending", credits: 7 }],
+    activity: [{ id: "house:1", source: "community", actorId: GONE_PROFILE, actorName: "Adopted", kind: "member", action: "took a seat in", subject: "the foundry", createdAt: at }]
+  };
+}
+
+function checkVersion3(state) {
+  assert.equal(state.version, 3);
+  assert.deepEqual(state.accounts.map((account) => account.id), [KEPT], "only ab… accounts remain");
+  assert.deepEqual(state.sessions.map((session) => session.accountId), [KEPT], "the acct_ account's sessions end; others stay");
+  assert.deepEqual(state.people.map((person) => person.id), ["member:guest"], "the acct_ account's profile goes; guests stay");
+  assert.deepEqual(state.rooms[0].participants, ["member:guest"]);
+  assert.deepEqual(Object.keys(state.radar), ["member:guest"]);
+  assert.deepEqual(state.activity, []);
+  assert.deepEqual(state.spaces.map((space) => space.id), ["plaza", "space-kept"]);
+  const kept = state.spaces.find((space) => space.id === "space-kept");
+  assert.deepEqual([kept.members, kept.blocked, kept.invitations.map((invitation) => invitation.id), kept.hostId], [[KEPT], [], ["i2"], null]);
+  assert.equal(state.spaces.find((space) => space.id === "plaza").hostId, null);
+  assert.deepEqual(state.spaceLeases.map((lease) => lease.spaceId), ["space-kept"]);
+  assert.deepEqual(state.ledger.entries.map((entry) => [entry.id, entry.account, entry.amount]), [[1, "system:external", -7], [2, KEPT, 7]]);
+  assert.deepEqual(state.ledger.balances, { "system:external": -7, [KEPT]: 7 });
+  assert.deepEqual(Object.keys(state.ledger.deposits), ["d-kept"]);
+  assert.deepEqual(state.orders.map((order) => order.id), ["o2"]);
+  assert.ok(!JSON.stringify(state).includes(GONE), "nothing refers to the acct_ account");
+  assert.ok(!JSON.stringify(state).includes(GONE_PROFILE), "nothing refers to its profile");
+}
+
+test("a version 2 state with acct_ account IDs moves to version 3: those accounts and their data go, ab… accounts and their sessions stay", async () => {
+  const path = file(), lines = [];
+  await writeFile(path, JSON.stringify(v2()));
+  const store = createStore(seed, path, { log: (line) => lines.push(line) });
+  checkVersion3(await store.snapshot());
+  checkVersion3(JSON.parse(await readFile(path, "utf8")));
+  assert.equal(lines.length, 1, "the migration logs once");
+  assert.match(lines[0], /version 3/);
+  assert.match(lines[0], /removed 1 account, 1 account profile, 2 sessions, 0 authorization codes, 0 grants, 0 pending links, 1 space, 1 order and 2 ledger entries/);
+  for (const secret of [GONE, GONE_PROFILE, "Gone", "Adopted", "gone@example.com", "gone-id-token", hash("gone-session"), "cus_gone"]) assert.ok(!lines[0].includes(secret), "the log has counts only");
+  assert.equal(await store.browserToken("kept-session"), true, "an ab… account stays signed in");
+  assert.equal(await store.browserToken("gone-session"), false, "an acct_ account's session ends");
+  assert.equal((await store.me(guestToken)).id, "member:guest");
+
+  const before = await readFile(path, "utf8");
+  const again = createStore(seed, path, { log: (line) => lines.push(line) });
+  checkVersion3(await again.snapshot());
+  await again.transaction(() => {});
+  assert.equal(lines.length, 1, "the migration runs once");
+  assert.deepEqual(JSON.parse(await readFile(path, "utf8")), JSON.parse(before));
+});
+
+test("the version 3 migration runs through a PostgreSQL-style persistence too, once", async () => {
+  let document = v2(), writes = 0;
+  const persistence = { async read() { return structuredClone(document); }, async update(change) { const state = structuredClone(document); const value = await change(state); document = state; writes++; return value; } };
+  const lines = [];
+  const store = createStore(seed, "unused", { persistence, log: (line) => lines.push(line) });
+  const [first, second] = await Promise.all([store.snapshot(), store.snapshot()]);
+  checkVersion3(first); checkVersion3(second); checkVersion3(document);
+  assert.deepEqual([lines.length, writes], [1, 1]);
+  await createStore(seed, "unused", { persistence, log: (line) => lines.push(line) }).snapshot();
+  assert.deepEqual([lines.length, writes], [1, 1], "a migrated state is not rewritten");
+});
+
+test("migrateState is idempotent on a version 3 state", () => {
+  const state = v2();
+  migrateState(state);
+  const once = structuredClone(state);
+  state.version = 2;
+  assert.deepEqual(migrateState(state), { accounts: 0, profiles: 0, sessions: 0, codes: 0, grants: 0, links: 0, spaces: 0, orders: 0, entries: 0 });
+  assert.deepEqual(state, once);
+});
+
+test("a fresh store is version 3 and logs nothing", async () => {
   const path = file(), lines = [];
   const store = createStore(seed, path, { log: (line) => lines.push(line) });
   assert.equal(await store.actor("").then((actor) => actor.kind), null);
   await store.ensureAccount(sub(1));
-  assert.equal(JSON.parse(await readFile(path, "utf8")).version, 2);
+  assert.equal(JSON.parse(await readFile(path, "utf8")).version, 3);
   assert.deepEqual(lines, []);
 });
 
@@ -195,7 +314,7 @@ test("signIn keys the account by sub, refreshes its name, picture and email, and
   const saved = await readFile(path, "utf8");
   assert.ok(!saved.includes(first.token) && !saved.includes(second.token), "session tokens are stored hashed");
   assert.ok(!JSON.stringify(await store.session(first.token)).includes("id-token"), "the ID token is never served");
-  for (const bad of ["account:11111111-1111-4111-8111-111111111111", "acct_short", "", undefined, "acct_" + "a".repeat(26), "acct_" + "I".repeat(26)]) await assert.rejects(store.signIn({ sub: bad, idToken: "x" }), { status: 422 });
+  for (const bad of ["account:11111111-1111-4111-8111-111111111111", "abshort", "", undefined, "ab" + "a".repeat(26), "ab" + "I".repeat(26), "acct_" + "A".repeat(26), "AB" + "A".repeat(26), "ab_" + "A".repeat(26), "ab" + "A".repeat(27)]) await assert.rejects(store.signIn({ sub: bad, idToken: "x" }), { status: 422 });
 });
 
 test("an account keeps at most 20 sessions", async () => {
@@ -258,7 +377,7 @@ test("ensureAccount creates a minimal account once, without overwriting a signed
   const [one, two] = await Promise.all([store.ensureAccount(sub(6)), store.ensureAccount(sub(6))]);
   assert.equal(one.id, two.id);
   assert.equal((await store.snapshot()).accounts.filter((account) => account.id === sub(6)).length, 1);
-  for (const bad of ["account:11111111-1111-4111-8111-111111111111", "acct_", null]) await assert.rejects(store.ensureAccount(bad), { status: 422 });
+  for (const bad of ["account:11111111-1111-4111-8111-111111111111", "ab", "acct_" + "5".repeat(26), null]) await assert.rejects(store.ensureAccount(bad), { status: 422 });
 });
 
 test("endSessionsBySid with a sub ends only that sub's sessions with the sid", async () => {

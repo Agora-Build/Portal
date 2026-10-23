@@ -34,7 +34,7 @@ async function join(base, name) {
 }
 // A signed-in auth.agora.build account with a public profile: only accounts create and own spaces.
 async function member(base, name) {
-  const { token } = await stores.get(base).signIn({ sub: "acct_" + String(++accounts).padStart(26, "0"), sid: "sid-" + accounts, name, idToken: "id-token" });
+  const { token } = await stores.get(base).signIn({ sub: "ab" + String(++accounts).padStart(26, "0"), sid: "sid-" + accounts, name, idToken: "id-token" });
   const response = await post(base, "/api/profile", "house_session=" + token, profile(name));
   assert.equal(response.status, 201);
   return response.headers.get("set-cookie").split(";")[0];
@@ -219,11 +219,11 @@ test("your spaces needs sign-in and lists what you own", async () => {
 
 test("member routes take auth.agora.build account IDs", async () => {
   const { handleSpaces } = await import("../scripts/spaces/routes.mjs");
-  const id = "11111111-1111-4111-8111-111111111111", member = "acct_" + "M".repeat(26);
+  const id = "11111111-1111-4111-8111-111111111111", member = "ab" + "M".repeat(26);
   const seen = [];
   const spaces = { removeMember: async (...args) => { seen.push(args); return { removed: true }; } };
   const call = (path) => handleSpaces({ path, method: "DELETE", url: new URL("http://localhost" + path), token: "t", read: async () => ({}), spaces, worlds: {}, themes: [], limit: () => {}, ip: "127.0.0.1" });
   assert.deepEqual(await call("/api/spaces/" + id + "/members/" + member), { status: 200, body: { removed: true } });
   assert.deepEqual(seen, [["t", id, member]]);
-  assert.equal(await call("/api/spaces/" + id + "/members/acct_" + "m".repeat(26)), null);
+  assert.equal(await call("/api/spaces/" + id + "/members/ab" + "m".repeat(26)), null);
 });

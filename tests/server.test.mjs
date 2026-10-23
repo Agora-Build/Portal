@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile, writeFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { createAppServer } from "../scripts/serve.mjs";
+import { createAppServer, platformAdmins } from "../scripts/serve.mjs";
 import { createModelClient, modelConfig } from "../scripts/models.mjs";
 import { createStore } from "../scripts/store.mjs";
 import { agoraConfig, createAgoraCalls } from "../scripts/calls.mjs";
@@ -194,7 +194,7 @@ test("connected service API preserves provider privacy, requires a signed-in acc
     assert.equal((await request("/api/services/chat", { base: isolated.url, method: "POST", data: { message: "Help" } })).status, 401);
     const visitor = await join("Guest tester", isolated.url);
     assert.equal((await request("/api/services/chat", { base: isolated.url, cookie: visitor.cookie, method: "POST", data: { message: "Help" } })).status, 401, "guests can't use services");
-    const { token } = await store.signIn({ sub: "acct_" + "T".repeat(26), sid: "sid", name: "Service tester", idToken: "id-token" });
+    const { token } = await store.signIn({ sub: "ab" + "T".repeat(26), sid: "sid", name: "Service tester", idToken: "id-token" });
     const joined = await request("/api/profile", { base: isolated.url, cookie: "house_session=" + token, method: "POST", data: profile("Service tester") });
     const member = { cookie: joined.headers.get("set-cookie").split(";")[0] };
     const chat = await request("/api/services/chat", { base: isolated.url, cookie: member.cookie, method: "POST", data: { message: "Help" } });
@@ -292,4 +292,13 @@ test("with TRUST_PROXY=1, IP limits use the last X-Forwarded-For hop only", asyn
     assert.equal((await loginsUntilLimited(url, ["198.51.100.1, 203.0.113.8"]))[0], 303, "another client behind the proxy has its own allowance");
     assert.equal((await loginsUntilLimited(url, [""]))[0], 303, "without the header the socket address is used");
   } finally { await close(instance); }
+});
+
+test("PLATFORM_ADMINS keeps only ab… account IDs and logs how many it ignored, never which", () => {
+  const admin = "ab01M5KE40Z7VPK97NJS49W8QQSD", lines = [];
+  assert.deepEqual(platformAdmins(" " + admin + ", acct_01M5KE40Z7VPK97NJS49W8QQSD,,member:11111111-1111-4111-8111-111111111111 ", (line) => lines.push(line)), [admin]);
+  assert.deepEqual(lines, ["PLATFORM_ADMINS: ignored 2 entries that are not auth.agora.build account IDs."]);
+  assert.deepEqual(platformAdmins(undefined, (line) => lines.push(line)), []);
+  assert.deepEqual(platformAdmins(admin, (line) => lines.push(line)), [admin]);
+  assert.equal(lines.length, 1);
 });

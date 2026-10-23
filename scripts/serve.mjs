@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { resolve, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { AppError, createStore, text } from "./store.mjs";
+import { ACCOUNT_ID, AppError, createStore, text } from "./store.mjs";
 import { basicSearch, createModelClient, modelConfig } from "./models.mjs";
 import { createActivityFeed } from "./activity.mjs";
 import { createAgoraCalls } from "./calls.mjs";
@@ -72,6 +72,15 @@ const browserRoutes = new Set(["GET /api/billing/account", "POST /api/billing/ch
 export const LEGACY_GUEST_COOKIE_UNTIL = Date.parse("2027-01-31T00:00:00Z");
 const browserRoute = (route, path) => browserRoutes.has(route) || path === "/api/spaces" || path.startsWith("/api/spaces/") || path.startsWith("/api/worlds/");
 // The auth.agora.build client from the environment, or null (logged once, by setting name) when its settings are missing or invalid.
+
+// PLATFORM_ADMINS lists auth.agora.build account IDs (ab…). Anything else, such as an old acct_… ID, is ignored and
+// counted in the log, never echoed.
+export function platformAdmins(value = "", log = () => {}) {
+  const listed = String(value || "").split(",").map((id) => id.trim()).filter(Boolean);
+  const admins = listed.filter((id) => ACCOUNT_ID.test(id));
+  if (admins.length < listed.length) log("PLATFORM_ADMINS: ignored " + (listed.length - admins.length) + " entr" + (listed.length - admins.length === 1 ? "y" : "ies") + " that are not auth.agora.build account IDs.");
+  return admins;
+}
 export function idpFromEnv(env = process.env, log = (line) => console.log(line)) {
   try {
     return createIdp({ issuer: env.AUTH_ISSUER, clientId: env.PORTAL_CLIENT_ID || "portal", clientSecret: env.PORTAL_CLIENT_SECRET, siteUrl: env.SITE_URL, audience: env.PORTAL_API_AUDIENCE || undefined });
@@ -110,7 +119,7 @@ export function createAppServer(directory = root, options = {}) {
   const worlds = options.worlds || loadWorlds(directory);
   const themes = options.themes || loadThemes(directory);
   const signaling = options.signaling || createSignaling(signalingConfig());
-  const spaces = options.spaces || createSpaces({ store, worlds, signaling, calls, secret: options.channelSecret ?? signalingConfig().secret, admins: (process.env.PLATFORM_ADMINS || "").split(",").map((id) => id.trim()).filter(Boolean), plazaCapacity: options.plazaCapacity });
+  const spaces = options.spaces || createSpaces({ store, worlds, signaling, calls, secret: options.channelSecret ?? signalingConfig().secret, admins: platformAdmins(process.env.PLATFORM_ADMINS, log), plazaCapacity: options.plazaCapacity });
   const windows = new Map();
   const scanning = new Set();
   const radarHours = Math.max(1, Number(process.env.RADAR_INTERVAL_HOURS) || 24);
