@@ -184,7 +184,7 @@ test("the Signaling SDK and its loader are served, and every page links to the S
     assert.match(await sdk.text(), /AgoraRTM/);
     const loader = await request(url, "/world/sdk.js");
     assert.equal(loader.status, 200);
-    for (const page of ["/", "/explore/", "/services/", "/radar/", "/account/", "/stoa/"]) {
+    for (const page of ["/", "/explore/", "/marketplaces/", "/radar/", "/account/", "/stoa/"]) {
       const html = await (await request(url, page)).text();
       assert.match(html, /<a href="\/stoa\/"[^>]*>Stoa<\/a>/, page);
       assert.doesNotMatch(html, />Rooms<\/a>/, page);

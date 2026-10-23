@@ -7,7 +7,7 @@ if (config) {
     const form = document.querySelector(service === "language" ? "#llm-form" : "#speech-form");
     form.querySelector("[type=submit]").disabled = !config[service].ready;
     const cost = config.credits?.costs[service === "language" ? "chat" : "tts"] || 0;
-    form.querySelector(".service-note").textContent = config[service].ready ? cost ? cost + " shared credits per request" : "Available without a credit charge" : "A provider needs to be connected before this service is available.";
+    form.querySelector(".service-note").textContent = config[service].ready ? cost ? cost + " shared credits per request" : "Available without a credit charge" : "A provider needs to be connected before this marketplace is available.";
   }
   const offers = document.querySelector("#offers-list");
   if (config.offers.length) {

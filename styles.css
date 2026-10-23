@@ -325,7 +325,7 @@ select { padding: 10px 28px 10px 10px; border: 1px solid #cdd3bd; background: va
 .directory-card h3 a:hover { color: var(--accent); }
 .directory-card > p { margin: 16px 0 23px; font-size: 13px; color: var(--muted); line-height: 1.8; }
 .directory-card .tags { margin-top: auto; }
-.services-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 35px; padding: 8px 5px 0; align-items: start; }
+.marketplaces-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 35px; padding: 8px 5px 0; align-items: start; }
 .service-panel { padding: 31px; border: 1px solid #d3d8c1; background: var(--surface); border-radius: 4px; box-shadow: 3px 6px 0 #dfe2d34d; transform: rotate(-.35deg); }
 .service-panel:nth-child(2) { margin-top: 28px; transform: rotate(.4deg); background: #f0f1e7; }
 .panel-top { display: flex; justify-content: space-between; align-items: center; gap: 18px; }
@@ -440,7 +440,7 @@ dialog h2 { font-size: 30px; line-height: 1.25; font-weight: 500; letter-spacing
   .site-nav.is-open { display: flex; flex-direction: column; align-items: stretch; gap: 5px; }.site-nav a { padding: 10px 15px; font-size: 13px; }.site-nav .nav-github { border-left: 0; border-top: 1px solid var(--line); margin: 6px 0 0; padding-top: 15px; }
   .hero-copy h1 { font-size: 53px; }.hero-links { gap: 17px; }.hero-links .inline-link { font-size: 11px; }
   .desk-voice { right: 2px; top: 102px; }.desk-code { top: 30px; }.desk-rtc { bottom: -3px; width: 210px; left: 4px; }.project-desk { height: 345px; }
-  .directory-grid { columns: 2; }.services-grid { gap: 27px; }.service-panel { padding: 25px; }
+  .directory-grid { columns: 2; }.marketplaces-grid { gap: 27px; }.service-panel { padding: 25px; }
 }
 @media (max-width: 800px) {
   .foundry-hero { grid-template-columns: 1fr; padding-top: 22px; }.hero-copy h1 { font-size: 65px; }.hero-description { max-width: 540px; font-size: 15px; }
@@ -451,7 +451,7 @@ dialog h2 { font-size: 30px; line-height: 1.25; font-weight: 500; letter-spacing
   .person-card { width: calc(50% - 15px); min-width: 0; padding: 22px; }.people-grid { padding: 6px 3px 13px; gap: 26px; }.join-card { width: calc(50% - 18px); padding: 23px; }.join-card h3 { font-size: 23px; }.person-top { flex-wrap: wrap; }.source-mark { margin-left: 0; }
   .bench-tools { gap: 18px; }.tool-note { padding: 21px 18px; }.tool-note h3 { font-size: 20px; }.note-bottom { font-size: 6px; }
   .intent-symbol { display: none; }.intent-banner { padding: 26px 0; }.intent-banner h2 { font-size: 23px; }
-  .services-grid { grid-template-columns: 1fr; }.service-panel:nth-child(2) { margin-top: 0; }.speech-controls { flex-wrap: nowrap; }.speech-controls label { flex-basis: auto; }
+  .marketplaces-grid { grid-template-columns: 1fr; }.service-panel:nth-child(2) { margin-top: 0; }.speech-controls { flex-wrap: nowrap; }.speech-controls label { flex-basis: auto; }
   .radar-method { gap: 15px; }.radar-method .mono { font-size: 9px; }.radar-method p { font-size: 11px; }
 }
 @media (max-width: 600px) {
@@ -471,7 +471,7 @@ dialog h2 { font-size: 30px; line-height: 1.25; font-weight: 500; letter-spacing
   .site-footer { padding: 24px 0; flex-wrap: wrap; gap: 9px; font-size: 11px; }
   h1 { font-size: 40px; letter-spacing: -1.7px; }.page-intro { margin-bottom: 28px; }.page-intro > p:last-child, .page-intro > div > p:last-child { font-size: 14px; margin-top: 18px; }
   .directory-toolbar { flex-wrap: wrap; gap: 14px; }.directory-search { padding: 10px 12px; }.directory-search input { font-size: 13px; }.directory-filters { gap: 1px; margin-bottom: 23px; }.directory-filters button { font-size: 10px; padding: 6px 8px; }.directory-filters button > span { font-size: 8px; }.directory-grid { columns: 1; padding: 5px; }.directory-card { padding: 25px; margin-bottom: 24px; }.directory-card h3 { font-size: 20px; }
-  .services-grid { padding: 5px 3px; gap: 25px; }.service-panel { padding: 25px; }.service-panel h2 { font-size: 27px; }.speech-controls { flex-wrap: wrap; }.speech-controls label { flex-basis: 100%; }.perks-section { margin-top: 35px; }.perks-section .section-heading { flex-wrap: wrap; }.offer-card { width: 100%; }
+  .marketplaces-grid { padding: 5px 3px; gap: 25px; }.service-panel { padding: 25px; }.service-panel h2 { font-size: 27px; }.speech-controls { flex-wrap: wrap; }.speech-controls label { flex-basis: 100%; }.perks-section { margin-top: 35px; }.perks-section .section-heading { flex-wrap: wrap; }.offer-card { width: 100%; }
   .radar-intent-panel { padding: 24px; }.radar-intent-panel .panel-top { flex-wrap: wrap; gap: 10px; }.radar-intent-panel > p { font-size: 20px; }.radar-method { flex-direction: column; align-items: flex-start; gap: 13px; padding: 25px 0; margin-bottom: 10px; }.radar-method .method-arrow { display: none; }.radar-method > div { padding-left: 13px; border-left: 2px solid #c2d1a9; }.radar-method .mono { font-size: 10px; }.radar-method p { font-size: 12px; }.radar-card { width: 100%; }.radar-footnote { display: block; padding-top: 20px; }.radar-footnote p { margin-top: 11px; }
   .empty-panel { padding: 33px 23px; }.empty-panel h3 { font-size: 20px; }.empty-panel > p { font-size: 13px; }
   dialog { padding: 23px; max-height: calc(100dvh - 24px); }.dialog-head .kicker { font-size: 8px; }.profile-identity { gap: 15px; }.avatar-large { width: 60px; height: 60px; }.profile-identity h2 { font-size: 26px; }#toast { width: calc(100% - 32px); bottom: 16px; font-size: 12px; }

@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const read = (name) => readFile(new URL("../" + name, import.meta.url), "utf8");
-const files = ["index.html", "explore.html", "account.html", "services.html", "radar.html", "stoa.html", "script.js", "account.js", "services.js", "stoa.js", "stoa/panel.js", "styles.css"];
+const files = ["index.html", "explore.html", "account.html", "marketplaces.html", "radar.html", "stoa.html", "script.js", "account.js", "marketplaces.js", "stoa.js", "stoa/panel.js", "styles.css"];
 const removed = [/auth\/providers/, /pending-link/, /confirmLink|confirmConnect/, /confirm-link|confirm-connect|link-mismatch|link-expired/, /logout-all|logout-everywhere/, /login-provider/, /Logins:/, /account\.providers|account\.emails/, /Connect a login/];
 
 test("pages and scripts carry no provider buttons, link dialogs, or logout-all", async () => {
@@ -23,7 +23,7 @@ test("sign-in is one step: no modal anywhere, and every Sign in goes to /auth/lo
   assert.match(script, /location\.assign\(signInHref\(\)\)/);
   assert.match(script, /link\.href = seat \? seatHref\(\) : signInHref\(\)/);
   assert.doesNotMatch(script, /innerHTML/);
-  for (const file of ["services.js", "stoa.js", "account.js"]) assert.match(await read(file), /signIn\(\)/, file);
+  for (const file of ["marketplaces.js", "stoa.js", "account.js"]) assert.match(await read(file), /signIn\(\)/, file);
   const stoa = await read("stoa.html");
   assert.match(stoa, /<a class="button button-secondary button-small" id="stoa-signin-button" href="\/account\/" data-signin="seat">Sign in<\/a>/);
   assert.doesNotMatch(await read("stoa/panel.js"), /signin\(\)/);
@@ -41,7 +41,7 @@ test("the account page links to Manage sign-in from /api/auth/config and reports
   assert.match(await read("script.js"), /\/api\/auth\/config/);
 });
 test("guests are told to sign in for credits, services, and creating spaces", async () => {
-  assert.match(await read("services.js"), /Sign in to use credits\./);
+  assert.match(await read("marketplaces.js"), /Sign in to use credits\./);
   assert.match(await read("stoa.js"), /state\.account \? spacesUi\.openCreate/);
 });
 test("the account page never waits on an event: a failed auth config still settles", async () => {
@@ -84,12 +84,14 @@ test("a guest's returnTo is only ever a same-site path", async () => {
 test("pages link to each other at clean /name/ URLs, never /name.html", async () => {
   for (const file of files) {
     const source = await read(file);
-    assert.doesNotMatch(source, /["'`]\/?(?:index|explore|services|radar|account|stoa)\.html/, file);
+    assert.doesNotMatch(source, /["'`]\/?(?:index|explore|services|marketplaces|radar|account|stoa)\.html/, file);
   }
-  for (const file of ["index.html", "explore.html", "account.html", "services.html", "radar.html", "stoa.html"]) {
+  for (const file of ["index.html", "explore.html", "account.html", "marketplaces.html", "radar.html", "stoa.html"]) {
     const html = await read(file);
     assert.match(html, /<a href="\/explore\/"[^>]*>Projects<\/a>/, file);
     assert.match(html, /<a href="\/account\/"[^>]*>Account<\/a>/, file);
+    assert.match(html, /<a href="\/marketplaces\/"[^>]*>Marketplaces<\/a>/, file);
+    assert.doesNotMatch(html, /href="\/services\/"|>Services<\/a>/, file);
     for (const [, link] of html.matchAll(/(?:src|href)="([^"#]+)"/g)) assert.ok(/^(\/|https:\/\/)/.test(link), file + " " + link + " is absolute");
   }
 });

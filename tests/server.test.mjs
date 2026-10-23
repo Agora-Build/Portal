@@ -32,7 +32,7 @@ before(async () => { temporary = await mkdtemp(resolve(tmpdir(), "agora-house-te
 after(async () => { await close(server); await rm(temporary, { recursive: true, force: true }); });
 
 test("six pages, internal links, assets, and section anchors load", async () => {
-  for (const page of ["/", "/explore/", "/services/", "/radar/", "/account/"]) {
+  for (const page of ["/", "/explore/", "/marketplaces/", "/radar/", "/account/"]) {
     const response = await request(page);
     assert.equal(response.status, 200);
     assert.match(response.headers.get("content-type"), /text\/html/);
@@ -43,7 +43,7 @@ test("six pages, internal links, assets, and section anchors load", async () => 
   }
 });
 test("pages live at clean /name/ URLs; /name and /name.html redirect there with 308, keeping the query", async () => {
-  for (const name of ["account", "explore", "services", "radar"]) {
+  for (const name of ["account", "explore", "marketplaces", "radar"]) {
     const page = await request("/" + name + "/");
     assert.equal(page.status, 200, name);
     assert.match(page.headers.get("content-type"), /text\/html/);
@@ -241,10 +241,17 @@ test("automatic radar scans only opted-in members and respects the scan interval
     assert.equal(await store.radar("github:guohai"), null);
   } finally { await close(isolated.instance); }
 });
+test("the marketplaces page replaced the services page; its old addresses are 404 like any unknown page", async () => {
+  const html = await (await request("/marketplaces/")).text();
+  assert.match(html, /<title>Marketplaces \| Agora Build<\/title>/);
+  assert.match(html, /<a href="\/marketplaces\/" class="is-active" aria-current="page">Marketplaces<\/a>/);
+  assert.match(html, /src="\/marketplaces\.js"/);
+  for (const old of ["/services/", "/services", "/services.html", "/services.js"]) assert.equal((await fetch(origin + old, { redirect: "manual" })).status, 404, old);
+});
 test("production output includes six pages, platform backend, seed data, and no private state", async () => {
   await import("../scripts/build.mjs");
   for (const file of ["account.html", "account.js", "scripts/idp.mjs", "scripts/return-path.mjs", "scripts/billing-clients.mjs", "scripts/ledger.mjs", "scripts/credits.mjs", "scripts/billing.mjs", "scripts/connections.mjs", "scripts/plans.mjs", "scripts/persistence.mjs", "scripts/platform-admin.mjs"]) assert.deepEqual(await readFile(resolve(root, "dist", file)), await readFile(resolve(root, file)), file);
-  const files = ["index.html", "explore.html", "services.html", "radar.html", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "services.js", "radar.js", "package.json", "package-lock.json", "assets/favicon.svg", "assets/guohai.jpg", "scripts/serve.mjs", "scripts/store.mjs", "scripts/models.mjs", "scripts/activity.mjs", "scripts/calls.mjs", "stoa.html", "stoa.js", "world/engine.js", "world/sdk.js", "world/map.js", "world/kinds.js", "stoa/stage.js", "world/signaling.js", "worlds/plaza/map.json", "worlds/room/map.json", "scripts/spaces/service.mjs", "scripts/spaces/routes.mjs", "data/people.json", "data/projects.json", "data/offers.json", "data/activity.json", "themes/agora/theme.json", "themes/minimal/theme.json", "themes/cyberpunk/theme.json"];
+  const files = ["index.html", "explore.html", "marketplaces.html", "radar.html", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "marketplaces.js", "radar.js", "package.json", "package-lock.json", "assets/favicon.svg", "assets/guohai.jpg", "scripts/serve.mjs", "scripts/store.mjs", "scripts/models.mjs", "scripts/activity.mjs", "scripts/calls.mjs", "stoa.html", "stoa.js", "world/engine.js", "world/sdk.js", "world/map.js", "world/kinds.js", "stoa/stage.js", "world/signaling.js", "worlds/plaza/map.json", "worlds/room/map.json", "scripts/spaces/service.mjs", "scripts/spaces/routes.mjs", "data/people.json", "data/projects.json", "data/offers.json", "data/activity.json", "themes/agora/theme.json", "themes/minimal/theme.json", "themes/cyberpunk/theme.json"];
   for (const file of files) assert.deepEqual(await readFile(resolve(root, "dist", file)), await readFile(resolve(root, file)), file);
   for (const file of [".env", ".data/community.json", "scripts/auth.mjs", "scripts/identity.mjs"]) await assert.rejects(readFile(resolve(root, "dist", file)), { code: "ENOENT" });
   const built = await start({}, resolve(root, "dist"));

@@ -217,11 +217,11 @@ async function guestFlow(viewport) {
       await page.waitForURL((url) => url.pathname === "/explore/", { timeout: 5000 });
       check(true, tag + "after saving, the guest is back on the page that sent them (/explore/)");
     }, page);
-    await step(tag + "services", async () => {
-      await page.goto(stack.site + "/services/");
+    await step(tag + "marketplaces", async () => {
+      await page.goto(stack.site + "/marketplaces/");
       const notes = page.locator(".service-note");
       await notes.first().filter({ hasText: "Sign in to use credits." }).waitFor({ timeout: 5000 });
-      check((await notes.allTextContents()).every((text) => text === "Sign in to use credits."), tag + "the services page says \"Sign in to use credits.\"");
+      check((await notes.allTextContents()).every((text) => text === "Sign in to use credits."), tag + "the marketplaces page says \"Sign in to use credits.\"");
     }, page);
     await step(tag + "account", async () => {
       await page.goto(stack.site + "/account/");

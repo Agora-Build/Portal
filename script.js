@@ -200,7 +200,7 @@ sessionReady.then(() => {
   if (result === "failed") { notify("Sign-in didn't complete. Try again."); return; }
   if (result === "unavailable") { notify("Sign-in is temporarily unavailable. Try again in a little while."); return; }
   if (result !== "success") return;
-  if (state.account && !state.profile && location.pathname !== "/account/" && location.pathname !== "/services/") {
+  if (state.account && !state.profile && location.pathname !== "/account/" && location.pathname !== "/marketplaces/") {
     openJoin();
   } else notify("You are signed in. Your profile and spaces are ready.");
 });

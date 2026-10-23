@@ -32,14 +32,14 @@ Without `DATABASE_URL`, state is stored in `/app/.data`. Mount a volume there so
 
 ## Pages and data
 
-Each page is served at a clean address ending in `/`: `/` (home), `/explore/`, `/stoa/`, `/radar/`, `/services/` and `/account/`, from the matching `<name>.html`. `/<name>` and the old `/<name>.html` redirect there with `308`, keeping the query string; other names stay `404`.
+Each page is served at a clean address ending in `/`: `/` (home), `/explore/`, `/stoa/`, `/radar/`, `/marketplaces/` and `/account/`, from the matching `<name>.html`. `/<name>` and the old `/<name>.html` redirect there with `308`, keeping the query string; other names stay `404`.
 
 - `index.html` / `people.js`: people discovery, skills, natural-language search, and public profiles.
 - `activity.js` / `scripts/activity.mjs`: public GitHub events and actual community actions, with timestamps and source links.
 - `explore.html` / `explore.js`: 16 verified GitHub projects, categories, search, and sorting.
 - `stoa.html` / `stoa.js` / `stoa/` / `world/`: the Stoa — a walkable plaza with first-come rooms and your own spaces, live presence and messages over Agora Signaling, and calls over Agora RTC.
 - `radar.html` / `radar.js`: intent-driven web research with source links and reasons.
-- `services.html` / `services.js`: language-model and text-to-speech playgrounds, plus verified offers.
+- `marketplaces.html` / `marketplaces.js`: the marketplaces, with language-model and text-to-speech playgrounds, plus verified offers.
 - `account.html` / `account.js`: shared identity, credits, membership plans, purchases, and Agora Console connections.
 
 Sign-in comes from auth.agora.build; the portal owns the account's credit ledger,
