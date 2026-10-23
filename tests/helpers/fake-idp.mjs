@@ -5,7 +5,8 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
 export const LOGOUT_EVENT = "http://schemas.openid.net/event/backchannel-logout";
-export const API_AUDIENCE = "https://api.agora.build";
+// The Portal accepts access tokens whose audience is its own origin (SITE_URL); the tests' default site.
+export const API_AUDIENCE = "http://localhost:3080";
 const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 export const accountId = () => "ab" + Array.from(randomBytes(26), (byte) => crockford[byte % 32]).join("");
 
@@ -15,7 +16,7 @@ async function newKey() {
   return { kid, ...pair, jwk: { ...await exportJWK(pair.publicKey), kid, use: "sig", alg: "ES256" } };
 }
 
-export async function createFakeIdp({ issuer = "https://auth.example", clientId = "portal", clientSecret } = {}) {
+export async function createFakeIdp({ issuer = "https://auth.example", clientId = "portal", clientSecret, audience = API_AUDIENCE } = {}) {
   const base = issuer.replace(/\/$/, "");
   const metadata = {
     issuer,
@@ -75,7 +76,7 @@ export async function createFakeIdp({ issuer = "https://auth.example", clientId 
     },
     issueAccessToken(claims = {}, opts = {}) {
       const now = seconds();
-      return sign({ typ: "typ" in opts ? opts.typ : "at+jwt" }, shape({ iss: issuer, sub: accountId(), aud: API_AUDIENCE, client_id: clientId, scope: "credits", iat: now, exp: now + 900, jti: randomUUID() }, claims, opts), opts);
+      return sign({ typ: "typ" in opts ? opts.typ : "at+jwt" }, shape({ iss: issuer, sub: accountId(), aud: audience, client_id: clientId, scope: "credits", iat: now, exp: now + 900, jti: randomUUID() }, claims, opts), opts);
     },
     issueLogoutToken(claims = {}, opts = {}) {
       const now = seconds();

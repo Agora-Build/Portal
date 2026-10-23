@@ -23,7 +23,7 @@ the IdP; linked logins, devices and "sign out everywhere" are managed at
 | `AUTH_ISSUER` | The IdP, `https://auth.agora.build` (locally `http://auth.localhost:3090`; plain http only on a local host) |
 | `PORTAL_CLIENT_ID` | The Portal's client ID at the IdP (default `portal`) |
 | `PORTAL_CLIENT_SECRET` | Its client secret, at least 32 characters; the same value the IdP reads through its clients file's `secretEnv` |
-| `PORTAL_API_AUDIENCE` | The resource the Portal's APIs accept tokens for (default `https://api.agora.build`) |
+| `PORTAL_API_AUDIENCE` | The resource the Portal's APIs accept tokens for (default: the `SITE_URL` origin, `https://agora.build` in production and `https://dev.agora.build` on dev) |
 | `SITE_URL` | The Portal's public origin; the redirect URIs below are built from it |
 
 1. `GET /auth/login?returnTo=<path>` (every "Sign in" link on the site goes
@@ -60,7 +60,7 @@ the API resource and its scopes. The secret is named, never written there:
 ```json
 {
   "resources": [
-    { "indicator": "https://api.agora.build", "name": "Agora Build API", "scopes": ["credits", "agora:projects", "agora:certificates", "agora:tokens"] }
+    { "indicator": "https://agora.build", "name": "Agora Build API", "scopes": ["credits", "agora:projects", "agora:certificates", "agora:tokens"] }
   ],
   "clients": [
     {
@@ -80,14 +80,15 @@ the API resource and its scopes. The secret is named, never written there:
 }
 ```
 
-The production IdP's `https://api.agora.build` resource must include
+The production IdP's `https://agora.build` resource (the Portal's own origin;
+`https://dev.agora.build` on dev) must include
 `agora:certificates` and `agora:tokens` as well as `credits` and
 `agora:projects`; without them no token can carry those scopes, and
 `POST /api/connections/agora/certificate` and `/token` answer 403 to every app. Put the same `PORTAL_CLIENT_SECRET` value in the IdP's
 environment and the Portal's. Locally the URIs are `http://localhost:3080/...` against
 `http://auth.localhost:3090`; the IdP accepts plain http only on local host
 names (`localhost`, `*.localhost`, `127.0.0.1`) and only with an http issuer.
-Vox, Atem and other apps are registered with the `https://api.agora.build`
+Vox, Atem and other apps are registered with the Portal's origin as their
 resource and only the scopes they need (see below).
 
 ## Accounts, Sessions And Guests
@@ -195,11 +196,12 @@ seconds and refetched for an unknown key ID. The trade-offs:
 
 Browsers use the session cookie, with the same-origin checks unchanged for
 non-GET requests. Apps and servers send `Authorization: Bearer <access token>`,
-an IdP access token for the resource `https://api.agora.build`. A request with a
+an IdP access token whose resource is the Portal's own origin (`https://agora.build`;
+`https://dev.agora.build` on dev), the same host the app calls. A request with a
 bearer token never falls back to the cookie. The token must be a JWT with `typ`
 `at+jwt` and `alg` ES256, issued by `AUTH_ISSUER`, with `aud` containing
 `PORTAL_API_AUDIENCE`, an unexpired `exp` and a `sub`. Request the resource with
-`resource=https://api.agora.build` and the scopes below; see Auth's
+`resource=<the Portal origin>` and the scopes below; see Auth's
 `docs/integrating.md` for the flows (web code + PKCE, native device code).
 
 | Route | Browser (cookie) | Bearer scope |
@@ -481,7 +483,7 @@ signaling tokens use the same module; only the opt-in RTM channel permissions
 Moving Vox, Astation and Atem onto the IdP is their teams' work; the Portal side
 is ready. Each app registers with the IdP, signs people in there, and uses the
 `ab…` `sub` as the global account ID. Vox becomes a billing client: register
-it with the `credits` scope for `https://api.agora.build` and list its services
+it with the `credits` scope for the Portal's origin and list its services
 in `PORTAL_BILLING_FILE`. Native apps such as Atem use the device-code flow with
 the scopes they need. Map existing Vox identities by exact verified provider
 subjects, never email; existing Vox balances and history need an explicit,
