@@ -112,3 +112,19 @@ test("Agora Console details open in a popup that lists projects and shows or hid
   assert.match(script, /if \(document\.hidden\) hideAllCertificates\(\)/);
   assert.match(script, /if \(!agoraDialog\.open\) return;/, "a certificate that arrives after the popup closed is dropped");
 });
+test("the Agora Console popup creates RTC and RTM tokens through agora.build, never with a certificate in the page", async () => {
+  const dialog = (await read("account.html")).match(/<dialog id="agora-dialog"[\s\S]*?<\/dialog>/)?.[0] || "";
+  const form = dialog.match(/<form id="agora-token-form"[\s\S]*?<\/form>/)?.[0] || "";
+  assert.match(form, /aria-labelledby="agora-token-title" hidden/);
+  for (const name of ["type", "channel", "identity", "identityValue", "role", "tokenExpire", "privilegeExpire", "join", "audio", "video", "data", "withRtm", "rtmUserId", "rtmExpire", "userId", "expire"]) assert.match(form, new RegExp('name="' + name + '"'), name);
+  for (const field of ["tokenExpire", "privilegeExpire", "rtmExpire", "expire"]) assert.match(form, new RegExp('name="' + field + '" type="number" min="1" max="86400"'), field);
+  assert.match(form, /role="alert"/);
+  assert.match(form, /atem-core, the library Astation uses/);
+  const script = await read("account.js");
+  assert.match(script, /api\("\/api\/connections\/agora\/token", \{ method: "POST"/);
+  assert.match(script, /tokenForm\.addEventListener\("input", clearTokenResult\)/, "editing clears the token");
+  assert.match(script, /closeTokenForm\(\); document\.querySelector\("#agora-projects"\)\.replaceChildren\(\)/, "closing the window clears the token");
+  assert.match(script, /if \(!agoraDialog\.open \|\| tokenProject !== project\) return;/, "a late reply for another project is dropped");
+  const formCode = script.slice(script.indexOf("const tokenForm"), script.indexOf("function showDetailsReconnect"));
+  assert.doesNotMatch(formCode, /certificate/i, "the form never handles a certificate");
+});

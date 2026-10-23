@@ -100,7 +100,9 @@ function projectRow(project, index) {
   if (project.appId) {
     const copyAppId = el("button", { class: "inline-link", type: "button", text: "Copy App ID" });
     copyAppId.addEventListener("click", () => copy(project.appId, "App ID"));
-    actions.unshift(copyAppId);
+    const create = el("button", { class: "inline-link", type: "button", text: "Create token", "aria-controls": "agora-token-form" });
+    create.addEventListener("click", () => openTokenForm(project));
+    actions.unshift(copyAppId, create);
   }
   const facts = [project.status ? "Status " + project.status : "", project.createdAt ? "Created " + new Date(project.createdAt).toLocaleDateString() : ""].filter(Boolean).join(" · ");
   return el("article", { class: "agora-project" }, [
@@ -111,6 +113,72 @@ function projectRow(project, index) {
     secret
   ]);
 }
+// The Create token form, for one project at a time. agora.build signs the token with atem-core (the library Astation
+// uses); the certificate never reaches this page. A token is shown until the form changes or the window closes.
+const tokenForm = document.querySelector("#agora-token-form");
+const tokenField = (name) => tokenForm.elements[name];
+let tokenProject = null;
+function clearTokenResult() {
+  document.querySelector("#agora-token-value").textContent = "";
+  document.querySelector("#agora-token-facts").textContent = "";
+  document.querySelector("#agora-token-result").hidden = true;
+  document.querySelector("#agora-token-error").textContent = "";
+}
+function syncTokenForm() {
+  const type = tokenField("type").value, role = tokenField("role").value, account = tokenField("identity").value === "account";
+  const shown = { rtc: type === "rtc", rtm: type === "rtm", explicit: role === "explicit", standard: role !== "explicit", "with-rtm": tokenField("withRtm").checked };
+  for (const node of tokenForm.querySelectorAll("[data-for]")) node.hidden = !shown[node.dataset.for];
+  document.querySelector("#agora-token-identity-label").replaceChildren(account ? "User account" : "UID", el("span", { class: "optional", text: account ? "up to 255 characters" : "0 allows any user" }));
+  tokenField("identityValue").inputMode = account ? "text" : "numeric";
+}
+function openTokenForm(project) {
+  tokenProject = project;
+  document.querySelector("#agora-token-project").textContent = (project.name || "Untitled project") + " · " + project.appId;
+  clearTokenResult();
+  syncTokenForm();
+  tokenForm.hidden = false;
+  tokenForm.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  tokenField(tokenField("type").value === "rtm" ? "userId" : "channel").focus();
+}
+function closeTokenForm() { tokenProject = null; clearTokenResult(); tokenForm.hidden = true; }
+// The request body for POST /api/connections/agora/token; a message string when the form can't be sent.
+function tokenRequest() {
+  const seconds = (name) => Number(tokenField(name).value);
+  if (tokenField("type").value === "rtm") return { projectId: tokenProject.projectId, type: "rtm", userId: tokenField("userId").value.trim(), expire: seconds("expire") };
+  const value = tokenField("identityValue").value.trim(), role = tokenField("role").value;
+  const body = { projectId: tokenProject.projectId, type: "rtc", channel: tokenField("channel").value.trim(), role, tokenExpire: seconds("tokenExpire") };
+  if (tokenField("identity").value === "account") body.account = value;
+  else if (/^\d{1,10}$/.test(value) && Number(value) <= 4294967295) body.uid = Number(value);
+  else return "Enter a UID from 0 to 4294967295, or choose User account.";
+  if (role === "explicit") body.privileges = { join: seconds("join"), audio: seconds("audio"), video: seconds("video"), data: seconds("data") };
+  else body.privilegeExpire = seconds("privilegeExpire");
+  if (tokenField("withRtm").checked) body.rtm = { ...(tokenField("rtmUserId").value.trim() ? { userId: tokenField("rtmUserId").value.trim() } : {}), expire: seconds("rtmExpire") };
+  return body;
+}
+tokenForm.addEventListener("change", () => { syncTokenForm(); clearTokenResult(); });
+tokenForm.addEventListener("input", clearTokenResult);
+tokenForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!tokenProject) return;
+  const body = tokenRequest(), error = document.querySelector("#agora-token-error"), submit = tokenForm.querySelector("[type=submit]");
+  clearTokenResult();
+  if (typeof body === "string") { error.textContent = body; return; }
+  const project = tokenProject;
+  submit.disabled = true;
+  try {
+    const result = await api("/api/connections/agora/token", { method: "POST", body: JSON.stringify(body) });
+    if (!agoraDialog.open || tokenProject !== project) return;
+    document.querySelector("#agora-token-value").textContent = result.token;
+    const who = result.type === "rtm" ? "user " + result.userId : (result.account !== undefined ? "account " + result.account : result.uid === 0 ? "any UID" : "UID " + result.uid) + " in " + result.channel + ", " + result.role + (result.rtm ? ", with RTM login as " + result.rtm.userId : "");
+    document.querySelector("#agora-token-facts").textContent = result.type.toUpperCase() + " token for " + who + ". Expires " + new Date(result.expiresAt).toLocaleString() + ".";
+    document.querySelector("#agora-token-result").hidden = false;
+  } catch (failure) {
+    error.textContent = failure.message;
+    if (failure.data?.reconnect) showDetailsReconnect(failure.message);
+  } finally { submit.disabled = false; }
+});
+document.querySelector("#agora-token-copy").addEventListener("click", () => { const token = document.querySelector("#agora-token-value").textContent; if (token) copy(token, "Token"); });
+document.querySelector("#agora-token-close").addEventListener("click", closeTokenForm);
 function showDetailsReconnect(message) {
   document.querySelector("#agora-dialog-status").textContent = message || "Your Agora Console connection has expired. Reconnect to see your projects.";
   document.querySelector("#agora-dialog-reconnect").hidden = !agora?.connect;
@@ -120,6 +188,7 @@ async function loadProjects() {
   const version = ++projectsVersion;
   const container = document.querySelector("#agora-projects");
   hideAllCertificates();
+  closeTokenForm();
   document.querySelector("#agora-dialog-reconnect").hidden = true;
   document.querySelector("#agora-refresh").hidden = false;
   document.querySelector("#agora-dialog-status").textContent = "Connected to your Agora account" + (agora?.name ? " (" + agora.name + ")" : "") + ".";
@@ -142,7 +211,7 @@ function openDetails() {
   agoraDialog.showModal();
   loadProjects();
 }
-agoraDialog.addEventListener("close", () => { projectsVersion++; hideAllCertificates(); document.querySelector("#agora-projects").replaceChildren(); });
+agoraDialog.addEventListener("close", () => { projectsVersion++; hideAllCertificates(); closeTokenForm(); document.querySelector("#agora-projects").replaceChildren(); });
 document.addEventListener("visibilitychange", () => { if (document.hidden) hideAllCertificates(); });
 document.querySelector("#agora-details").addEventListener("click", openDetails);
 document.querySelector("#agora-refresh").addEventListener("click", () => loadProjects());
