@@ -219,7 +219,7 @@ test("a browser's guest profile is adopted by its account at first sign-in", asy
   const signedIn = await browserSignIn(app, { cookie: visitor });
   const me = await (await call(app.base, "/api/me", { cookie: signedIn.cookie })).json();
   assert.equal(me.profile.id, guestProfile.id);
-  assert.equal(me.account.id.startsWith("acct_"), true);
+  assert.match(me.account.id, /^ab[0-9A-HJKMNP-TV-Z]{26}$/);
   assert.equal((await (await call(app.base, "/api/me", { cookie: visitor })).json()).profile, null, "the guest token stops working");
   // An account that already has a profile keeps it; another browser's guest profile stays a guest.
   const second = await guest(app, "Guest second");

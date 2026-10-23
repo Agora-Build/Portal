@@ -11,7 +11,7 @@ import { validateDecor } from "./decor.mjs";
 import { channelName, signalingUser, spaceKey } from "./signaling.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
-const ACTOR_ID = /^(?:member:[a-f0-9-]{36}|acct_[0-9A-HJKMNP-TV-Z]{26})$/;
+const ACTOR_ID = /^(?:member:[a-f0-9-]{36}|ab[0-9A-HJKMNP-TV-Z]{26})$/;
 const notFound = () => new AppError(404, "This space was not found.");
 
 export function loadWorlds(directory) {

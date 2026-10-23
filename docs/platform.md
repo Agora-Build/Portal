@@ -92,9 +92,11 @@ resource and only the scopes they need (see below).
 
 ## Accounts, Sessions And Guests
 
-The IdP's `sub` (`acct_` followed by 26 Crockford base32 characters) is the
+The IdP's `sub` (`ab` followed by 26 Crockford base32 characters, for example
+`ab01M5KE40Z7VPK97NJS49W8QQSD`) is the
 Portal account ID, so one person has the same ID in every Agora Build app.
-`PLATFORM_ADMINS` and `platform-admin.mjs` take these `acct_…` IDs. At each
+`PLATFORM_ADMINS` and `platform-admin.mjs` take these `ab…` IDs (other
+`PLATFORM_ADMINS` entries are ignored and counted in the log). At each
 browser sign-in the account's name and picture are refreshed from the ID token;
 the email is kept only when the IdP marks it verified. The email is shown only to
 the owner's browser session (`/api/me`), never to bearer (app) callers. The first
@@ -119,9 +121,16 @@ old cookie is ignored.
 
 This change starts the Portal's identity data empty. At first load (state
 version 2) the Portal deletes old sessions, OAuth codes and grants, pending
-links, every account whose ID is not `acct_…`, and those accounts' ledger and
+links, every account whose ID is not an IdP ID, and those accounts' ledger and
 billing rows and spaces. Guest profiles, rooms and the radar are kept. Only
 counts are logged.
+
+The IdP's account IDs then changed from `acct_<ULID>` to `ab<ULID>`, so state
+version 3 starts empty again: every account whose ID is not `ab…` goes, with its
+sessions, profile, owned spaces, orders and ledger rows, removed the same way as
+in version 2. Accounts already in the `ab…` format keep their sessions. A
+version 1 state goes through both steps at once. The step is idempotent and
+logs counts only.
 
 "Continue with this browser" stays for looking around: a browser-only profile
 can walk the Stoa, appear on the radar and keep a public profile. Credits,
@@ -339,8 +348,8 @@ new credits. Charge disputes require operator review; they are not auto-refunds.
 Operators can record audited manual grants and community roles with:
 
 ```sh
-node scripts/platform-admin.mjs grant-credits <acct_…> <credits> <unique-key> <reason>
-node scripts/platform-admin.mjs assign-role <acct_…> <basic|principal|fellow>
+node scripts/platform-admin.mjs grant-credits <ab…> <credits> <unique-key> <reason>
+node scripts/platform-admin.mjs assign-role <ab…> <basic|principal|fellow>
 ```
 
 `basic` removes an assigned role; it does not cancel a Stripe subscription.
@@ -390,7 +399,7 @@ sign anyone out. Apps reach the same routes with `agora:projects` and
 
 Moving Vox, Astation and Atem onto the IdP is their teams' work; the Portal side
 is ready. Each app registers with the IdP, signs people in there, and uses the
-`acct_…` `sub` as the global account ID. Vox becomes a billing client: register
+`ab…` `sub` as the global account ID. Vox becomes a billing client: register
 it with the `credits` scope for `https://api.agora.build` and list its services
 in `PORTAL_BILLING_FILE`. Native apps such as Atem use the device-code flow with
 the scopes they need. Map existing Vox identities by exact verified provider

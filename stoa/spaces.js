@@ -7,7 +7,7 @@ export function spacePayload(values) {
   return { title: String(values.title || "").trim(), purpose: String(values.purpose || "").trim(), visibility, access, capacity: Number.parseInt(values.capacity, 10), themeId: THEME_CHOICES.some(([id]) => id === values.themeId) ? values.themeId : "agora" };
 }
 export const describeSpace = (space) => [space.visibility === "private" ? "Private" : "Unlisted", ACCESS_WORDS[space.access] || "members only", space.occupancy + " here"].join(" · ");
-// Member ids are acct_… (accounts) or member:<uuid> (guests); the server matches the colon literally, so it must not be percent-encoded.
+// Member ids are ab… (accounts) or member:<uuid> (guests); the server matches the colon literally, so it must not be percent-encoded.
 export const memberPath = (id) => encodeURIComponent(id).replace(/%3A/gi, ":");
 export const inviteUrl = (origin, path) => new URL(path, origin).href;
 

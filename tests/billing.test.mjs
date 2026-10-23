@@ -17,7 +17,7 @@ after(async () => { await rm(temp, { recursive: true, force: true }); });
 const config = () => ({ ready: true, origin: "https://agora.build", secret: "sk_test_fixture", webhookSecret: "whsec_fixture_only", periodCredits: 25, products: [{ id: "premium-monthly", plan: "premium", priceId: "price_premium" }, { id: "builder-pack", name: "Builder pack", type: "credits", credits: 100, priceId: "price_credits" }] });
 async function fixture() {
   const store = createStore(resolve(root, "data/people.json"), resolve(temp, ++count + ".json"));
-  const sub = "acct_" + "B".repeat(26);
+  const sub = "ab" + "B".repeat(26);
   const login = { ...(await store.signIn({ sub, sid: "fixture-sid", name: "Builder", idToken: "fixture-id-token" })), account: { id: sub } };
   const sessions = new Map(), subscriptions = new Map(), invoices = new Map(), payments = new Map(), charges = new Map();
   let sequence = 0, customerCalls = 0;
