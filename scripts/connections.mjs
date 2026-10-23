@@ -120,6 +120,22 @@ const keyNames = (body) => {
   const inner = isObject(body.data) ? "; data keys: " + Object.keys(body.data).slice(0, 12).join(", ") : "";
   return "keys: " + (names.join(", ") || "none") + inner;
 };
+const clip = (value) => value === undefined || value === null ? "none" : String(value).replace(/[^\x20-\x7e]/g, "?").slice(0, 120);
+// Non-secret facts about a token response, for a log line: its key names, token_type, scope and lifetime, and the
+// access token's length and whether it looks like a JWT. Never a token value.
+const tokenShape = (result) => {
+  if (!isObject(result)) return "no object";
+  const token = typeof result.access_token === "string" ? result.access_token : "";
+  return keyNames(result) + "; token_type " + clip(result.token_type) + "; scope " + clip(result.scope) + "; expires_in " + clip(result.expires_in) + "; access token " + token.length + " characters" + (token.split(".").length === 3 ? ", JWT-shaped" : "");
+};
+// Why Agora refused a request, for a log line: the status, WWW-Authenticate and the body's error fields. It reads the
+// body, so use it only on a response that is otherwise discarded.
+const refusal = async (response) => {
+  let body;
+  try { body = await response.json(); } catch { body = undefined; }
+  const fields = isObject(body) ? ["statusCode", "code", "error", "error_description", "phrase", "message", "msg", "redirectToLoginPage"].filter((key) => key in body).map((key) => key + " " + clip(body[key])) : [];
+  return response.status + "; WWW-Authenticate " + clip(response.headers?.get?.("www-authenticate")) + "; " + (fields.join(", ") || keyNames(body));
+};
 
 export function createConnections(store, config = connectionsConfig(), { request = fetch, now = Date.now, log = (line) => console.log(line) } = {}) {
   const seal = (value, userId) => {
@@ -163,6 +179,7 @@ export function createConnections(store, config = connectionsConfig(), { request
       catch { return { unreachable: true }; }
       let result = null;
       if (response.ok) { try { result = await response.json(); } catch { result = null; } }
+      else log("Agora token renewal refused: " + await refusal(response) + ".");
       if (response.status >= 500) return { unreachable: true };
       if (typeof result?.access_token !== "string" || !result.access_token) {
         account.connections.agora = seal({ ...tokens, reconnect: true }, userId);
@@ -184,6 +201,7 @@ export function createConnections(store, config = connectionsConfig(), { request
     try {
       response = await bearerRequest(token, path, method);
       if (response.status === 401) {
+        log("Agora refused " + method + " " + path + ": " + await refusal(response) + ".");
         token = await accessToken(userId, token);
         response = await bearerRequest(token, path, method);
       }
@@ -191,7 +209,10 @@ export function createConnections(store, config = connectionsConfig(), { request
       if (error instanceof AppError) throw error;
       throw new AppError(503, "Agora could not be reached.");
     }
-    if (response.status === 401) throw reconnectError();
+    if (response.status === 401) {
+      log("Agora refused " + method + " " + path + " after renewal: " + await refusal(response) + ".");
+      throw reconnectError();
+    }
     return { status: response.status, ok: response.ok, body: await readBody(response) };
   }
   // The project list: GET /api/v0/customer/project, or GET /api/v0/project where the first is not found.
@@ -208,7 +229,7 @@ export function createConnections(store, config = connectionsConfig(), { request
     for (const path of [AGORA_PATHS.companyInfo, AGORA_PATHS.userAuth]) {
       try {
         const response = await bearerRequest(token, path);
-        if (!response.ok) continue;
+        if (!response.ok) { log("Agora name lookup GET " + path + " answered " + await refusal(response) + "."); continue; }
         const name = mapName(await readBody(response));
         if (name) return name;
       } catch { /* Try the next source. */ }
@@ -266,9 +287,10 @@ export function createConnections(store, config = connectionsConfig(), { request
       let result;
       try {
         const response = await tokenRequest({ grant_type: "authorization_code", code, redirect_uri: config.connect.redirectUri });
-        if (!response.ok) throw new Error("refused");
+        if (!response.ok) { log("Agora code exchange refused: " + await refusal(response) + "."); throw new Error("refused"); }
         result = await response.json();
       } catch { throw new ConnectError("token"); }
+      log("Agora code exchange answered " + tokenShape(result) + ".");
       if (typeof result?.access_token !== "string" || !result.access_token || result.access_token.length > 8192) throw new ConnectError("token");
       const tokens = { accessToken: result.access_token, refreshToken: typeof result.refresh_token === "string" ? result.refresh_token : "", expiresAt: lifetime(result) };
       const name = await agoraName(result.access_token);

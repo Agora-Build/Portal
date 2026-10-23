@@ -350,6 +350,12 @@ test("a refused renewal marks the connection as needing a reconnect", async (t) 
   assert.deepEqual(await response.json(), { error: "Reconnect Agora Console to renew its access.", reconnect: true });
   const status = (await (await call(app.base, "/api/connections", { cookie: session.cookie })).json()).agora;
   assert.deepEqual([status.connected, status.reconnect, status.name], [true, true, "Agora Builder"]);
+  // The log says why, by status and Agora's error fields, never with a token or the client secret.
+  const logged = app.logs.join("\n");
+  assert.match(logged, /Agora code exchange answered keys: access_token, refresh_token, expires_in, token_type; token_type bearer; scope none; expires_in \d+; access token \d+ characters\./);
+  assert.match(logged, /Agora refused GET \/api\/v0\/customer\/project: 401; WWW-Authenticate none; code 401, msg unauthorized\./);
+  assert.match(logged, /Agora token renewal refused: 400; WWW-Authenticate none; error invalid_grant\./);
+  for (const secret of [...app.agora.issued, app.agora.clientSecret]) assert.ok(!logged.includes(secret), "no token or client secret in the log");
   // No further calls to Agora until the account reconnects.
   const before = app.agora.calls.length;
   assert.equal((await call(app.base, "/api/connections/agora/projects", { cookie: session.cookie })).status, 401);
