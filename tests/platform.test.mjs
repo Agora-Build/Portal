@@ -67,22 +67,25 @@ test("Vox-compatible entitlements depend on verified subscription state and peri
   assert.equal(entitlements("fellow").publishMainline, true);
 });
 
-test("Agora Console connections are encrypted, owner-only, and renewed with the AGORA_OAUTH_* settings", async () => {
+test("Agora Console connections are encrypted, owner-only, and renewed with the AGORA_SSO_* settings", async () => {
   const store = newStore(), login = await signIn(store);
-  const connectionConfig = connectionsConfig({ AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64"), AGORA_OAUTH_CLIENT_ID: "portal-test", AGORA_OAUTH_CLIENT_SECRET: "test-only-agora-client-value", AGORA_OAUTH_BASE_URL: "https://sso.agora.io" });
+  const connectionConfig = connectionsConfig({ AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64"), AGORA_SSO_CLIENT_ID: "portal-test", AGORA_SSO_CLIENT_SECRET: "test-only-agora-client-value", AGORA_SSO_BASE_URL: "https://sso.agora.io" });
   let refreshes = 0;
   const resources = createConnections(store, connectionConfig, { request: async (url, options) => {
     if (url.endsWith("/token")) {
       refreshes++;
       assert.equal(url, "https://sso.agora.io/api/v0/oauth/token");
-      assert.deepEqual([options.body.get("grant_type"), options.body.get("client_id"), options.body.get("refresh_token")], ["refresh_token", "portal-test", "upstream-refresh"]);
+      assert.deepEqual([options.body.get("grant_type"), options.body.get("client_id"), options.body.get("client_secret"), options.body.get("refresh_token")], ["refresh_token", "portal-test", "test-only-agora-client-value", "upstream-refresh"]);
       return Response.json({ access_token: "renewed-upstream-token", refresh_token: "rotated-upstream-refresh", expires_in: 7200 }); }
     assert.match(options.headers.Authorization, /upstream-token/);
-    return Response.json({ items: [{ projectId: "project-1", name: "Private project", appId: "agora-app-id", signKey: "private-test-certificate", status: "active" }] });
+    const project = { projectId: "project-1", name: "Private project", appId: "agora-app-id", signKey: "private-test-certificate", status: "active" };
+    if (options.method === "DELETE") { assert.equal(url, "https://sso.agora.io/api/v0/customer/user-auth"); return Response.json({ code: 0 }); }
+    assert.equal(url, "https://agora-cli.agora.io/api/cli/v1/projects", "projects come from the default BFF");
+    return Response.json({ items: [project] });
   } });
   await resources.save(login.account.id, { accessToken: "upstream-token", refreshToken: "upstream-refresh", expiresAt: Date.now() - 1 });
   // The connection needs no Agora identity on the account; without SITE_URL the connect flow itself is unavailable.
-  assert.deepEqual((await resources.status(login.account.id)).agora, { ready: true, connect: false, connected: true, name: null });
+  assert.deepEqual((await resources.status(login.account.id)).agora, { ready: true, connect: false, connected: true, name: null, reconnect: false });
   assert.deepEqual(connectionConfig.connect.missing, ["SITE_URL"]);
   const lists = await Promise.all([resources.projects(login.account.id), resources.projects(login.account.id)]);
   assert.equal(refreshes, 1);
@@ -104,15 +107,14 @@ test("Agora Console connections are encrypted, owner-only, and renewed with the 
   await assert.rejects(resources.projects(login.account.id), { status: 403 });
 });
 
-test("the Agora Console key is read under its new name, with the old name as a fallback", () => {
-  const key = randomBytes(32).toString("base64"), other = randomBytes(32).toString("base64");
+test("the Agora Console key is read from AGORA_CONSOLE_ENCRYPTION_KEY only", () => {
+  const key = randomBytes(32).toString("base64");
   assert.equal(connectionsConfig({ AGORA_CONSOLE_ENCRYPTION_KEY: key }).key.toString("base64"), key);
-  assert.equal(connectionsConfig({ CONNECTION_ENCRYPTION_KEY: key }).key.toString("base64"), key);
-  assert.equal(connectionsConfig({ AGORA_CONSOLE_ENCRYPTION_KEY: key, CONNECTION_ENCRYPTION_KEY: other }).key.toString("base64"), key, "the new name wins");
+  assert.equal(connectionsConfig({ CONNECTION_ENCRYPTION_KEY: key }).key.length, 0, "the old name is gone");
   assert.equal(connectionsConfig({}).ready, false);
 });
 
-test("without the AGORA_OAUTH_* settings an expired Console connection asks to reconnect", async () => {
+test("without the AGORA_SSO_* client settings an expired Console connection asks to reconnect", async () => {
   const store = newStore(), login = await signIn(store);
   const resources = createConnections(store, connectionsConfig({ AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64") }), { request: async () => { throw new Error("no request expected"); } });
   await resources.save(login.account.id, { accessToken: "upstream-token", refreshToken: "upstream-refresh", expiresAt: Date.now() - 1 });

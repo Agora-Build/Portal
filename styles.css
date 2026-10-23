@@ -55,7 +55,10 @@ a.is-disabled { opacity: .65; cursor: default; }
 .connection-heading { display: flex; justify-content: space-between; gap: 25px; flex-wrap: wrap; align-items: center; }
 .connection-heading .account-actions { margin: 0; }
 .agora-project { padding: 20px 0; border-top: 1px solid var(--line); margin-top: 18px; }
-.agora-project h4 { margin: 0 0 7px; }
+.agora-project h3 { margin: 0 0 7px; font-size: 18px; }
+.agora-project .muted { margin: 6px 0 0; font-size: 12px; }
+.agora-toolbar, .agora-project-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin-top: 14px; }
+#agora-dialog { width: min(720px, calc(100% - 28px)); }
 .agora-project .mono, .project-secret { overflow-wrap: anywhere; font-size: 12px; }
 .project-secret { display: block; margin-top: 12px; padding: 10px; background: var(--paper); }
 .statement-list { border-top: 1px solid var(--line); }
