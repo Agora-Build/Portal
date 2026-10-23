@@ -304,19 +304,19 @@ test("projects and certificates are read with a bearer token carrying agora:proj
   const session = await signIn(app);
   assert.equal((await connect(app, session)).location, "/account/?connected=agora");
   const token = (scope) => app.fake.issueAccessToken({ sub: session.sub, scope });
-  const projects = await call(app.base, "/api/connections/agora/projects", { bearer: await token("agora:projects") });
+  const projects = await call(app.base, "/api/v1/connections/agora/projects", { bearer: await token("agora:projects") });
   assert.equal(projects.status, 200);
   assert.equal((await projects.json()).projects[0].appId, "agora-app-id");
-  const without = await call(app.base, "/api/connections/agora/projects", { bearer: await token("credits") });
+  const without = await call(app.base, "/api/v1/connections/agora/projects", { bearer: await token("credits") });
   assert.equal(without.status, 403);
   assert.match(without.headers.get("www-authenticate"), /^Bearer error="insufficient_scope", scope="agora:projects"/);
-  const certificate = await call(app.base, "/api/connections/agora/certificate", { bearer: await token("agora:certificates"), method: "POST", data: { projectId: "vendor-1" } });
+  const certificate = await call(app.base, "/api/v1/connections/agora/certificate", { bearer: await token("agora:certificates"), method: "POST", data: { projectId: "vendor-1" } });
   assert.equal(certificate.status, 200);
   assert.equal((await certificate.json()).certificate, "private-test-certificate");
-  const projectsOnly = await call(app.base, "/api/connections/agora/certificate", { bearer: await token("agora:projects"), method: "POST", data: { projectId: "vendor-1" } });
+  const projectsOnly = await call(app.base, "/api/v1/connections/agora/certificate", { bearer: await token("agora:projects"), method: "POST", data: { projectId: "vendor-1" } });
   assert.equal(projectsOnly.status, 403);
   assert.match(projectsOnly.headers.get("www-authenticate"), /scope="agora:certificates"/);
-  const stranger = await call(app.base, "/api/connections/agora/projects", { bearer: await app.fake.issueAccessToken({ scope: "agora:projects" }) });
+  const stranger = await call(app.base, "/api/v1/connections/agora/projects", { bearer: await app.fake.issueAccessToken({ scope: "agora:projects" }) });
   assert.equal(stranger.status, 403, "another account's token sees no connection");
 });
 
@@ -461,7 +461,8 @@ test("an account signs RTC and RTM tokens for its project on agora.build; the ce
   const appId = "0123456789abcdef0123456789abcdef", certificate = "abcdef0123456789abcdef0123456789";
   app.agora.state.items.push({ projectId: "tokens-1", name: "Tokens", appId, signKey: certificate, status: "1", createdAt: "2024-01-02T03:04:05Z" }, { projectId: "no-cert", name: "Testing mode", appId, signKey: "", status: "1" });
   const origin = { Origin: new URL(app.base).origin };
-  const sign = (data, options = { cookie: session.cookie, headers: origin }) => call(app.base, "/api/connections/agora/token", { method: "POST", data, ...options });
+  // The browser calls /api/...; apps with access tokens call the versioned /api/v1/....
+  const sign = (data, options = { cookie: session.cookie, headers: origin }) => call(app.base, options.bearer ? "/api/v1/connections/agora/token" : "/api/connections/agora/token", { method: "POST", data, ...options });
 
   const rtc = await sign({ projectId: "tokens-1", type: "rtc", channel: "demo", account: "builder_42", rtm: { expire: 600 } });
   assert.equal(rtc.status, 200);

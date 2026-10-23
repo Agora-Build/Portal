@@ -37,7 +37,7 @@ async function appTokens(browser, { client, secret, method, redirectUri, scope, 
 const voxTokens = (browser, user, target = stack) => appTokens(browser, { client: "vox", secret: target.secrets.VOX_CLIENT_SECRET, method: "post", redirectUri: VOX_REDIRECT, scope: "openid credits", user, target });
 const json = async (response) => ({ status: response.status, body: await response.json() });
 const meOf = async (browser) => (await browser.api("/api/me")).json();
-const balanceOf = async (token) => (await (await bearer(stack, "/api/credits/balance", token)).json()).credits;
+const balanceOf = async (token) => (await (await bearer(stack, "/api/v1/credits/balance", token)).json()).credits;
 
 // The atem-like native app: device authorization, approved by the person in their browser, then one token poll.
 async function deviceTokens(browser, user, scope) {
@@ -173,17 +173,17 @@ describe("the Portal against the real auth.agora.build", { skip: skip || false }
     assert.ok(access.payload.scope.split(" ").includes("credits"));
     assert.equal(await balanceOf(tokens.access_token), 50);
     const key = "e2e-reserve-" + Date.now();
-    const held = await json(await bearer(stack, "/api/platform/credits/reserve", tokens.access_token, { method: "POST", json: { service: "evaluation", units: 2, idempotencyKey: key } }));
+    const held = await json(await bearer(stack, "/api/v1/platform/credits/reserve", tokens.access_token, { method: "POST", json: { service: "evaluation", units: 2, idempotencyKey: key } }));
     assert.equal(held.status, 200);
     assert.equal(held.body.status, "reserved");
     assert.equal(await balanceOf(tokens.access_token), 44, "2 units at the server's price of 3 are held");
-    const again = await json(await bearer(stack, "/api/platform/credits/reserve", tokens.access_token, { method: "POST", json: { service: "evaluation", units: 2, idempotencyKey: key } }));
+    const again = await json(await bearer(stack, "/api/v1/platform/credits/reserve", tokens.access_token, { method: "POST", json: { service: "evaluation", units: 2, idempotencyKey: key } }));
     assert.deepEqual([again.status, again.body.id], [200, held.body.id], "a retried reserve is idempotent");
-    const settled = await json(await bearer(stack, "/api/platform/credits/settle", tokens.access_token, { method: "POST", json: { service: "evaluation", reservationId: held.body.id, outcome: "capture" } }));
+    const settled = await json(await bearer(stack, "/api/v1/platform/credits/settle", tokens.access_token, { method: "POST", json: { service: "evaluation", reservationId: held.body.id, outcome: "capture" } }));
     assert.deepEqual([settled.status, settled.body], [200, { settled: true }]);
     assert.equal(await balanceOf(tokens.access_token), 44);
     assert.equal((await (await browser.api("/api/credits/balance")).json()).credits, 44, "the browser sees the same wallet");
-    const statement = await json(await bearer(stack, "/api/credits/statement", tokens.access_token));
+    const statement = await json(await bearer(stack, "/api/v1/credits/statement", tokens.access_token));
     assert.equal(statement.status, 200);
     assert.ok(statement.body.entries.length >= 2, "the grant and the charge are on the statement");
     assertNothingSecretLogged();
@@ -195,18 +195,18 @@ describe("the Portal against the real auth.agora.build", { skip: skip || false }
     const tokens = await deviceTokens(browser, user, "openid profile credits");
     const header = decodeProtectedHeader(tokens.access_token);
     assert.deepEqual([header.typ, header.alg], ["at+jwt", "ES256"]);
-    const me = await json(await bearer(stack, "/api/me", tokens.access_token));
+    const me = await json(await bearer(stack, "/api/v1/me", tokens.access_token));
     assert.equal(me.status, 200);
     assert.match(me.body.account.id, ACCOUNT_ID, "the first token for a new sub gets an account");
     assert.equal(me.body.account.email, undefined, "bearer callers don't get the email");
-    const balance = await json(await bearer(stack, "/api/credits/balance", tokens.access_token));
+    const balance = await json(await bearer(stack, "/api/v1/credits/balance", tokens.access_token));
     assert.deepEqual([balance.status, balance.body.userId, balance.body.credits], [200, me.body.account.id, 0]);
     // The same person, the same app, without the credits scope.
     const narrow = await deviceTokens(browser, user, "openid profile agora:projects");
     const scopes = (await lib.verifyJwt(stack.idp, narrow.access_token, { audience: API, typ: "at+jwt" })).payload.scope.split(" ");
     assert.ok(!scopes.includes("credits"));
-    assert.equal((await bearer(stack, "/api/me", narrow.access_token)).status, 200);
-    const refused = await bearer(stack, "/api/credits/balance", narrow.access_token);
+    assert.equal((await bearer(stack, "/api/v1/me", narrow.access_token)).status, 200);
+    const refused = await bearer(stack, "/api/v1/credits/balance", narrow.access_token);
     assert.equal(refused.status, 403);
     assert.match(refused.headers.get("www-authenticate"), /^Bearer error="insufficient_scope", scope="credits"/);
     assertNothingSecretLogged();
@@ -220,10 +220,10 @@ describe("the Portal against the real auth.agora.build", { skip: skip || false }
     const access = await lib.verifyJwt(stack.idp, tokens.access_token, { audience: API, typ: "at+jwt" });
     assert.deepEqual([access.payload.client_id, access.payload.scope.split(" ").includes("credits")], ["notes", true]);
     assert.equal(await balanceOf(tokens.access_token), 20, "the token is valid and may read the balance");
-    const reserve = await json(await bearer(stack, "/api/platform/credits/reserve", tokens.access_token, { method: "POST", json: { service: "evaluation", units: 1, idempotencyKey: "e2e-notes-reserve-0001" } }));
+    const reserve = await json(await bearer(stack, "/api/v1/platform/credits/reserve", tokens.access_token, { method: "POST", json: { service: "evaluation", units: 1, idempotencyKey: "e2e-notes-reserve-0001" } }));
     assert.equal(reserve.status, 403);
     assert.match(reserve.body.error, /not allowed to charge credits/);
-    const settle = await bearer(stack, "/api/platform/credits/settle", tokens.access_token, { method: "POST", json: { service: "evaluation", reservationId: "00000000-0000-0000-0000-000000000000", outcome: "capture" } });
+    const settle = await bearer(stack, "/api/v1/platform/credits/settle", tokens.access_token, { method: "POST", json: { service: "evaluation", reservationId: "00000000-0000-0000-0000-000000000000", outcome: "capture" } });
     assert.equal(settle.status, 403);
     assert.equal(await balanceOf(tokens.access_token), 20, "nothing was held");
     assertNothingSecretLogged();
@@ -247,16 +247,16 @@ describe("the Portal against the real auth.agora.build", { skip: skip || false }
     const { browser } = await portalSignIn(stack, person(5801, "Rosalind"));
     const old = await voxTokens(browser);
     const oldKid = decodeProtectedHeader(old.access_token).kid;
-    assert.equal((await bearer(stack, "/api/me", old.access_token)).status, 200, "the Portal knows the current key");
+    assert.equal((await bearer(stack, "/api/v1/me", old.access_token)).status, 200, "the Portal knows the current key");
     const published = await emergencyRotation(oldKid);
     const rotatedAt = Date.now();
     const fresh = await voxTokens(browser);
     assert.equal(decodeProtectedHeader(fresh.access_token).kid, published[0], "the fresh token uses the replacement key");
     // The Portal may refetch the JWKS for a new kid 5 s after its last fetch.
-    const accepted = await eventually(async () => (await bearer(stack, "/api/me", fresh.access_token)).status === 200, { timeout: 6500, every: 250 });
+    const accepted = await eventually(async () => (await bearer(stack, "/api/v1/me", fresh.access_token)).status === 200, { timeout: 6500, every: 250 });
     const elapsed = Date.now() - rotatedAt;
     assert.ok(accepted, "a fresh token works within about 6 s of the rotation");
-    const refused = await bearer(stack, "/api/me", old.access_token);
+    const refused = await bearer(stack, "/api/v1/me", old.access_token);
     assert.equal(refused.status, 401, "the refetched JWKS no longer has the old key");
     assert.match(refused.headers.get("www-authenticate"), /^Bearer error="invalid_token"/);
     console.log("# flow 8a: the fresh token was accepted " + elapsed + " ms after the rotation");
@@ -266,18 +266,18 @@ describe("the Portal against the real auth.agora.build", { skip: skip || false }
   test("8b. key rotation: with no fresh traffic, the old token is refused once the Portal's 60 s JWKS cache expires", { timeout: 120000 }, async () => {
     const { browser } = await portalSignIn(stack, person(5802, "Chien-Shiung"));
     const old = await voxTokens(browser);
-    assert.equal((await bearer(stack, "/api/me", old.access_token)).status, 200, "the Portal knows the current key");
+    assert.equal((await bearer(stack, "/api/v1/me", old.access_token)).status, 200, "the Portal knows the current key");
     await emergencyRotation(decodeProtectedHeader(old.access_token).kid);
     const rotatedAt = Date.now();
     // The documented trade-off: until the 60 s cache expires, the cached JWKS still has the old key.
-    const meanwhile = (await bearer(stack, "/api/me", old.access_token)).status;
+    const meanwhile = (await bearer(stack, "/api/v1/me", old.access_token)).status;
     // jose's cache uses the real clock and no Portal option shortens it, so this test waits.
     await sleep(Math.max(0, rotatedAt + 61000 - Date.now()));
-    const refused = await bearer(stack, "/api/me", old.access_token);
+    const refused = await bearer(stack, "/api/v1/me", old.access_token);
     assert.equal(refused.status, 401, "the old token's key is unknown once the Portal refetches the JWKS");
     assert.match(refused.headers.get("www-authenticate"), /^Bearer error="invalid_token"/);
     const fresh = await voxTokens(browser);
-    assert.equal((await bearer(stack, "/api/me", fresh.access_token)).status, 200);
+    assert.equal((await bearer(stack, "/api/v1/me", fresh.access_token)).status, 200);
     console.log("# flow 8b: right after the rotation the cached JWKS still answered " + meanwhile + " for the old token; after 61 s it answered 401");
     assertNothingSecretLogged();
   });
@@ -291,17 +291,17 @@ describe("the Portal against the real auth.agora.build", { skip: skip || false }
     await createLedger(stack.store).deposit(yId, 40, "E2E grant", "e2e-grant-" + yId);
     const x = await voxTokens(xBrowser);
     const y = await voxTokens(yBrowser);
-    const hold = await json(await bearer(stack, "/api/platform/credits/reserve", y.access_token, { method: "POST", json: { service: "evaluation", units: 1, idempotencyKey: "e2e-wrong-account-0001" } }));
+    const hold = await json(await bearer(stack, "/api/v1/platform/credits/reserve", y.access_token, { method: "POST", json: { service: "evaluation", units: 1, idempotencyKey: "e2e-wrong-account-0001" } }));
     assert.equal(hold.status, 200);
-    const me = await json(await bearer(stack, "/api/me", x.access_token));
+    const me = await json(await bearer(stack, "/api/v1/me", x.access_token));
     assert.equal(me.body.account.id, xId);
-    const balance = await json(await bearer(stack, "/api/credits/balance?userId=" + yId, x.access_token));
+    const balance = await json(await bearer(stack, "/api/v1/credits/balance?userId=" + yId, x.access_token));
     assert.deepEqual([balance.body.userId, balance.body.credits], [xId, 0], "X's token reads only X's wallet");
-    const statement = await json(await bearer(stack, "/api/credits/statement", x.access_token));
+    const statement = await json(await bearer(stack, "/api/v1/credits/statement", x.access_token));
     assert.deepEqual(statement.body.entries, [], "none of Y's entries");
-    const settle = await bearer(stack, "/api/platform/credits/settle", x.access_token, { method: "POST", json: { service: "evaluation", reservationId: hold.body.id, outcome: "capture" } });
+    const settle = await bearer(stack, "/api/v1/platform/credits/settle", x.access_token, { method: "POST", json: { service: "evaluation", reservationId: hold.body.id, outcome: "capture" } });
     assert.equal(settle.status, 404, "X's token can't settle Y's hold");
-    const release = await json(await bearer(stack, "/api/platform/credits/settle", y.access_token, { method: "POST", json: { service: "evaluation", reservationId: hold.body.id, outcome: "release" } }));
+    const release = await json(await bearer(stack, "/api/v1/platform/credits/settle", y.access_token, { method: "POST", json: { service: "evaluation", reservationId: hold.body.id, outcome: "release" } }));
     assert.equal(release.status, 200, "Y's hold was untouched");
     assert.equal(await balanceOf(y.access_token), 40);
     assert.equal((await (await xBrowser.api("/api/credits/balance")).json()).userId, xId);

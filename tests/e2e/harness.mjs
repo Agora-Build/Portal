@@ -24,7 +24,9 @@ import { createSignaling, signalingConfig } from "../../scripts/spaces/signaling
 
 export const portalRoot = fileURLToPath(new URL("../../", import.meta.url));
 export const authRepo = resolve(portalRoot, process.env.AUTH_REPO || "../Auth");
-export const API = "https://api.agora.build";
+// The Portal API audience. The test Portal's port is random, so it is set with PORTAL_API_AUDIENCE instead of the
+// default (the Portal's own origin).
+export const API = "https://portal.e2e.test";
 const SAMPLE_REDIRECT = "https://sample.test/callback";
 
 // Why the suite cannot run here, or null. Never includes a connection string.
@@ -144,7 +146,7 @@ async function startPortal({ issuer, port, directory, clientSecret, logs }) {
   await writeFile(billingFile, JSON.stringify({ vox: { services: { evaluation: { credits: 3, maxUnits: 5 } } } }));
   const store = createStore(resolve(portalRoot, "data/people.json"), resolve(directory, "community-" + port + ".json"), { log: (line) => logs.push(line) });
   const server = withEnv({
-    AUTH_ISSUER: issuer, PORTAL_CLIENT_ID: "portal", PORTAL_CLIENT_SECRET: clientSecret, SITE_URL: site,
+    AUTH_ISSUER: issuer, PORTAL_CLIENT_ID: "portal", PORTAL_CLIENT_SECRET: clientSecret, SITE_URL: site, PORTAL_API_AUDIENCE: API,
     PORTAL_BILLING_FILE: billingFile, AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64"), PLATFORM_ADMINS: ""
   }, () => createAppServer(portalRoot, {
     monitor: false, store, log: (line) => logs.push(line), models, modelLimit: 1000,

@@ -75,7 +75,7 @@ Set `SITE_URL` to the public HTTPS origin, such as `https://agora.build` (or `ht
 
 | Identity provider | Paths on `SITE_URL` registered at the IdP | Server configuration |
 | --- | --- | --- |
-| auth.agora.build | redirect `/auth/callback`, post-logout `/`, back-channel logout `/auth/backchannel-logout` | `AUTH_ISSUER`, `PORTAL_CLIENT_ID` (default `portal`), `PORTAL_CLIENT_SECRET`, optional `PORTAL_API_AUDIENCE` (default `https://api.agora.build`) |
+| auth.agora.build | redirect `/auth/callback`, post-logout `/`, back-channel logout `/auth/backchannel-logout` | `AUTH_ISSUER`, `PORTAL_CLIENT_ID` (default `portal`), `PORTAL_CLIENT_SECRET`, optional `PORTAL_API_AUDIENCE` (default: the `SITE_URL` origin, e.g. `https://agora.build`) |
 
 The IdP's clients file holds the same secret through `secretEnv: "PORTAL_CLIENT_SECRET"`; the registration block is in [the platform guide](docs/platform.md#idp-registration). The portal no longer reads `GOOGLE_*`, `GITHUB_*`, `APPLE_*`, `AGORA_OIDC_*`, `IDENTITY_CLIENTS_FILE`, `VOX_IDENTITY_*`, or `ASTATION_IDENTITY_ENABLED`, and it no longer serves `/oauth/*`. Without `AUTH_ISSUER` and a valid secret, or while the IdP is unreachable, sign-in shows itself as temporarily unavailable and browser-only participation keeps working.
 

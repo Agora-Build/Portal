@@ -7,10 +7,10 @@ import { createFakeIdp, LOGOUT_EVENT } from "./helpers/fake-idp.mjs";
 const issuer = "https://auth.example";
 const clientSecret = "portal-test-secret-".padEnd(40, "x");
 const siteUrl = "https://portal.example";
-const audience = "https://api.agora.build";
+const audience = "https://portal.example";
 
 async function setup(options = {}) {
-  const fake = await createFakeIdp({ issuer, clientId: "portal", clientSecret });
+  const fake = await createFakeIdp({ issuer, clientId: "portal", clientSecret, audience });
   const idp = createIdp({ issuer, clientId: "portal", clientSecret, siteUrl, audience, request: fake.request, ...options });
   return { fake, idp };
 }
@@ -95,7 +95,7 @@ test("available() re-checks an IdP that has been silent for 30 s: a stopped IdP 
 test("a probe refreshes changed IdP metadata, and gives up after 2 s on an IdP that hangs", async () => {
   let clock = 1_000_000;
   let hang = false;
-  const fake = await createFakeIdp({ issuer, clientId: "portal", clientSecret });
+  const fake = await createFakeIdp({ issuer, clientId: "portal", clientSecret, audience });
   const request = (url, options = {}) => hang ? new Promise((_, reject) => options.signal?.addEventListener("abort", () => reject(options.signal.reason))) : fake.request(url, options);
   const idp = createIdp({ issuer, clientId: "portal", clientSecret, siteUrl, audience, request, now: () => clock });
   assert.equal(await idp.available(), true);
@@ -289,6 +289,19 @@ test("bearer: a valid at+jwt access token gives sub, client ID and scopes", asyn
   assert.deepEqual((await idp.verifyAccessToken(await fake.issueAccessToken({ sub }))).scopes, ["credits"]);
   const multi = await fake.issueAccessToken({ sub, aud: [audience, "https://other.example"], scope: undefined });
   assert.deepEqual(await idp.verifyAccessToken(multi), { sub, clientId: "portal", scopes: [] });
+});
+
+test("bearer: the audience is the Portal's own origin unless PORTAL_API_AUDIENCE overrides it", async () => {
+  const fake = await createFakeIdp({ issuer, clientId: "portal", clientSecret, audience: "https://dev.agora.build" });
+  const idp = createIdp({ issuer, clientId: "portal", clientSecret, siteUrl: "https://dev.agora.build/", request: fake.request });
+  const sub = fake.accountId();
+  assert.equal((await idp.verifyAccessToken(await fake.issueAccessToken({ sub }))).sub, sub, "aud https://dev.agora.build");
+  for (const aud of ["https://api.agora.build", "https://agora.build", "https://dev.agora.build/api"]) {
+    await assert.rejects(idp.verifyAccessToken(await fake.issueAccessToken({ sub, aud })), { status: 401 }, aud);
+  }
+  const custom = createIdp({ issuer, clientId: "portal", clientSecret, siteUrl: "https://dev.agora.build", audience: "https://api.example", request: fake.request });
+  assert.equal((await custom.verifyAccessToken(await fake.issueAccessToken({ sub, aud: "https://api.example" }))).sub, sub);
+  await assert.rejects(custom.verifyAccessToken(await fake.issueAccessToken({ sub })), { status: 401 }, "the override replaces the origin");
 });
 
 test("bearer: wrong typ, alg none or HS256, wrong iss or aud, expiry, forged signatures and bad subjects give 401", async () => {

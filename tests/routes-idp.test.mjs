@@ -115,7 +115,7 @@ test("sign-in is unavailable, not broken, while the IdP is unconfigured or unrea
   assert.deepEqual(await (await call(missing.base, "/api/auth/config")).json(), { issuer: null, accountUrl: null });
   const visitor = await guest(missing);
   assert.equal((await (await call(missing.base, "/api/me", { cookie: visitor })).json()).profile.name, "Guest builder", "guests still work");
-  const bearer = await call(missing.base, "/api/me", { bearer: "anything" });
+  const bearer = await call(missing.base, "/api/v1/me", { bearer: "anything" });
   assert.equal(bearer.status, 503);
   const callback = await call(missing.base, "/auth/callback?code=x&state=y", { cookie: "portal_auth=abc" });
   assert.equal(callback.headers.get("location"), "/?signin=failed");
@@ -329,7 +329,7 @@ test("the matrix for bearer tokens: scopes per route, and routes that take only 
   const sub = app.fake.accountId();
   const token = (scope) => bearerToken(app, { sub, scope });
   const openid = await token("openid");
-  const me = await call(app.base, "/api/me", { bearer: openid });
+  const me = await call(app.base, "/api/v1/me", { bearer: openid });
   assert.equal(me.status, 200);
   const body = await me.json();
   assert.equal(body.account.id, sub);
@@ -337,24 +337,24 @@ test("the matrix for bearer tokens: scopes per route, and routes that take only 
   assert.ok((await app.store.snapshot()).accounts.some((account) => account.id === sub), "the first token creates the account");
 
   const credits = await token("credits");
-  assert.equal((await call(app.base, "/api/credits/balance", { bearer: credits })).status, 200);
-  assert.equal((await call(app.base, "/api/credits/statement", { bearer: credits })).status, 200);
-  await assertScope(await call(app.base, "/api/credits/balance", { bearer: openid }), "credits");
-  await assertScope(await call(app.base, "/api/credits/statement", { bearer: openid }), "credits");
-  assert.equal((await call(app.base, "/api/marketplaces/chat", { bearer: credits, method: "POST", data: { message: "Hi there" } })).status, 200);
-  assert.equal((await call(app.base, "/api/marketplaces/tts", { bearer: credits, method: "POST", data: { text: "Hello" } })).status, 200);
-  await assertScope(await call(app.base, "/api/marketplaces/chat", { bearer: openid, method: "POST", data: { message: "Hi there" } }), "credits");
-  await assertScope(await call(app.base, "/api/marketplaces/tts", { bearer: openid, method: "POST", data: { text: "Hello" } }), "credits");
+  assert.equal((await call(app.base, "/api/v1/credits/balance", { bearer: credits })).status, 200);
+  assert.equal((await call(app.base, "/api/v1/credits/statement", { bearer: credits })).status, 200);
+  await assertScope(await call(app.base, "/api/v1/credits/balance", { bearer: openid }), "credits");
+  await assertScope(await call(app.base, "/api/v1/credits/statement", { bearer: openid }), "credits");
+  assert.equal((await call(app.base, "/api/v1/marketplaces/chat", { bearer: credits, method: "POST", data: { message: "Hi there" } })).status, 200);
+  assert.equal((await call(app.base, "/api/v1/marketplaces/tts", { bearer: credits, method: "POST", data: { text: "Hello" } })).status, 200);
+  await assertScope(await call(app.base, "/api/v1/marketplaces/chat", { bearer: openid, method: "POST", data: { message: "Hi there" } }), "credits");
+  await assertScope(await call(app.base, "/api/v1/marketplaces/tts", { bearer: openid, method: "POST", data: { text: "Hello" } }), "credits");
 
   const projects = await token("agora:projects"), certificates = await token("agora:certificates");
-  assert.equal((await call(app.base, "/api/connections", { bearer: projects })).status, 200);
-  assert.notEqual((await call(app.base, "/api/connections/agora/projects", { bearer: projects })).status, 403);
-  assert.equal((await call(app.base, "/api/connections/agora", { bearer: projects, method: "DELETE" })).status, 200);
-  await assertScope(await call(app.base, "/api/connections", { bearer: credits }), "agora:projects");
-  await assertScope(await call(app.base, "/api/connections/agora/projects", { bearer: credits }), "agora:projects");
-  await assertScope(await call(app.base, "/api/connections/agora", { bearer: credits, method: "DELETE" }), "agora:projects");
-  await assertScope(await call(app.base, "/api/connections/agora/certificate", { bearer: projects, method: "POST", data: { projectId: "p" } }), "agora:certificates");
-  assert.notEqual((await call(app.base, "/api/connections/agora/certificate", { bearer: certificates, method: "POST", data: { projectId: "p" } })).status, 403);
+  assert.equal((await call(app.base, "/api/v1/connections", { bearer: projects })).status, 200);
+  assert.notEqual((await call(app.base, "/api/v1/connections/agora/projects", { bearer: projects })).status, 403);
+  assert.equal((await call(app.base, "/api/v1/connections/agora", { bearer: projects, method: "DELETE" })).status, 200);
+  await assertScope(await call(app.base, "/api/v1/connections", { bearer: credits }), "agora:projects");
+  await assertScope(await call(app.base, "/api/v1/connections/agora/projects", { bearer: credits }), "agora:projects");
+  await assertScope(await call(app.base, "/api/v1/connections/agora", { bearer: credits, method: "DELETE" }), "agora:projects");
+  await assertScope(await call(app.base, "/api/v1/connections/agora/certificate", { bearer: projects, method: "POST", data: { projectId: "p" } }), "agora:certificates");
+  assert.notEqual((await call(app.base, "/api/v1/connections/agora/certificate", { bearer: certificates, method: "POST", data: { projectId: "p" } })).status, 403);
 
   const all = await token("openid credits agora:projects agora:certificates");
   for (const [path, method, data] of [["/api/billing/account", "GET"], ["/api/billing/checkout", "POST", { productId: "builder-pack" }], ["/api/billing/manage", "POST", {}], ["/api/spaces", "POST", { title: "Token room" }], ["/api/spaces/mine", "GET"], ["/api/spaces/plaza/enter", "POST", {}], ["/api/spaces/plaza/heartbeat", "POST"], ["/api/signaling/token", "POST", {}], ["/api/radar", "GET"], ["/api/profile", "POST", profile()], ["/api/auth/logout", "POST", {}]]) {
@@ -368,20 +368,20 @@ test("the matrix for bearer tokens: scopes per route, and routes that take only 
 
 test("bearer tokens that are missing, invalid, expired or for another audience get 401 invalid_token; unreachable keys give 503", async (t) => {
   const app = await start(t);
-  await assertInvalidToken(await call(app.base, "/api/me", { bearer: "not-a-jwt" }));
-  await assertInvalidToken(await call(app.base, "/api/credits/balance", { bearer: await bearerToken(app, { exp: Math.floor(Date.now() / 1000) - 120 }) }));
-  await assertInvalidToken(await call(app.base, "/api/credits/balance", { bearer: await bearerToken(app, { aud: "https://other.example" }) }));
-  await assertInvalidToken(await call(app.base, "/api/credits/balance", { bearer: await bearerToken(app, {}, { typ: "JWT" }) }));
+  await assertInvalidToken(await call(app.base, "/api/v1/me", { bearer: "not-a-jwt" }));
+  await assertInvalidToken(await call(app.base, "/api/v1/credits/balance", { bearer: await bearerToken(app, { exp: Math.floor(Date.now() / 1000) - 120 }) }));
+  await assertInvalidToken(await call(app.base, "/api/v1/credits/balance", { bearer: await bearerToken(app, { aud: "https://other.example" }) }));
+  await assertInvalidToken(await call(app.base, "/api/v1/credits/balance", { bearer: await bearerToken(app, {}, { typ: "JWT" }) }));
   await assertInvalidToken(await call(app.base, "/api/platform/credits/reserve", { method: "POST", data: {} }));
   // A bearer request never falls back to the browser cookie.
   const { cookie } = await browserSignIn(app);
-  await assertInvalidToken(await call(app.base, "/api/me", { cookie, bearer: "not-a-jwt" }));
-  assert.equal((await call(app.base, "/api/me", { bearer: await bearerToken(app) })).status, 200);
+  await assertInvalidToken(await call(app.base, "/api/v1/me", { cookie, bearer: "not-a-jwt" }));
+  assert.equal((await call(app.base, "/api/v1/me", { bearer: await bearerToken(app) })).status, 200);
   // With the IdP unreachable its keys can't be fetched, so a token can't be checked: 503, not 401.
   const fake = await createFakeIdp({ issuer, clientId: "portal", clientSecret });
   fake.setDown(true);
   const down = await start(t, { fake });
-  const unreachable = await call(down.base, "/api/credits/balance", { bearer: await fake.issueAccessToken() });
+  const unreachable = await call(down.base, "/api/v1/credits/balance", { bearer: await fake.issueAccessToken() });
   assert.equal(unreachable.status, 503);
   assert.equal(unreachable.headers.get("www-authenticate"), null);
 });
@@ -392,8 +392,8 @@ test("platform credits are priced on the server, per client and service, for cli
   const vox = await bearerToken(app, { sub, client_id: "vox", scope: "credits" });
   await app.store.ensureAccount(sub);
   await createLedger(app.store).deposit(sub, 30, "Test grant", "grant-route-test");
-  const reserve = (bearer, data) => call(app.base, "/api/platform/credits/reserve", { bearer, method: "POST", data });
-  const balance = async () => (await (await call(app.base, "/api/credits/balance", { bearer: vox })).json()).credits;
+  const reserve = (bearer, data) => call(app.base, "/api/v1/platform/credits/reserve", { bearer, method: "POST", data });
+  const balance = async () => (await (await call(app.base, "/api/v1/credits/balance", { bearer: vox })).json()).credits;
   const held = await reserve(vox, { service: "evaluation", units: 2, idempotencyKey: "route-reserve-000001" });
   assert.equal(held.status, 200);
   const hold = await held.json();
@@ -408,8 +408,8 @@ test("platform credits are priced on the server, per client and service, for cli
   assert.equal((await reserve(vox, { service: "evaluation", idempotencyKey: "short" })).status, 422);
   // Another account's token, even from the same client, cannot settle this hold.
   const stranger = await bearerToken(app, { sub: other, client_id: "vox", scope: "credits" });
-  assert.equal((await call(app.base, "/api/platform/credits/settle", { bearer: stranger, method: "POST", data: { service: "evaluation", reservationId: hold.id, outcome: "capture" } })).status, 404);
-  assert.equal((await call(app.base, "/api/platform/credits/settle", { bearer: vox, method: "POST", data: { service: "evaluation", reservationId: hold.id, outcome: "capture" } })).status, 200);
+  assert.equal((await call(app.base, "/api/v1/platform/credits/settle", { bearer: stranger, method: "POST", data: { service: "evaluation", reservationId: hold.id, outcome: "capture" } })).status, 404);
+  assert.equal((await call(app.base, "/api/v1/platform/credits/settle", { bearer: vox, method: "POST", data: { service: "evaluation", reservationId: hold.id, outcome: "capture" } })).status, 200);
   const notListed = await reserve(await bearerToken(app, { sub, client_id: "other-app", scope: "credits" }), { service: "evaluation", idempotencyKey: "route-reserve-000005" });
   assert.equal(notListed.status, 403);
   assert.match((await notListed.json()).error, /not allowed/);
@@ -417,9 +417,9 @@ test("platform credits are priced on the server, per client and service, for cli
   assert.equal((await reserve(await bearerToken(app, { sub, client_id: "billing-two", scope: "credits" }), { service: "analysis", idempotencyKey: "route-reserve-000007" })).status, 200);
   // Without a billing file, platform billing is off.
   const closed = await start(t, { billingClients: null });
-  const off = await call(closed.base, "/api/platform/credits/reserve", { bearer: await bearerToken(closed, { client_id: "vox", scope: "credits" }), method: "POST", data: { service: "evaluation", idempotencyKey: "route-reserve-000008" } });
+  const off = await call(closed.base, "/api/v1/platform/credits/reserve", { bearer: await bearerToken(closed, { client_id: "vox", scope: "credits" }), method: "POST", data: { service: "evaluation", idempotencyKey: "route-reserve-000008" } });
   assert.equal(off.status, 503);
-  assert.equal((await call(closed.base, "/api/platform/credits/settle", { bearer: await bearerToken(closed, { client_id: "vox", scope: "credits" }), method: "POST", data: {} })).status, 503);
+  assert.equal((await call(closed.base, "/api/v1/platform/credits/settle", { bearer: await bearerToken(closed, { client_id: "vox", scope: "credits" }), method: "POST", data: {} })).status, 503);
 });
 
 test("reserves are rate-limited per account at 60 a minute", async (t) => {
@@ -428,8 +428,8 @@ test("reserves are rate-limited per account at 60 a minute", async (t) => {
   const vox = await bearerToken(app, { sub, client_id: "vox", scope: "credits" });
   await app.store.ensureAccount(sub);
   await createLedger(app.store).deposit(sub, 1000, "Test grant", "grant-rate-test");
-  for (let index = 0; index < 60; index++) assert.equal((await call(app.base, "/api/platform/credits/reserve", { bearer: vox, method: "POST", data: { service: "evaluation", idempotencyKey: "rate-limit-reserve-" + String(index).padStart(3, "0") } })).status, 200, "reserve " + index);
-  assert.equal((await call(app.base, "/api/platform/credits/reserve", { bearer: vox, method: "POST", data: { service: "evaluation", idempotencyKey: "rate-limit-reserve-over" } })).status, 429);
+  for (let index = 0; index < 60; index++) assert.equal((await call(app.base, "/api/v1/platform/credits/reserve", { bearer: vox, method: "POST", data: { service: "evaluation", idempotencyKey: "rate-limit-reserve-" + String(index).padStart(3, "0") } })).status, 200, "reserve " + index);
+  assert.equal((await call(app.base, "/api/v1/platform/credits/reserve", { bearer: vox, method: "POST", data: { service: "evaluation", idempotencyKey: "rate-limit-reserve-over" } })).status, 429);
 });
 
 test("a bearer token reads its own account even with another account's cookie", async (t) => {
@@ -440,7 +440,7 @@ test("a bearer token reads its own account even with another account's cookie", 
   await createLedger(app.store).deposit(browserAccount, 9, "Browser grant", "grant-browser-account");
   await app.store.ensureAccount(x);
   await createLedger(app.store).deposit(x, 4, "Token grant", "grant-token-account");
-  const response = await call(app.base, "/api/credits/balance", { cookie: browser.cookie, bearer: await bearerToken(app, { sub: x, scope: "credits" }) });
+  const response = await call(app.base, "/api/v1/credits/balance", { cookie: browser.cookie, bearer: await bearerToken(app, { sub: x, scope: "credits" }) });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).credits, 4);
 });
@@ -448,10 +448,32 @@ test("a bearer token reads its own account even with another account's cookie", 
 test("bearer requests skip the same-origin check; unknown /api paths are 404 for them", async (t) => {
   const app = await start(t);
   const token = await bearerToken(app, { scope: "credits" });
-  assert.equal((await call(app.base, "/api/marketplaces/chat", { bearer: token, method: "POST", data: { message: "Hi there" }, headers: { Origin: "https://app.example", "Sec-Fetch-Site": "cross-site" } })).status, 200);
+  assert.equal((await call(app.base, "/api/v1/marketplaces/chat", { bearer: token, method: "POST", data: { message: "Hi there" }, headers: { Origin: "https://app.example", "Sec-Fetch-Site": "cross-site" } })).status, 200);
   const missing = await call(app.base, "/api/nothing-here", { bearer: token });
   assert.equal(missing.status, 404);
-  assert.equal((await call(app.base, "/api/credits/balance", { bearer: token, method: "DELETE" })).status, 404);
+  assert.equal((await call(app.base, "/api/v1/credits/balance", { bearer: token, method: "DELETE" })).status, 404);
+});
+
+test("apps use the versioned /api/v1; it holds only the access-token routes, and the browser keeps /api", async (t) => {
+  const app = await start(t);
+  const token = await bearerToken(app, { scope: "credits agora:projects" });
+  // The same handlers answer /api/v1 for apps.
+  assert.equal((await call(app.base, "/api/v1/me", { bearer: token })).status, 200);
+  assert.equal((await call(app.base, "/api/v1/credits/balance", { bearer: token })).status, 200);
+  // An access token on an unversioned app route is pointed at /api/v1.
+  const unversioned = await call(app.base, "/api/credits/balance", { bearer: token });
+  assert.equal(unversioned.status, 404);
+  assert.equal((await unversioned.json()).error, "Access tokens use the versioned API: /api/v1/credits/balance.");
+  // /api/v1 has no browser-only, public, webhook or unknown routes, with or without a token.
+  for (const [method, path] of [["GET", "/api/v1/billing/account"], ["GET", "/api/v1/people"], ["POST", "/api/v1/billing/webhook"], ["GET", "/api/v1/spaces"], ["GET", "/api/v1/nothing-here"], ["GET", "/api/v1/"], ["GET", "/api/v1/v1/me"]]) {
+    assert.equal((await call(app.base, path, { bearer: token, method, data: method === "POST" ? {} : undefined })).status, 404, method + " " + path + " with a token");
+    assert.equal((await call(app.base, path, { method, data: method === "POST" ? {} : undefined })).status, 404, method + " " + path + " without one");
+  }
+  // The browser session works on both; public reads still accept a token on /api.
+  const browser = await browserSignIn(app);
+  assert.equal((await call(app.base, "/api/credits/balance", { cookie: browser.cookie })).status, 200);
+  assert.equal((await call(app.base, "/api/v1/credits/balance", { cookie: browser.cookie })).status, 200);
+  assert.equal((await call(app.base, "/api/people", { bearer: token })).status, 200);
 });
 
 test("over https the session cookie is __Host-house_session", async (t) => {
@@ -584,6 +606,6 @@ test("only routes that accept access tokens create the caller's account; 404, br
   assert.equal((await call(app.base, "/api/billing/account", { bearer: token })).status, 403);
   assert.equal((await call(app.base, "/api/people", { bearer: token })).status, 200);
   assert.equal(await known(), false, "no account for a token that only reached a gated or public route");
-  assert.equal((await call(app.base, "/api/me", { bearer: token })).status, 200);
+  assert.equal((await call(app.base, "/api/v1/me", { bearer: token })).status, 200);
   assert.equal(await known(), true);
 });

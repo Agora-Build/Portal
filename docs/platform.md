@@ -23,7 +23,7 @@ the IdP; linked logins, devices and "sign out everywhere" are managed at
 | `AUTH_ISSUER` | The IdP, `https://auth.agora.build` (locally `http://auth.localhost:3090`; plain http only on a local host) |
 | `PORTAL_CLIENT_ID` | The Portal's client ID at the IdP (default `portal`) |
 | `PORTAL_CLIENT_SECRET` | Its client secret, at least 32 characters; the same value the IdP reads through its clients file's `secretEnv` |
-| `PORTAL_API_AUDIENCE` | The resource the Portal's APIs accept tokens for (default `https://api.agora.build`) |
+| `PORTAL_API_AUDIENCE` | The resource the Portal's APIs accept tokens for (default: the `SITE_URL` origin, `https://agora.build` in production and `https://dev.agora.build` on dev) |
 | `SITE_URL` | The Portal's public origin; the redirect URIs below are built from it |
 
 1. `GET /auth/login?returnTo=<path>` (every "Sign in" link on the site goes
@@ -60,7 +60,7 @@ the API resource and its scopes. The secret is named, never written there:
 ```json
 {
   "resources": [
-    { "indicator": "https://api.agora.build", "name": "Agora Build API", "scopes": ["credits", "agora:projects", "agora:certificates", "agora:tokens"] }
+    { "indicator": "https://agora.build", "name": "Agora Build API", "scopes": ["credits", "agora:projects", "agora:certificates", "agora:tokens"] }
   ],
   "clients": [
     {
@@ -80,14 +80,15 @@ the API resource and its scopes. The secret is named, never written there:
 }
 ```
 
-The production IdP's `https://api.agora.build` resource must include
+The production IdP's `https://agora.build` resource (the Portal's own origin;
+`https://dev.agora.build` on dev) must include
 `agora:certificates` and `agora:tokens` as well as `credits` and
 `agora:projects`; without them no token can carry those scopes, and
 `POST /api/connections/agora/certificate` and `/token` answer 403 to every app. Put the same `PORTAL_CLIENT_SECRET` value in the IdP's
 environment and the Portal's. Locally the URIs are `http://localhost:3080/...` against
 `http://auth.localhost:3090`; the IdP accepts plain http only on local host
 names (`localhost`, `*.localhost`, `127.0.0.1`) and only with an http issuer.
-Vox, Atem and other apps are registered with the `https://api.agora.build`
+Vox, Atem and other apps are registered with the Portal's origin as their
 resource and only the scopes they need (see below).
 
 ## Accounts, Sessions And Guests
@@ -195,22 +196,36 @@ seconds and refetched for an unknown key ID. The trade-offs:
 
 Browsers use the session cookie, with the same-origin checks unchanged for
 non-GET requests. Apps and servers send `Authorization: Bearer <access token>`,
-an IdP access token for the resource `https://api.agora.build`. A request with a
+an IdP access token whose resource is the Portal's own origin (`https://agora.build`;
+`https://dev.agora.build` on dev), the same host the app calls. A request with a
 bearer token never falls back to the cookie. The token must be a JWT with `typ`
 `at+jwt` and `alg` ES256, issued by `AUTH_ISSUER`, with `aud` containing
 `PORTAL_API_AUDIENCE`, an unexpired `exp` and a `sub`. Request the resource with
-`resource=https://api.agora.build` and the scopes below; see Auth's
+`resource=<the Portal origin>` and the scopes below; see Auth's
 `docs/integrating.md` for the flows (web code + PKCE, native device code).
+
+**Apps call the versioned API, `<origin>/api/v1/...`** (for example
+`https://agora.build/api/v1/connections/agora/projects`), so an app needs only
+one base URL, the same one it requests tokens for. `/api/v1` holds exactly the
+routes in the table below, served by the same handlers as the browser's
+`/api/...`; any other `/api/v1` path is 404. An access token sent to an
+unversioned `/api/...` route in the table gets 404 naming its `/api/v1` path;
+the browser keeps using `/api/...` with its cookie (it may also use `/api/v1`).
+`v1` may gain routes and fields but never loses or renames any; a breaking
+change becomes `/api/v2`, with `v1` kept through a deprecation period.
+
+The table names each route by its path after `/api/v1` for apps and `/api` for
+the browser:
 
 | Route | Browser (cookie) | Bearer scope |
 | --- | --- | --- |
-| `GET /api/me` | account or guest | any (an `openid`-only token is enough) |
-| `GET /api/credits/balance`, `/api/credits/statement` | account | `credits` |
-| `POST /api/marketplaces/chat`, `/api/marketplaces/tts` | account (no guests) | `credits` |
-| `GET /api/connections`, `/api/connections/agora/projects`, `DELETE /api/connections/agora` | account | `agora:projects` |
-| `POST /api/connections/agora/certificate` | account | `agora:certificates` |
-| `POST /api/connections/agora/token` | account | `agora:tokens` |
-| `POST /api/platform/credits/reserve`, `/settle` | not accepted | `credits`, from a client in `PORTAL_BILLING_FILE` |
+| `GET /me` | account or guest | any (an `openid`-only token is enough) |
+| `GET /credits/balance`, `/credits/statement` | account | `credits` |
+| `POST /marketplaces/chat`, `/marketplaces/tts` | account (no guests) | `credits` |
+| `GET /connections`, `/connections/agora/projects`, `DELETE /connections/agora` | account | `agora:projects` |
+| `POST /connections/agora/certificate` | account | `agora:certificates` |
+| `POST /connections/agora/token` | account | `agora:tokens` |
+| `POST /platform/credits/reserve`, `/settle` | not accepted | `credits`, from a client in `PORTAL_BILLING_FILE` |
 | Billing account, checkout and manage | account | not accepted |
 | Stoa spaces (create, own, admin), profile, radar, signaling | account (spaces) or guest | not accepted |
 
@@ -243,7 +258,7 @@ as Atem's) is public, so any program can obtain tokens under it; never list one.
 billing is off (503) and the log says why.
 
 ```http
-POST /api/platform/credits/reserve
+POST /api/v1/platform/credits/reserve
 Authorization: Bearer <the person's access token for vox>
 Content-Type: application/json
 
@@ -253,7 +268,7 @@ Content-Type: application/json
 The answer is `{ id, status }`: `reserved` for a new hold, or, for a repeated
 `idempotencyKey`, the existing hold's `pending`, `captured` or `released`; a
 repeat never charges twice. Run the work only after `reserved`. Settle with
-`POST /api/platform/credits/settle` and `{ service, reservationId, outcome }`,
+`POST /api/v1/platform/credits/settle` and `{ service, reservationId, outcome }`,
 where `outcome` is `capture` or `release`. `units` defaults to 1;
 `idempotencyKey` is 16 to 120 characters of letters, digits, `:`, `_` and `-`.
 Other answers: 403 for a client that isn't listed, 422 for an unknown service or
@@ -440,14 +455,14 @@ reach the same routes with `agora:projects`, `agora:certificates` and
 
 ### Agora Tokens
 
-`POST /api/connections/agora/token` signs an Agora RTC or RTM token for one of
+`POST /api/v1/connections/agora/token` (apps; the browser uses `/api/...`) signs an Agora RTC or RTM token for one of
 the account's projects on agora.build, so an app never needs the App
 Certificate. The certificate comes from the BFF project list for this request
 and is neither cached nor returned. Rate limit: 60 a minute per account.
 
 | Field | Meaning |
 | --- | --- |
-| `projectId` | A `projectId` from `GET /api/connections/agora/projects` |
+| `projectId` | A `projectId` from `GET /api/v1/connections/agora/projects` |
 | `type` | `rtc` or `rtm` |
 | `channel` | RTC: 1 to 64 bytes |
 | `uid` or `account` | RTC: a number 0 to 4294967295 (0 means any user, the default) or a 1 to 255 byte string account, not both |
@@ -481,7 +496,7 @@ signaling tokens use the same module; only the opt-in RTM channel permissions
 Moving Vox, Astation and Atem onto the IdP is their teams' work; the Portal side
 is ready. Each app registers with the IdP, signs people in there, and uses the
 `ab…` `sub` as the global account ID. Vox becomes a billing client: register
-it with the `credits` scope for `https://api.agora.build` and list its services
+it with the `credits` scope for the Portal's origin and list its services
 in `PORTAL_BILLING_FILE`. Native apps such as Atem use the device-code flow with
 the scopes they need. Map existing Vox identities by exact verified provider
 subjects, never email; existing Vox balances and history need an explicit,
