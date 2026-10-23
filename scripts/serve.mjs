@@ -111,8 +111,8 @@ export function createAppServer(directory = root, options = {}) {
   const ledger = createLedger(store);
   const credits = options.credits || createCredits(undefined, { ledger });
   const billing = options.billing || createBilling(store);
-  const connections = options.connections || createConnections(store);
-  // Connecting Agora Console needs the AGORA_OAUTH_* settings; without them it is unavailable, logged by setting name only.
+  const connections = options.connections || createConnections(store, undefined, { log });
+  // Connecting Agora Console needs the AGORA_SSO_* settings; without them it is unavailable, logged by setting name only.
   if (connections.config.connect && !connections.config.connect.ready) log("Agora Console connect is unavailable: set " + connections.config.connect.missing.join(", ") + ".");
   const models = options.models || createModelClient(modelConfig());
   const activity = options.activity || createActivityFeed({ store, projectsFile: resolve(dataDirectory, "projects.json"), snapshotFile: resolve(dataDirectory, "activity.json") });
