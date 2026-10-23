@@ -10,9 +10,12 @@
 //   PLAYWRIGHT_CORE=/path/to/node_modules/playwright-core CHROMIUM_PATH=/path/to/chrome \
 //     TEST_DATABASE_URL=postgres://… node scripts/browser-smoke.mjs
 //
-// At a desktop (1280×800) and a mobile (390×844) viewport it checks: one keyboard-reachable "Sign in" on the home
-// page; signing in through the IdP page and back; the account page (name, Manage sign-in, credits); a guest's sign-in
-// prompts; the account page when /api/auth/config fails; and signing out of the Portal and the IdP.
+// At a desktop (1280×800) and a mobile (390×844) viewport it checks: "Take a seat" on the home page leads to the
+// account page's inline sign-in section (no dialog), whose one keyboard-reachable "Sign in" link goes straight to the
+// IdP page and back; the account page (name, Manage sign-in, credits); "Continue with this browser" making a guest
+// profile and returning to the page that sent the visitor; a guest's sign-in prompts; the account page when
+// /api/auth/config fails; and signing out of the Portal and the IdP. With SCREENSHOT_DIR set, it saves the signed-out
+// account page at each viewport as one-step-signin-<viewport>.png there.
 import { createRequire } from "node:module";
 import { isAbsolute, resolve } from "node:path";
 import { loadAuth, person, skipReason, startStack } from "../tests/e2e/harness.mjs";
@@ -85,22 +88,31 @@ async function tabTo(page, locator, limit = 60) {
   }
   return false;
 }
-// The home page's sign-in: Tab to "Take a seat", Enter opens the sign-in dialog, Tab to its one "Sign in", Enter.
+const visibleSignIns = async (page) => {
+  const visible = [];
+  for (const control of await page.getByRole("link", { name: "Sign in", exact: true }).or(page.getByRole("button", { name: "Sign in", exact: true })).all()) if (await control.isVisible()) visible.push(control);
+  return visible;
+};
+// Signed out: Tab to "Take a seat" on the home page, Enter goes to the account page with no dialog; Tab to its one
+// "Sign in" link, which points at /auth/login with returnTo, and Enter.
 async function keyboardSignIn(page, tag) {
   await page.goto(stack.site + "/");
   const seat = page.locator(".header-actions [data-join]");
   check(await tabTo(page, seat), tag + "Tab reaches \"Take a seat\" on the home page");
   await page.keyboard.press("Enter");
-  const dialog = page.locator("#login-dialog");
-  await dialog.waitFor({ state: "visible", timeout: 5000 });
-  await page.locator(".login-status").filter({ hasNotText: "Checking sign-in" }).waitFor({ timeout: 5000 });
-  const signIns = page.getByRole("link", { name: "Sign in", exact: true }).or(page.getByRole("button", { name: "Sign in", exact: true }));
-  const visible = [];
-  for (const control of await signIns.all()) if (await control.isVisible()) visible.push(control);
-  check(visible.length === 1, tag + "the sign-in dialog shows one \"Sign in\" control (" + visible.length + ")");
-  check(await page.getByRole("button", { name: "Continue with this browser" }).isVisible(), tag + "the dialog offers \"Continue with this browser\"");
-  const signIn = dialog.locator(".login-start");
-  check(await tabTo(page, signIn, 15), tag + "Tab reaches \"Sign in\" in the dialog");
+  await page.waitForURL((url) => url.pathname === "/account.html", { timeout: 5000 });
+  check(new URL(page.url()).searchParams.get("returnTo") === "/", tag + "\"Take a seat\" goes to /account.html?returnTo=/");
+  const section = page.locator("#account-signin");
+  await section.waitFor({ state: "visible", timeout: 5000 });
+  check(await page.locator("dialog[open]").count() === 0 && await page.locator("#login-dialog").count() === 0, tag + "no sign-in dialog exists or opens");
+  check(await section.getByText("YOUR PLACE, ON EVERY DEVICE").isVisible() && await section.getByRole("heading", { name: "A seat at the workbench." }).isVisible(), tag + "the account page shows \"Your place, on every device\" inline");
+  check(await section.getByRole("button", { name: "Continue with this browser" }).isVisible(), tag + "the section offers \"Continue with this browser\"");
+  const visible = await visibleSignIns(page);
+  check(visible.length === 1, tag + "the account page shows one \"Sign in\" control (" + visible.length + ")");
+  const signIn = section.getByRole("link", { name: "Sign in", exact: true });
+  check((await signIn.getAttribute("href")) === "/auth/login?returnTo=%2F", tag + "\"Sign in\" links to /auth/login?returnTo=%2F (" + (await signIn.getAttribute("href")) + ")");
+  if (process.env.SCREENSHOT_DIR) await page.screenshot({ path: resolve(process.env.SCREENSHOT_DIR, "one-step-signin-" + tag.split(":")[0] + ".png"), fullPage: true });
+  check(await tabTo(page, signIn), tag + "Tab reaches \"Sign in\" on the account page");
   await page.keyboard.press("Enter");
 }
 
@@ -120,7 +132,7 @@ async function signInFlow(viewport) {
       const back = page.waitForURL((url) => url.origin === stack.site, { timeout: 10000 });
       await page.getByRole("button", { name: "Continue with GitHub" }).click();
       await back;
-      check(new URL(page.url()).origin === stack.site, tag + "the IdP returns the browser to the Portal (" + new URL(page.url()).pathname + ")");
+      check(new URL(page.url()).origin === stack.site && new URL(page.url()).pathname === "/", tag + "the IdP returns the browser to the page that started it (" + new URL(page.url()).pathname + ")");
       const session = await me(page);
       check(ACCOUNT_ID.test(session.account?.id || "") && session.account?.name === user.name, tag + "/api/me shows the signed-in account acct_… with its name");
       await page.locator("#toast").filter({ hasText: /./ }).waitFor({ timeout: 3000 }).catch(() => {});
@@ -178,9 +190,11 @@ async function guestFlow(viewport) {
   const page = await context.newPage();
   try {
     await step(tag + "continue with this browser", async () => {
-      await page.goto(stack.site + "/");
+      await page.goto(stack.site + "/explore.html");
       await page.locator(".header-actions [data-join]").click();
-      await page.locator(".login-status").filter({ hasNotText: "Checking sign-in" }).waitFor({ timeout: 5000 });
+      await page.waitForURL((url) => url.pathname === "/account.html", { timeout: 5000 });
+      await page.locator("#signin-status").filter({ hasText: /./ }).waitFor({ timeout: 5000 });
+      check(await page.locator("dialog[open]").count() === 0, tag + "\"Take a seat\" opens no dialog");
       await page.getByRole("button", { name: "Continue with this browser" }).click();
       const form = page.locator("#profile-form");
       await form.waitFor({ state: "visible", timeout: 5000 });
@@ -193,6 +207,8 @@ async function guestFlow(viewport) {
       await form.waitFor({ state: "hidden", timeout: 5000 });
       const session = await me(page);
       check(Boolean(session.profile) && session.account === null, tag + "\"Continue with this browser\" makes a guest profile without an account");
+      await page.waitForURL((url) => url.pathname === "/explore.html", { timeout: 5000 });
+      check(true, tag + "after saving, the guest is back on the page that sent them (/explore.html)");
     }, page);
     await step(tag + "services", async () => {
       await page.goto(stack.site + "/services.html");
@@ -206,6 +222,8 @@ async function guestFlow(viewport) {
       check(true, tag + "the account page says \"Sign in to see your credit statement.\"");
       check((await page.locator("#credit-balance").textContent()) === "--", tag + "the account page shows no balance");
       check(await page.locator("#account-login").isVisible() && !(await page.locator("#manage-signin").isVisible()), tag + "the account page offers \"Sign in\" and no \"Manage sign-in\"");
+      check(!(await page.locator("#account-guest").isVisible()) && /keep this profile/.test((await page.locator("#signin-status").textContent()) || ""), tag + "a guest is offered Sign in to upgrade, not \"Continue with this browser\"");
+      check((await page.locator("#account-login").getAttribute("href")) === "/auth/login?returnTo=%2Faccount.html", tag + "the guest's \"Sign in\" links straight to /auth/login with returnTo");
       check(await tabTo(page, page.locator("#account-login")), tag + "Tab reaches \"Sign in\" on the account page");
     }, page);
   } finally {

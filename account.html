@@ -20,8 +20,16 @@
     <main id="main" class="main-content account-page">
       <section class="page-intro account-intro"><p class="kicker">YOUR PLACE IN THE FOUNDRY</p><h1>One account.<br><span>Room to build.</span></h1><p>Your membership, shared credits, and connected services travel with you.</p></section>
       <div id="account-status" class="account-status" role="status">Loading your account...</div>
+      <section id="account-signin" class="account-card signin-card" aria-labelledby="signin-title" hidden>
+        <p class="kicker">YOUR PLACE, ON EVERY DEVICE</p>
+        <h2 id="signin-title">A seat at the workbench.</h2>
+        <p class="signin-intro">One Agora.Build account for your profile, services, subscription, and credits.</p>
+        <div class="account-actions signin-actions"><a class="button" id="account-login" href="/auth/login" data-signin>Sign in</a><button class="inline-link signin-guest" id="account-guest" type="button">Continue with this browser</button></div>
+        <p id="signin-status" class="signin-status" role="status"></p>
+        <p class="form-note signin-note">Browser-only profiles stay linked to this browser. Sign in later to keep access. Your email and sign-in identity are never published.</p>
+      </section>
       <div class="account-workbench">
-        <section class="account-card identity-card" aria-labelledby="identity-title"><p class="kicker">01 / IDENTITY</p><h2 id="identity-title">Your builder account.</h2><div id="account-identity"></div><div class="account-actions"><button class="button" id="account-login" type="button">Sign in</button><a class="inline-link" id="manage-signin" href="#" target="_blank" rel="noopener noreferrer" hidden>Manage sign-in &#8599;</a><button class="inline-link" id="account-logout" type="button" hidden>Sign out</button></div></section>
+        <section class="account-card identity-card" aria-labelledby="identity-title"><p class="kicker">01 / IDENTITY</p><h2 id="identity-title">Your builder account.</h2><div id="account-identity"></div><div class="account-actions"><a class="inline-link" id="manage-signin" href="#" target="_blank" rel="noopener noreferrer" hidden>Manage sign-in &#8599;</a><button class="inline-link" id="account-logout" type="button" hidden>Sign out</button></div></section>
         <section class="account-card credits-card" aria-labelledby="credits-title"><p class="kicker">02 / THE SHARED WALLET</p><h2 id="credits-title">Credits for the work.</h2><div class="credit-balance"><span id="credit-balance" class="mono">--</span><span>available credits</span></div><p>Use one balance across connected services. Purchases and service charges appear in your statement.</p><a class="inline-link" href="#credit-packs">Add credits &#8599;</a></section>
       </div>
       <section class="membership-section" aria-labelledby="membership-title"><div class="section-heading"><div><p class="kicker">03 / MEMBERSHIP</p><h2 id="membership-title">Choose your working room.</h2></div><button id="manage-billing" class="inline-link" type="button" hidden>Manage subscription &amp; invoices &#8599;</button></div><p id="subscription-status" class="section-description">Basic starts with your account. Premium subscriptions are managed here.</p><div id="plan-list" class="plan-list"></div><p class="form-note">Plan names and Vox entitlements match Vox. Cross-app entitlement access begins when each app adopts Agora.Build identity. Credits are purchased separately unless an allowance is shown.</p></section>

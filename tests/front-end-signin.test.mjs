@@ -12,11 +12,22 @@ test("pages and scripts carry no provider buttons, link dialogs, or logout-all",
     for (const pattern of removed) assert.doesNotMatch(source, pattern, file + " " + pattern);
   }
 });
-test("sign-in is one button that starts the auth.agora.build login by navigation", async () => {
+test("sign-in is one step: no modal anywhere, and every Sign in goes to /auth/login with returnTo", async () => {
+  for (const file of files) {
+    const source = await read(file);
+    for (const pattern of [/login-dialog|loginDialog|openSignIn|login-start|login-status|login-guest|login-note/]) assert.doesNotMatch(source, pattern, file + " " + pattern);
+  }
   const script = await read("script.js");
-  assert.match(script, /\/auth\/login/);
-  assert.match(script, /location\.assign\(url\.href\)/);
-  assert.match(script, /endSessionUrl/);
+  assert.match(script, /export const signInHref = \(\) => "\/auth\/login\?returnTo=" \+ encodeURIComponent\(returnTarget\(\)\)/);
+  assert.match(script, /export const seatHref = \(\) => "\/account\.html\?returnTo=" \+ encodeURIComponent\(location\.pathname \+ location\.search\)/);
+  assert.match(script, /location\.assign\(signInHref\(\)\)/);
+  assert.match(script, /link\.href = seat \? seatHref\(\) : signInHref\(\)/);
+  assert.doesNotMatch(script, /innerHTML/);
+  for (const file of ["services.js", "stoa.js", "account.js"]) assert.match(await read(file), /signIn\(\)/, file);
+  const stoa = await read("stoa.html");
+  assert.match(stoa, /<a class="button button-secondary button-small" id="stoa-signin-button" href="\/account\.html" data-signin="seat">Sign in<\/a>/);
+  assert.doesNotMatch(await read("stoa/panel.js"), /signin\(\)/);
+  assert.match(await read("account.js"), /endSessionUrl/);
   assert.match(script, /Sign-in didn't complete\. Try again\./);
   assert.match(script, /result === "unavailable"/);
 });
@@ -39,5 +50,33 @@ test("the account page never waits on an event: a failed auth config still settl
   const account = await read("account.js");
   assert.match(account, /await authConfigReady;/);
   assert.doesNotMatch(account + script, /house:authconfig/);
-  assert.match(script, /signInButton\.href = "\/auth\/login\?returnTo=" \+ encodeURIComponent/);
+  assert.match(script, /signInUnavailable\(\)/);
+  assert.match(script, /a\[data-signin\]\[aria-disabled=true\]/);
+});
+test("the signed-out account page shows the sign-in section inline, with the guest choice", async () => {
+  const html = await read("account.html");
+  const section = html.match(/<section id="account-signin"[\s\S]*?<\/section>/)?.[0] || "";
+  assert.match(section, /class="account-card signin-card"/);
+  assert.match(section, /YOUR PLACE, ON EVERY DEVICE/);
+  assert.match(section, /<h2 id="signin-title">A seat at the workbench\.<\/h2>/);
+  assert.match(section, /One Agora\.Build account for your profile, services, subscription, and credits\./);
+  assert.match(section, /<a class="button" id="account-login" href="\/auth\/login" data-signin>Sign in<\/a>/);
+  assert.match(section, /<button class="inline-link signin-guest" id="account-guest" type="button">Continue with this browser<\/button>/);
+  assert.match(section, /Browser-only profiles stay linked to this browser\./);
+  assert.equal((html.match(/id="account-login"/g) || []).length, 1, "one Sign in on the account page");
+  assert.doesNotMatch(html, /<dialog id="login-dialog"/);
+  const account = await read("account.js");
+  assert.match(account, /#account-signin"\)\.hidden = Boolean\(account\)/);
+  assert.match(account, /#account-guest"\)\.hidden = Boolean\(account \|\| profile\)/);
+  assert.match(account, /openJoin\(back \? \(\) => location\.assign\(back\) : null, true\)/);
+  assert.match(account, /samePath\(new URLSearchParams\(location\.search\)\.get\("returnTo"\)\)/);
+  assert.doesNotMatch(account, /innerHTML/);
+});
+test("a guest's returnTo is only ever a same-site path", async () => {
+  const script = await read("script.js");
+  const source = script.match(/export const samePath = (.*);\n/)[1];
+  const samePath = new Function("return " + source)();
+  assert.equal(samePath("/stoa/"), "/stoa/");
+  assert.equal(samePath("/explore.html?q=voice"), "/explore.html?q=voice");
+  for (const bad of ["//evil.example", "https://evil.example", "/\\evil.example", "evil", "", null, undefined]) assert.equal(samePath(bad), null, String(bad));
 });

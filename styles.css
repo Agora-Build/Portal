@@ -24,6 +24,14 @@
 .account-card h2 { margin: 12px 0 22px; font-size: 24px; font-weight: 500; }
 .account-card p { color: var(--muted); }
 .identity-card { border-top: 3px solid var(--green); }
+.signin-card { max-width: 760px; margin: 0 0 22px; border-top: 3px solid var(--accent); }
+.signin-card h2 { font-size: clamp(28px, 4vw, 38px); line-height: 1.15; letter-spacing: -1px; margin-bottom: 14px; }
+.signin-intro { max-width: 52ch; font-size: 15px; }
+.signin-actions .button.is-disabled:hover { background: var(--accent); border-color: var(--accent); }
+.signin-guest { padding: 9px 0; border-bottom: 1px solid var(--line); }
+.signin-status { margin: 18px 0 0; font-size: 12px; }
+.signin-note { margin-top: 12px; }
+a.is-disabled { opacity: .65; cursor: default; }
 .credits-card { border-top: 3px solid var(--accent); }
 .account-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 17px; margin-top: 24px; }
 .account-person { display: flex; align-items: center; gap: 16px; }
@@ -59,7 +67,7 @@
 .statement-row time { display: block; font-size: 11px; color: var(--muted); margin-top: 5px; }
 .credit-positive { color: var(--green); }
 @media (max-width: 1040px) { .plan-list { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 650px) { .account-workbench, .plan-list { grid-template-columns: 1fr; } .account-card { padding: 22px; } .platform-signin { padding: 25px; } }
+@media (max-width: 650px) { .account-workbench, .plan-list { grid-template-columns: 1fr; } .account-card { padding: 22px; } .signin-actions { gap: 14px; } .signin-actions .button { width: 100%; } .platform-signin { padding: 25px; } }
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; scroll-padding-top: 115px; }
 body {
@@ -393,11 +401,6 @@ dialog::backdrop { background: #20282099; }
 .close-button:hover { color: var(--ink); background: #e9eddf; }
 dialog h2 { font-size: 30px; line-height: 1.25; font-weight: 500; letter-spacing: -1px; }
 .dialog-intro { font-size: 13px; color: var(--muted); margin-top: 12px; }
-.login-start { margin-top: 25px; }
-.login-start.is-disabled { opacity: .65; cursor: default; pointer-events: none; }
-.login-status { margin: 18px 0; font-size: 12px; color: var(--muted); }
-.login-guest { padding: 9px 0; border-bottom: 1px solid var(--line); }
-.login-note { margin-top: 18px; }
 .profile-login-control { font-size: 12px; color: var(--green); }
 .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
 .optional { font-size: 10px; font-weight: 400; color: var(--muted); margin-left: 4px; }
