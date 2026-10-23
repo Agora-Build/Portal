@@ -131,6 +131,26 @@ test("bearer: after a rotation a new kid is refetched 5 s after the last JWKS fe
   assert.equal(fake.counts.jwks, 2);
 });
 
+test("a silent check asks with prompt=none, and the IdP's not-signed-in answers are an answer, not a failure", async () => {
+  const { idp } = await setup();
+  const silent = await idp.beginLogin({ returnTo: "/stoa/", silent: true });
+  assert.equal(new URL(silent.url).searchParams.get("prompt"), "none");
+  assert.equal(silent.transaction.silent, true);
+  const answer = (started, error) => {
+    const url = new URL("https://portal.example/auth/callback");
+    url.searchParams.set("state", started.transaction.state);
+    url.searchParams.set("error", error);
+    return idp.completeLogin(url.href, started.transaction);
+  };
+  for (const error of ["login_required", "interaction_required", "consent_required", "account_selection_required"]) await rejectsLogin(answer(silent, error), "not_signed_in");
+  await rejectsLogin(answer(silent, "access_denied"), "idp_error");
+  // The same answers to an ordinary sign-in are failures.
+  await rejectsLogin(answer(await idp.beginLogin({ returnTo: "/" }), "login_required"), "idp_error");
+  // A forged state is still refused first.
+  const forged = new URL("https://portal.example/auth/callback?state=other&error=login_required");
+  await rejectsLogin(idp.completeLogin(forged.href, silent.transaction), "state");
+});
+
 test("beginLogin builds a code + PKCE S256 request with state, nonce and the openid profile email scopes", async () => {
   const { idp } = await setup({ now: () => 1234 });
   const { url, transaction } = await idp.beginLogin({ returnTo: "/explore/?q=voice" });
@@ -147,7 +167,9 @@ test("beginLogin builds a code + PKCE S256 request with state, nonce and the ope
   assert.ok(params.get("code_challenge"));
   assert.equal(params.has("code_verifier"), false);
   assert.ok(!url.includes(transaction.verifier));
-  assert.deepEqual(Object.keys(transaction).sort(), ["createdAt", "id", "nonce", "returnTo", "state", "verifier"]);
+  assert.deepEqual(Object.keys(transaction).sort(), ["createdAt", "id", "nonce", "returnTo", "silent", "state", "verifier"]);
+  assert.equal(transaction.silent, false);
+  assert.equal(params.has("prompt"), false, "an ordinary sign-in may show the IdP's pages");
   assert.equal(transaction.returnTo, "/explore/?q=voice");
   assert.equal(transaction.createdAt, 1234);
   for (const name of ["id", "state", "nonce", "verifier"]) assert.ok(transaction[name].length >= 32, name);

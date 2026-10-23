@@ -57,6 +57,8 @@ const safePicture = (value) => {
 const verifiedEmail = (value, verified) => verified === true && typeof value === "string" && value.length <= 254 && /^[\x21-\x3f\x41-\x7e]+@[\x21-\x3f\x41-\x7e]+\.[\x21-\x3f\x41-\x7e]+$/.test(value) ? value.toLowerCase() : null;
 const plainString = (value, max = 255) => typeof value === "string" && value.length > 0 && value.length <= max;
 
+const SILENT_NO = new Set(["login_required", "interaction_required", "consent_required", "account_selection_required"]);
+
 export function createIdp({ issuer: issuerSetting, clientId = "portal", clientSecret, siteUrl, audience: audienceSetting, request = fetch, now = Date.now } = {}) {
   // A single trailing slash is dropped, so "https://auth.agora.build/" matches the IdP's exact issuer.
   const issuer = typeof issuerSetting === "string" ? issuerSetting.replace(/\/$/, "") : issuerSetting;
@@ -230,7 +232,8 @@ export function createIdp({ issuer: issuerSetting, clientId = "portal", clientSe
       if (now() < unreachableUntil) return false;
       return probe();
     },
-    async beginLogin({ returnTo } = {}) {
+    // `silent` asks the IdP not to show any page (prompt=none): it answers at once, signed in or not.
+    async beginLogin({ returnTo, silent = false } = {}) {
       const state = await discover();
       if (!state) throw new LoginError("unavailable");
       const transaction = {
@@ -239,6 +242,7 @@ export function createIdp({ issuer: issuerSetting, clientId = "portal", clientSe
         nonce: oidc.randomNonce(),
         verifier: oidc.randomPKCECodeVerifier(),
         returnTo: safeReturn(returnTo),
+        silent: silent === true,
         createdAt: now()
       };
       const url = oidc.buildAuthorizationUrl(state.client, {
@@ -248,7 +252,8 @@ export function createIdp({ issuer: issuerSetting, clientId = "portal", clientSe
         state: transaction.state,
         nonce: transaction.nonce,
         code_challenge: await oidc.calculatePKCECodeChallenge(transaction.verifier),
-        code_challenge_method: "S256"
+        code_challenge_method: "S256",
+        ...(transaction.silent ? { prompt: "none" } : {})
       });
       return { url: url.href, transaction };
     },
@@ -258,7 +263,8 @@ export function createIdp({ issuer: issuerSetting, clientId = "portal", clientSe
       if (!transaction || typeof transaction.state !== "string" || typeof transaction.nonce !== "string" || typeof transaction.verifier !== "string") throw new LoginError("state");
       if (!Number.isFinite(transaction.createdAt) || transaction.createdAt + TRANSACTION_LIFETIME <= now()) throw new LoginError("expired");
       if (parameters.getAll("state").length !== 1 || parameters.get("state") !== transaction.state) throw new LoginError("state");
-      if (parameters.has("error")) throw new LoginError("idp_error");
+      // A silent check where the person isn't signed in at the IdP (OIDC Core 3.1.2.6) is an answer, not a failure.
+      if (parameters.has("error")) throw new LoginError(transaction.silent === true && SILENT_NO.has(parameters.get("error")) ? "not_signed_in" : "idp_error");
       const state = await discover();
       if (!state) throw new LoginError("unavailable");
       // The token request's redirect_uri is always ours, whatever host the callback arrived on.

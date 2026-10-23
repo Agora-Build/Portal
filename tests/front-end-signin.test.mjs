@@ -128,3 +128,13 @@ test("the Agora Console popup creates RTC and RTM tokens through agora.build, ne
   const formCode = script.slice(script.indexOf("const tokenForm"), script.indexOf("function showDetailsReconnect"));
   assert.doesNotMatch(formCode, /certificate/i, "the form never handles a certificate");
 });
+test("pages check auth.agora.build quietly once per browser session, never when signed in or after signing out", async () => {
+  const script = await read("script.js");
+  const check = script.slice(script.indexOf("const SSO_CHECKED"), script.indexOf("});", script.indexOf("const SSO_CHECKED")) + 3);
+  assert.match(check, /if \(!state\.sessionLoaded \|\| state\.account \|\| !state\.authConfig\?\.issuer\) return;/, "only without an account, after the session loaded, with sign-in configured");
+  assert.match(check, /document\.cookie\.split\("; "\)\.includes\(SSO_CHECKED \+ "=1"\)/, "once per browser session");
+  assert.match(check, /searchParams\.has\("signin"\)/, "not straight after a sign-in attempt");
+  assert.match(check, /markSsoChecked\(\);\n  location\.replace\("\/auth\/login\?prompt=none&returnTo=" \+ encodeURIComponent\(returnTarget\(\)\)\);/, "marked before leaving, and replace keeps Back working");
+  assert.match(script, /SSO_CHECKED \+ "=1; Path=\/; SameSite=Lax" \+ \(location\.protocol === "https:" \? "; Secure" : ""\)/, "a session cookie, no Max-Age");
+  assert.match(await read("account.js"), /markSsoChecked\(\);\n    const result = await api\("\/api\/auth\/logout"/, "signing out isn't undone by the check");
+});

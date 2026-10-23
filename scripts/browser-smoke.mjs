@@ -238,12 +238,70 @@ async function guestFlow(viewport) {
   }
 }
 
+// The pages' once-per-session check (prompt=none). A visitor who isn't signed in at the IdP makes one quiet trip and
+// sees the page unchanged; one signed in at the IdP directly (as through Astation) is signed in on the first page of a
+// new browser session without a click; after signing out, nothing signs them back in.
+async function silentFlow(viewport) {
+  const tag = viewport.name + " silent: ";
+  const user = person(viewport.name === "desktop" ? 7201 : 7202, viewport.name === "desktop" ? "Ada" : "Lin");
+  const context = await newContext(viewport, user);
+  const page = await context.newPage();
+  let trips = 0;
+  page.on("request", (request) => { const url = new URL(request.url()); if (url.origin === stack.issuer && url.pathname === "/authorize" && url.searchParams.get("prompt") === "none") trips += 1; });
+  const until = async (test, label, timeout = 10000) => { const end = Date.now() + timeout; while (!(await test())) { if (Date.now() > end) throw new Error("timed out waiting for " + label); await page.waitForTimeout(100); } };
+  const settled = async (path) => { await until(() => { const url = new URL(page.url()); return url.origin === stack.site && url.pathname + url.search === path; }, path); await page.waitForLoadState("load"); };
+  const marked = async () => (await context.cookies(stack.site)).some((cookie) => cookie.name === "ab_sso_checked" && cookie.expires === -1);
+  try {
+    await step(tag + "not signed in", async () => {
+      await page.goto(stack.site + "/explore/?q=voice");
+      await until(() => trips === 1, "the quiet trip");
+      await settled("/explore/?q=voice");
+      check(true, tag + "a fresh visitor makes one quiet trip to the IdP and comes back to the same page (/explore/?q=voice)");
+      check((await me(page)).account === null && !(await page.getByText("Sign-in didn't complete").count()), tag + "not signed in there: still signed out, with no message");
+      check(await marked(), tag + "the check is remembered in a session cookie");
+      await page.goto(stack.site + "/stoa/");
+      await page.reload();
+      await page.waitForTimeout(500);
+      check(trips === 1, tag + "other pages and reloads in the same session make no further trips (" + trips + ")");
+    }, page);
+    await step(tag + "signed in at the IdP", async () => {
+      await page.goto(stack.issuer + "/account");
+      await page.getByRole("button", { name: "Sign in" }).click();
+      await page.waitForURL((url) => url.origin === stack.issuer && url.pathname.startsWith("/interaction/"), { timeout: 10000 });
+      await page.getByRole("button", { name: "Continue with GitHub" }).click();
+      await page.getByText(user.name).first().waitFor({ timeout: 10000 });
+      check(true, tag + "signed in at the IdP directly, as an app like Astation does");
+      // A new browser session: the session cookie is gone.
+      await context.clearCookies({ name: "ab_sso_checked" });
+      await page.goto(stack.site + "/stoa/");
+      await until(() => trips === 2, "the second quiet trip");
+      await settled("/stoa/");
+      const session = await me(page);
+      check(session.account?.name === user.name && ACCOUNT_ID.test(session.account?.id || ""), tag + "the first page of the new session is signed in, without a click (" + (session.account ? "account" : "no account") + ")");
+      check(!new URL(page.url()).searchParams.has("signin"), tag + "and without ?signin= in the address");
+    }, page);
+    await step(tag + "sign out", async () => {
+      await page.goto(stack.site + "/account/");
+      await page.locator("#account-logout").click();
+      await page.waitForURL((url) => url.origin === stack.issuer, { timeout: 10000 });
+      await page.getByRole("button", { name: "Sign out", exact: true }).click();
+      await page.waitForURL((url) => url.origin === stack.site, { timeout: 10000 });
+      await page.goto(stack.site + "/explore/");
+      await page.waitForTimeout(500);
+      check((await me(page)).account === null && trips === 2, tag + "after signing out, pages stay signed out and make no trip (" + trips + ")");
+    }, page);
+  } finally {
+    await context.close();
+  }
+}
+
 try {
   browser = await chromium.launch({ executablePath: chromiumPath, headless: true });
   for (const viewport of VIEWPORTS) {
     console.log("-- " + viewport.name + " " + viewport.width + "×" + viewport.height);
     await signInFlow(viewport);
     await guestFlow(viewport);
+    await silentFlow(viewport);
   }
 } finally {
   await browser?.close();
