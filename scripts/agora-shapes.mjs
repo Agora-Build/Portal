@@ -1,13 +1,13 @@
-// A temporary, opt-in probe of Agora SSO response shapes, so the project and name mappers in connections.mjs can be
+// A temporary, opt-in probe of Agora SSO and BFF response shapes, so the project and name mappers in connections.mjs can be
 // adapted. It reads the store with the server's settings, opens one account's stored Agora connection in-process
-// (renewing its token if needed), calls each documented GET endpoint and prints ONLY the key structure of each
+// (renewing its token if needed), calls each GET endpoint the Portal uses or may use and prints ONLY the key structure of each
 // response: key names and value types. Values (tokens, App IDs, certificates, names, IDs) are never printed.
 //
 //   node scripts/agora-shapes.mjs <account-id>
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AGORA_PATHS, connectionsConfig, createConnections, mapProjects } from "./connections.mjs";
+import { AGORA_PATHS, connectionsConfig, createConnections } from "./connections.mjs";
 
 // A key that looks like data (an ID used as a map key, say) is printed as <key>.
 const printableKey = (key) => /^[A-Za-z_$][A-Za-z0-9_$-]{0,63}$/.test(key) && !/^[0-9a-f]{16,}$/i.test(key) && (key.match(/[0-9]/g) || []).length <= 3;
@@ -28,9 +28,9 @@ export function describeShape(value) {
 
 // Probes every documented GET endpoint for one account; `write` receives each output line.
 export async function probeShapes(connections, userId, write = (line) => console.log(line)) {
-  const show = async (label, path) => {
+  const show = async (label, path, options) => {
     let result;
-    try { result = await connections.get(userId, path); }
+    try { result = await connections.get(userId, path, options); }
     catch (error) { write("GET " + label + ": failed (" + (error.status || "error") + ")"); return undefined; }
     write("GET " + label + ": " + result.status);
     for (const line of result.body === undefined ? ["(no JSON body)"] : describeShape(result.body)) write("  " + line);
@@ -39,12 +39,7 @@ export async function probeShapes(connections, userId, write = (line) => console
   await show(AGORA_PATHS.userAuth, AGORA_PATHS.userAuth);
   await show(AGORA_PATHS.companyInfo, AGORA_PATHS.companyInfo);
   await show(AGORA_PATHS.companies, AGORA_PATHS.companies);
-  const customer = await show(AGORA_PATHS.customerProjects, AGORA_PATHS.customerProjects);
-  const list = await show(AGORA_PATHS.projects, AGORA_PATHS.projects);
-  // The details of the first listed project; its vendor ID is used, never printed.
-  const project = [customer, list].map((result) => result?.ok && mapProjects(result.body)?.projects[0]).find(Boolean);
-  if (project) await show("/api/v0/project/{vendorId}", AGORA_PATHS.project(project.projectId));
-  else write("GET /api/v0/project/{vendorId}: skipped (no project vendor ID recognised in either list)");
+  await show("BFF " + AGORA_PATHS.bffProjects, AGORA_PATHS.bffProjects, { bff: true });
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

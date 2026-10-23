@@ -78,11 +78,10 @@ test("Agora Console connections are encrypted, owner-only, and renewed with the 
       assert.deepEqual([options.body.get("grant_type"), options.body.get("client_id"), options.body.get("client_secret"), options.body.get("refresh_token")], ["refresh_token", "portal-test", "test-only-agora-client-value", "upstream-refresh"]);
       return Response.json({ access_token: "renewed-upstream-token", refresh_token: "rotated-upstream-refresh", expires_in: 7200 }); }
     assert.match(options.headers.Authorization, /upstream-token/);
-    const project = { vendorId: "project-1", name: "Private project", appId: "agora-app-id", signKey: "private-test-certificate", status: "active" };
-    if (url === "https://sso.agora.io/api/v0/project/project-1") return Response.json({ data: project });
+    const project = { projectId: "project-1", name: "Private project", appId: "agora-app-id", signKey: "private-test-certificate", status: "active" };
     if (options.method === "DELETE") { assert.equal(url, "https://sso.agora.io/api/v0/customer/user-auth"); return Response.json({ code: 0 }); }
-    assert.equal(url, "https://sso.agora.io/api/v0/customer/project");
-    return Response.json({ data: { list: [project] } });
+    assert.equal(url, "https://agora-cli.agora.io/api/cli/v1/projects", "projects come from the default BFF");
+    return Response.json({ items: [project] });
   } });
   await resources.save(login.account.id, { accessToken: "upstream-token", refreshToken: "upstream-refresh", expiresAt: Date.now() - 1 });
   // The connection needs no Agora identity on the account; without SITE_URL the connect flow itself is unavailable.

@@ -382,6 +382,7 @@ loopback client. Settings:
 | `AGORA_SSO_CLIENT_ID` | The Portal's Agora SSO client ID |
 | `AGORA_SSO_CLIENT_SECRET` | Its client secret; the client is confidential |
 | `AGORA_SSO_SCOPE` | Comma-separated scopes requested at authorize (default `basic_info,console`, what the Portal has always sent; `basic_info` alone may not cover the Console APIs) |
+| `AGORA_BFF_URL` | The Agora CLI BFF that lists projects, https only (default `https://agora-cli.agora.io`, the BFF Atem uses) |
 | `AGORA_CONSOLE_ENCRYPTION_KEY` | A base64-encoded 32-byte server key that seals stored connections |
 
 Connect is available only when `AGORA_SSO_BASE_URL`, `AGORA_SSO_CLIENT_ID`,
@@ -391,18 +392,19 @@ page says Console connections are not available yet, and the server logs the
 missing setting names (never values). There are no other names for these
 settings.
 
-Endpoints used, all on `AGORA_SSO_BASE_URL`:
+Endpoints used, on `AGORA_SSO_BASE_URL` unless marked BFF (`AGORA_BFF_URL`):
 
 | Call | Use |
 | --- | --- |
 | `POST /api/v0/oauth/token` `grant_type=authorization_code` | Redeems the code with `client_id`, `client_secret`, `code`, `redirect_uri` in the form body (no `code_verifier`) |
 | `POST /api/v0/oauth/token` `grant_type=refresh_token` | Renews the access token with `client_id`, `client_secret`, `refresh_token`: a minute before it expires, and once after a 401 |
 | `GET /api/v0/customer/company/basic-info`, then `GET /api/v0/customer/user-auth` | The display name shown on the account page (company name, else the user's name), read once at connect |
-| `GET /api/v0/customer/project` | The project list; `GET /api/v0/project` is used when it answers 404 |
-| `GET /api/v0/project/{vendorId}` | A project's certificate, only when the owner asks to reveal it |
+| BFF `GET /api/cli/v1/projects` | The project list, `{ items: [{ projectId, name, appId, signKey, status, createdAt, vid }] }`. The Portal answers the list without certificates, and reveals one project's `signKey` only when the owner asks |
 | `DELETE /api/v0/customer/user-auth` | Removes the authorization at Agora when the owner disconnects (best effort) |
 
-Every data call sends `Authorization: Bearer <access token>`. A 401 renews the
+sso2's own `GET /api/v0/customer/project` and `GET /api/v0/project` answer these
+tokens with its login-page 401 (`redirectToLoginPage`), so the Portal doesn't use
+them. Every data call sends `Authorization: Bearer <access token>`. A 401 renews the
 token once and retries; if Agora refuses the renewal the connection is marked
 as needing a reconnect, the account page shows "Reconnect Agora Console", and no
 further calls are made until the owner connects again.

@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { createAppServer } from "../scripts/serve.mjs";
 import { createStore } from "../scripts/store.mjs";
-import { createConnections, connectionsConfig, mapName, mapProjectDetails, mapProjects } from "../scripts/connections.mjs";
+import { createConnections, connectionsConfig, mapName, mapProjects } from "../scripts/connections.mjs";
 import { modelConfig } from "../scripts/models.mjs";
 import { agoraConfig, createAgoraCalls } from "../scripts/calls.mjs";
 import { createSignaling, signalingConfig } from "../scripts/spaces/signaling.mjs";
@@ -112,8 +112,8 @@ test("a signed-in account connects Agora Console; the tokens are stored sealed a
   assert.ok(app.agora.calls.includes("GET /api/v0/customer/company/basic-info"), "the name comes from the company basic info");
   const projects = await (await call(app.base, "/api/connections/agora/projects", { cookie: session.cookie })).json();
   assert.deepEqual(projects.projects, [{ projectId: "vendor-1", name: "Private project", appId: "agora-app-id", status: "1", createdAt: "2023-11-14T22:13:20.000Z" }]);
-  assert.equal(app.agora.counts.customerProjects, 1, "projects come from GET /api/v0/customer/project");
-  assert.equal(app.agora.counts.projects, 0);
+  assert.equal(app.agora.counts.bffProjects, 1, "projects come from the BFF's GET /api/cli/v1/projects");
+  assert.ok(!app.agora.calls.some((line) => /\/api\/v0\/(customer\/)?project/.test(line)), "sso2's project paths are not used");
   const logged = app.logs.join("\n");
   assert.ok(!logged.includes(callback.searchParams.get("code")) && !logged.includes("agora-access-") && !logged.includes("agora-refresh-"), "no code or token in the log");
 });
@@ -328,7 +328,7 @@ test("a 401 from Agora renews the token once and retries", async (t) => {
   assert.equal(response.status, 200);
   assert.equal((await response.json()).projects[0].projectId, "vendor-1");
   assert.equal(app.agora.counts.refresh, 1);
-  assert.equal(app.agora.counts.customerProjects, 2, "the refused call is retried once");
+  assert.equal(app.agora.counts.bffProjects, 2, "the refused call is retried once");
   const refresh = app.agora.calls.indexOf("POST /api/v0/oauth/token", 1);
   assert.ok(refresh > 0);
   // The renewed token is the stored one now, so the next call needs no renewal.
@@ -336,7 +336,7 @@ test("a 401 from Agora renews the token once and retries", async (t) => {
   assert.equal(app.agora.counts.refresh, 1);
   const certificate = await call(app.base, "/api/connections/agora/certificate", { cookie: session.cookie, method: "POST", data: { projectId: "vendor-1" }, headers: { Origin: new URL(app.base).origin } });
   assert.deepEqual(await certificate.json(), { projectId: "vendor-1", appId: "agora-app-id", certificate: "private-test-certificate" });
-  assert.ok(app.agora.calls.includes("GET /api/v0/project/vendor-1"), "the certificate comes from the project details");
+  assert.equal(app.agora.counts.bffProjects, 4, "the certificate comes from the BFF project list");
 });
 
 test("a refused renewal marks the connection as needing a reconnect", async (t) => {
@@ -353,7 +353,7 @@ test("a refused renewal marks the connection as needing a reconnect", async (t) 
   // The log says why, by status and Agora's error fields, never with a token or the client secret.
   const logged = app.logs.join("\n");
   assert.match(logged, /Agora code exchange answered keys: access_token, refresh_token, expires_in, token_type; token_type bearer; scope none; expires_in \d+; access token \d+ characters\./);
-  assert.match(logged, /Agora refused GET \/api\/v0\/customer\/project: 401; WWW-Authenticate none; code 401, msg unauthorized\./);
+  assert.match(logged, /Agora refused GET \/api\/cli\/v1\/projects: 401; WWW-Authenticate none; code UNAUTHORIZED, message Invalid access token\./);
   assert.match(logged, /Agora token renewal refused: 400; WWW-Authenticate none; error invalid_grant\./);
   for (const secret of [...app.agora.issued, app.agora.clientSecret]) assert.ok(!logged.includes(secret), "no token or client secret in the log");
   // No further calls to Agora until the account reconnects.
@@ -366,15 +366,29 @@ test("a refused renewal marks the connection as needing a reconnect", async (t) 
   assert.equal((await call(app.base, "/api/connections/agora/projects", { cookie: session.cookie })).status, 200);
 });
 
-test("the project list falls back to GET /api/v0/project when /api/v0/customer/project is not found", async (t) => {
-  const app = await start(t);
+test("projects come from the BFF with the connection's bearer token, at AGORA_BFF_URL", async (t) => {
+  const app = await start(t, { agoraOptions: { bff: "https://cli.agora.example" } });
   const session = await signIn(app);
   assert.equal((await connect(app, session)).location, "/account/?connected=agora");
-  app.agora.state.customerProjects404 = true;
+  app.agora.state.items.push({ projectId: "vendor-2", name: "No certificate", appId: "second-app-id", signKey: null, status: "0", createdAt: "2024-01-02T03:04:05Z" });
   const response = await call(app.base, "/api/connections/agora/projects", { cookie: session.cookie });
   assert.equal(response.status, 200);
-  assert.equal((await response.json()).projects[0].name, "Private project");
-  assert.deepEqual([app.agora.counts.customerProjects, app.agora.counts.projects], [1, 1]);
+  const { projects } = await response.json();
+  assert.deepEqual(projects.map((project) => [project.projectId, project.name, project.appId]), [["vendor-1", "Private project", "agora-app-id"], ["vendor-2", "No certificate", "second-app-id"]]);
+  assert.ok(projects.every((project) => !("certificate" in project)), "the list never carries certificates");
+  const reveal = (projectId) => call(app.base, "/api/connections/agora/certificate", { cookie: session.cookie, method: "POST", data: { projectId }, headers: { Origin: new URL(app.base).origin } });
+  assert.deepEqual(await (await reveal("vendor-2")).json(), { projectId: "vendor-2", appId: "second-app-id", certificate: null });
+  assert.equal((await reveal("vendor-3")).status, 404);
+  assert.deepEqual(app.agora.calls.filter((line) => line.startsWith("BFF ")), Array(3).fill("BFF GET /api/cli/v1/projects"));
+});
+test("the BFF URL defaults to agora-cli.agora.io and must be https", () => {
+  const base = { AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64"), AGORA_SSO_CLIENT_ID: "id", AGORA_SSO_CLIENT_SECRET: "secret", SITE_URL: siteUrl };
+  assert.equal(connectionsConfig(base).bffUrl, "https://agora-cli.agora.io");
+  assert.equal(connectionsConfig({ ...base, AGORA_BFF_URL: " " }).bffUrl, "https://agora-cli.agora.io");
+  assert.equal(connectionsConfig({ ...base, AGORA_BFF_URL: "https://bff.example/" }).bffUrl, "https://bff.example");
+  const insecure = connectionsConfig({ ...base, AGORA_BFF_URL: "http://bff.example" });
+  assert.equal(insecure.ready, false);
+  assert.deepEqual(insecure.connect.missing, ["AGORA_BFF_URL"]);
 });
 
 test("an unrecognised project list is logged by status and key names only", async (t) => {
@@ -385,7 +399,7 @@ test("an unrecognised project list is logged by status and key names only", asyn
   const response = await call(app.base, "/api/connections/agora/projects", { cookie: session.cookie });
   assert.equal(response.status, 503);
   const logged = app.logs.join("\n");
-  assert.match(logged, /Agora project list not recognised: GET \/api\/v0\/customer\/project answered 200 with keys: code, data; data keys: page\./);
+  assert.match(logged, /Agora project list not recognised: GET \/api\/cli\/v1\/projects answered 200 with keys: code, data; data keys: page\./);
   for (const value of ["agora-app-id", "private-test-certificate", "vendor-1", "agora-access-"]) assert.ok(!logged.includes(value), value);
 });
 
@@ -410,9 +424,8 @@ test("the project mapper reads several plausible shapes", () => {
   assert.equal(mapProjects({ result: { list: [] } }).projects.length, 0);
   assert.equal(mapProjects({ code: 0, data: { total: 1 } }), null, "no array is not an empty list");
   assert.equal(mapProjects(null), null);
-  assert.equal(mapProjectDetails({ code: 0, data: { project: item } }).certificate, "private-test-certificate");
-  assert.equal(mapProjectDetails(item).appId, "agora-app-id");
-  assert.equal(mapProjectDetails({ code: 0, data: {} }), null);
+  assert.deepEqual(mapProjects({ items: [{ projectId: "p-1", vid: 1001, name: "BFF", appId: "app-1", signKey: "cert-1", status: "1", createdAt: "2024-01-02T03:04:05Z" }] }).projects[0],
+    { projectId: "p-1", name: "BFF", appId: "app-1", status: "1", createdAt: "2024-01-02T03:04:05.000Z", certificate: "cert-1" }, "the BFF's projectId wins over its vid");
   assert.equal(mapName({ data: { companyName: "Agora Builder" } }), "Agora Builder");
   assert.equal(mapName({ company: { name: "Inc" } }), "Inc");
   assert.equal(mapName({ data: { userName: "builder\u0007" } }), "builder");
@@ -433,9 +446,9 @@ test("the shape probe prints key names and types only, never values", async () =
   await connections.completeConnect(transaction, new URL(agora.authorize(url)).searchParams, userId);
   const output = [];
   await probeShapes(connections, userId, (line) => output.push(line));
-  assert.ok(output.includes("GET /api/v0/project/{vendorId}: 200"), "the first listed project's details are probed");
-  assert.ok(output.includes("  data.list[].signKey: string"), "the key names are shown");
+  assert.ok(output.includes("GET BFF /api/cli/v1/projects: 200"), "the BFF project list is probed");
+  assert.ok(output.includes("  items[].signKey: string"), "the key names are shown");
   const text = output.join("\n");
-  for (const path of ["/api/v0/customer/user-auth", "/api/v0/customer/company/basic-info", "/api/v0/account/companies", "/api/v0/customer/project", "/api/v0/project", "/api/v0/project/{vendorId}"]) assert.ok(output.some((line) => line.startsWith("GET " + path + ": ")), path);
-  for (const value of ["vendor-1", "agora-app-id", "private-test-certificate", "Private project", "Agora Builder", "agora-user-1", "probe-token", "agora-access-", "1700000000", "42"]) assert.ok(!text.includes(value), "the probe never prints " + value);
+  for (const path of ["/api/v0/customer/user-auth", "/api/v0/customer/company/basic-info", "/api/v0/account/companies", "BFF /api/cli/v1/projects"]) assert.ok(output.some((line) => line.startsWith("GET " + path + ": ")), path);
+  for (const value of ["vendor-1", "agora-app-id", "private-test-certificate", "Private project", "Agora Builder", "agora-user-1", "probe-token", "agora-access-", "2023-11-14", "1001", "42"]) assert.ok(!text.includes(value), "the probe never prints " + value);
 });

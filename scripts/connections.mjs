@@ -5,13 +5,13 @@ import { AppError } from "./store.mjs";
 // Portal is a confidential client: the code exchange and refresh send client_id and client_secret in the form body.
 const DEFAULT_SCOPE = "basic_info,console";
 const CONNECT_KIND = "agora-connect";
-// Every Agora call uses these paths on AGORA_SSO_BASE_URL with the connection's bearer token.
+// Agora calls use these paths with the connection's bearer token. Projects, with their certificates, come from the
+// Agora CLI BFF (AGORA_BFF_URL, GET /api/cli/v1/projects, as Atem reads them); everything else is on AGORA_SSO_BASE_URL.
+// sso2's own /api/v0/customer/project and /api/v0/project refuse these tokens, so they are not used.
 export const AGORA_PATHS = {
   authorize: "/api/v0/oauth/authorize",
   token: "/api/v0/oauth/token",
-  customerProjects: "/api/v0/customer/project",
-  projects: "/api/v0/project",
-  project: (vendorId) => "/api/v0/project/" + encodeURIComponent(vendorId),
+  bffProjects: "/api/cli/v1/projects",
   userAuth: "/api/v0/customer/user-auth",
   companyInfo: "/api/v0/customer/company/basic-info",
   companies: "/api/v0/account/companies"
@@ -37,6 +37,7 @@ export function connectionsConfig(env = process.env) {
     secret: env.AGORA_SSO_CLIENT_SECRET || "",
     scope: String(env.AGORA_SSO_SCOPE || "").trim() || DEFAULT_SCOPE
   };
+  const bffUrl = httpsEndpoint(String(env.AGORA_BFF_URL || "").trim() || "https://agora-cli.agora.io");
   // The callback is on the Portal's public origin: https, or plain http on a loopback host (including *.localhost, as
   // for sign-in) for local development.
   let redirectUri = "";
@@ -45,13 +46,13 @@ export function connectionsConfig(env = process.env) {
     if (!url.username && !url.password && (url.protocol === "https:" || (url.protocol === "http:" && (["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) || url.hostname.endsWith(".localhost"))))) redirectUri = url.origin + "/connect/agora/callback";
   } catch { /* Connect stays unavailable until a public origin is configured. */ }
   // Stored connections can be opened and used while the key and the SSO host are valid.
-  const ready = key.length === 32 && Boolean(sso.baseUrl);
+  const ready = key.length === 32 && Boolean(sso.baseUrl) && Boolean(bffUrl);
   // Setting names (never values) that keep the connect flow unavailable.
   const missing = [
-    [!sso.baseUrl, "AGORA_SSO_BASE_URL"], [!sso.clientId, "AGORA_SSO_CLIENT_ID"], [!sso.secret, "AGORA_SSO_CLIENT_SECRET"],
+    [!sso.baseUrl, "AGORA_SSO_BASE_URL"], [!bffUrl, "AGORA_BFF_URL"], [!sso.clientId, "AGORA_SSO_CLIENT_ID"], [!sso.secret, "AGORA_SSO_CLIENT_SECRET"],
     [key.length !== 32, "AGORA_CONSOLE_ENCRYPTION_KEY"], [!redirectUri, "SITE_URL"]
   ].filter(([absent]) => absent).map(([, name]) => name);
-  return { key, sso, ready, connect: { ready: missing.length === 0, missing, redirectUri } };
+  return { key, sso, bffUrl, ready, connect: { ready: missing.length === 0, missing, redirectUri } };
 }
 
 // Agora's response shapes are not documented, so everything Agora returns is read here, tolerantly.
@@ -77,10 +78,11 @@ function projectArray(body) {
   for (const outer of ["data", "result"]) for (const name of containers) if (Array.isArray(body?.[outer]?.[name])) return body[outer][name];
   return null;
 }
-// One project in the Portal's shape. projectId is Agora's vendor ID, used for GET /api/v0/project/{vendorId}.
+// One project in the Portal's shape. projectId is the BFF's projectId (else a vendor ID or id), the key the
+// certificate request uses.
 export function mapProject(item) {
   if (!isObject(item)) return null;
-  const projectId = clean(first(item, ["vendorId", "vendor_id", "vid", "id", "projectId", "project_id"]), 128);
+  const projectId = clean(first(item, ["projectId", "project_id", "vendorId", "vendor_id", "vid", "id"]), 128);
   if (!projectId) return null;
   const status = first(item, ["status", "state"]);
   return {
@@ -96,12 +98,6 @@ export function mapProject(item) {
 export function mapProjects(body) {
   const items = projectArray(body);
   return items ? { projects: items.map(mapProject).filter(Boolean) } : null;
-}
-// A project details response: the project itself, or one wrapped in data/project/result.
-export function mapProjectDetails(body) {
-  const candidates = [body?.data?.project, body?.project, body?.result?.project, body?.data, body?.result, body];
-  for (const candidate of candidates) { const project = mapProject(candidate); if (project) return project; }
-  return null;
 }
 // A display name from the company basic-info or user-auth response.
 export function mapName(body) {
@@ -193,17 +189,17 @@ export function createConnections(store, config = connectionsConfig(), { request
     if (outcome.reconnect) throw reconnectError();
     return outcome.token;
   }
-  const bearerRequest = (token, path, method = "GET") => request(config.sso.baseUrl + path, { method, headers: { Authorization: "Bearer " + token, Accept: "application/json" }, signal: AbortSignal.timeout(10000), redirect: "error" });
+  const bearerRequest = (token, path, method = "GET", base = config.sso.baseUrl) => request(base + path, { method, headers: { Authorization: "Bearer " + token, Accept: "application/json" }, signal: AbortSignal.timeout(10000), redirect: "error" });
   const readBody = async (response) => { try { return await response.json(); } catch { return undefined; } };
-  // One Agora call with the connection's bearer token; a 401 renews the token once and retries.
-  async function agoraCall(userId, path, method = "GET") {
+  // One Agora call with the connection's bearer token, on sso2 or the BFF; a 401 renews the token once and retries.
+  async function agoraCall(userId, path, method = "GET", base = config.sso.baseUrl) {
     let token = await accessToken(userId), response;
     try {
-      response = await bearerRequest(token, path, method);
+      response = await bearerRequest(token, path, method, base);
       if (response.status === 401) {
         log("Agora refused " + method + " " + path + ": " + await refusal(response) + ".");
         token = await accessToken(userId, token);
-        response = await bearerRequest(token, path, method);
+        response = await bearerRequest(token, path, method, base);
       }
     } catch (error) {
       if (error instanceof AppError) throw error;
@@ -215,10 +211,9 @@ export function createConnections(store, config = connectionsConfig(), { request
     }
     return { status: response.status, ok: response.ok, body: await readBody(response) };
   }
-  // The project list: GET /api/v0/customer/project, or GET /api/v0/project where the first is not found.
+  // The project list, with certificates: GET {AGORA_BFF_URL}/api/cli/v1/projects, which answers { items: [...] }.
   async function listProjects(userId) {
-    let result = await agoraCall(userId, AGORA_PATHS.customerProjects), path = AGORA_PATHS.customerProjects;
-    if (result.status === 404) { path = AGORA_PATHS.projects; result = await agoraCall(userId, path); }
+    const path = AGORA_PATHS.bffProjects, result = await agoraCall(userId, path, "GET", config.bffUrl);
     if (!result.ok) { log("Agora project list failed: GET " + path + " answered " + result.status + "."); throw new AppError(503, "Agora projects could not be loaded. You may need to reconnect."); }
     const mapped = mapProjects(result.body);
     if (!mapped) { log("Agora project list not recognised: GET " + path + " answered " + result.status + " with " + keyNames(result.body) + "."); throw new AppError(503, "Agora returned a project list the Portal does not recognise yet."); }
@@ -250,7 +245,7 @@ export function createConnections(store, config = connectionsConfig(), { request
     config,
     save,
     // Used by scripts/agora-shapes.mjs: a raw GET with the stored token (status and parsed body), never logged.
-    get: (userId, path) => agoraCall(userId, path),
+    get: (userId, path, { bff = false } = {}) => agoraCall(userId, path, "GET", bff ? config.bffUrl : config.sso.baseUrl),
     async status(userId) {
       const connection = (await store.snapshot()).accounts.find((account) => account.id === userId)?.connections?.agora;
       const status = { ready: config.ready, connect: Boolean(config.connect?.ready), connected: Boolean(connection) };
@@ -299,19 +294,10 @@ export function createConnections(store, config = connectionsConfig(), { request
     },
     // Lists omit certificates.
     async projects(userId) { return { projects: (await listProjects(userId)).map(withoutCertificate) }; },
-    // A project's certificate, from GET /api/v0/project/{vendorId}, only on explicit request; never cached.
+    // A project's certificate, from the BFF project list, only on explicit request; never cached.
     async certificate(userId, projectId) {
       if (typeof projectId !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(projectId)) throw new AppError(422, "Choose a project.");
-      const result = await agoraCall(userId, AGORA_PATHS.project(projectId));
-      if (result.status === 404 || result.status === 403) throw new AppError(404, "This Agora project was not found in your account.");
-      if (!result.ok) { log("Agora project details failed: GET /api/v0/project/{vendorId} answered " + result.status + "."); throw new AppError(503, "Agora project details could not be loaded."); }
-      let project = mapProjectDetails(result.body);
-      if (!project) log("Agora project details not recognised: GET /api/v0/project/{vendorId} answered " + result.status + " with " + keyNames(result.body) + ".");
-      // Some lists carry the certificate when the details do not.
-      if (!project?.certificate) {
-        try { project = (await listProjects(userId)).find((entry) => entry.projectId === projectId) || project; }
-        catch { /* The details are enough to answer. */ }
-      }
+      const project = (await listProjects(userId)).find((entry) => entry.projectId === projectId);
       if (!project) throw new AppError(404, "This Agora project was not found in your account.");
       return { projectId, appId: project.appId, certificate: project.certificate || null };
     },

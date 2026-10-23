@@ -1,11 +1,11 @@
-// A stand-in for Agora SSO (sso2.agora.io), served through an injectable `request`. It speaks exactly the documented
-// paths: GET /api/v0/oauth/authorize (played by `authorize`), POST /api/v0/oauth/token (authorization_code and
-// refresh_token, client_secret_post, PKCE S256 checked when sent), and the bearer APIs /api/v0/customer/project,
-// /api/v0/project, /api/v0/project/{vendorId}, /api/v0/customer/user-auth (GET, DELETE),
-// /api/v0/customer/company/basic-info and /api/v0/account/companies. The project list shape can be swapped.
+// A stand-in for Agora SSO (sso2.agora.io) and the Agora CLI BFF (agora-cli.agora.io), served through an injectable
+// `request`. SSO: GET /api/v0/oauth/authorize (played by `authorize`), POST /api/v0/oauth/token (authorization_code and
+// refresh_token, client_secret_post, PKCE refused), and the bearer APIs /api/v0/customer/user-auth (GET, DELETE),
+// /api/v0/customer/company/basic-info and /api/v0/account/companies. Like the real sso2, its project paths refuse these
+// tokens. BFF: GET /api/cli/v1/projects answers { items } (the shape can be swapped) with certificates as signKey.
 import { randomBytes } from "node:crypto";
 
-const projects = [{ vendorId: "vendor-1", projectName: "Private project", key: "agora-app-id", signKey: "private-test-certificate", status: 1, createdAt: 1700000000 }];
+const projects = [{ projectId: "vendor-1", name: "Private project", appId: "agora-app-id", signKey: "private-test-certificate", status: "1", createdAt: "2023-11-14T22:13:20.000Z", vid: 1001 }];
 export const listShapes = {
   dataList: (items) => ({ code: 0, data: { list: items } }),
   topLevel: (items) => items,
@@ -13,12 +13,12 @@ export const listShapes = {
   dataArray: (items) => ({ data: items })
 };
 
-export function createFakeAgora({ base = "https://sso.agora.example", clientId = "portal-agora", clientSecret = "test-only-agora-client-value", expiresIn = 7200, scope = "basic_info,console" } = {}) {
+export function createFakeAgora({ base = "https://sso.agora.example", bff = "https://bff.agora.example", clientId = "portal-agora", clientSecret = "test-only-agora-client-value", expiresIn = 7200, scope = "basic_info,console" } = {}) {
   const codes = new Map(), access = new Map(), refresh = new Map();
-  const counts = { code: 0, refresh: 0, customerProjects: 0, projects: 0, details: 0, revoke: 0, companyInfo: 0, userAuth: 0 };
+  const counts = { code: 0, refresh: 0, bffProjects: 0, revoke: 0, companyInfo: 0, userAuth: 0 };
   const issued = [], calls = [];
   const state = {
-    down: false, expiresIn, refuseRefresh: false, customerProjects404: false, listShape: listShapes.dataList, detailsWithCertificate: true,
+    down: false, expiresIn, refuseRefresh: false, listShape: listShapes.items,
     user: { name: "agora-user-1" }, company: { companyName: "Agora Builder" }, items: structuredClone(projects)
   };
   const tokens = (user) => {
@@ -31,6 +31,14 @@ export function createFakeAgora({ base = "https://sso.agora.example", clientId =
   async function request(input, options = {}) {
     const url = new URL(String(input)), method = options.method || "GET";
     if (state.down) throw new TypeError("fetch failed");
+    if (url.origin === bff) {
+      calls.push("BFF " + method + " " + url.pathname);
+      if (url.pathname !== "/api/cli/v1/projects" || method !== "GET") return new Response("not found", { status: 404 });
+      counts.bffProjects++;
+      const header = String(options?.headers?.Authorization || "");
+      if (!header.startsWith("Bearer ")) return Response.json({ code: "UNAUTHORIZED", message: "Missing bearer token" }, { status: 401 });
+      return bearer(options) ? Response.json(state.listShape(state.items)) : Response.json({ code: "UNAUTHORIZED", message: "Invalid access token" }, { status: 401 });
+    }
     if (url.origin !== base) return new Response("not found", { status: 404 });
     calls.push(method + " " + url.pathname);
     if (url.pathname === "/api/v0/oauth/token" && method === "POST") {
@@ -54,24 +62,8 @@ export function createFakeAgora({ base = "https://sso.agora.example", clientId =
       }
       return Response.json({ error: "unsupported_grant_type" }, { status: 400 });
     }
-    if (url.pathname === "/api/v0/customer/project" && method === "GET") {
-      counts.customerProjects++;
-      if (state.customerProjects404) return new Response("not found", { status: 404 });
-      return bearer(options) ? Response.json(state.listShape(state.items)) : unauthorized();
-    }
-    if (url.pathname === "/api/v0/project" && method === "GET") {
-      counts.projects++;
-      return bearer(options) ? Response.json(state.listShape(state.items)) : unauthorized();
-    }
-    const detail = url.pathname.match(/^\/api\/v0\/project\/([^/]+)$/);
-    if (detail && method === "GET") {
-      counts.details++;
-      if (!bearer(options)) return unauthorized();
-      const project = state.items.find((item) => item.vendorId === decodeURIComponent(detail[1]));
-      if (!project) return Response.json({ code: 404, msg: "not found" }, { status: 404 });
-      const { signKey, ...rest } = project;
-      return Response.json({ code: 0, data: state.detailsWithCertificate ? project : rest });
-    }
+    // The real sso2 answers its project paths with its login-page 401 for these tokens.
+    if (/^\/api\/v0\/(customer\/)?project(\/|$)/.test(url.pathname)) return Response.json({ statusCode: 401, redirectToLoginPage: true, phrase: "[Error] Unauthorized" }, { status: 401 });
     if (url.pathname === "/api/v0/customer/user-auth") {
       const user = bearer(options);
       if (method === "DELETE") {
@@ -93,10 +85,10 @@ export function createFakeAgora({ base = "https://sso.agora.example", clientId =
     return new Response("not found", { status: 404 });
   }
   return {
-    request, counts, calls, issued, state, clientId, clientSecret, base,
+    request, counts, calls, issued, state, clientId, clientSecret, base, bff,
     // Makes every issued access token invalid, as if it had expired at Agora before its stated lifetime.
     expireAccessTokens() { access.clear(); },
-    env: (extra = {}) => ({ AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64"), AGORA_SSO_BASE_URL: base, AGORA_SSO_CLIENT_ID: clientId, AGORA_SSO_CLIENT_SECRET: clientSecret, ...extra }),
+    env: (extra = {}) => ({ AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64"), AGORA_SSO_BASE_URL: base, AGORA_BFF_URL: bff, AGORA_SSO_CLIENT_ID: clientId, AGORA_SSO_CLIENT_SECRET: clientSecret, ...extra }),
     // Plays Agora's consent page: checks the request and returns the callback URL with a single-use code (or an error).
     authorize(authorizationUrl, { error } = {}) {
       const url = new URL(authorizationUrl);
