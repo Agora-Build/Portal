@@ -56,7 +56,7 @@ async function statement(append = false, version = renderVersion) {
   cursor = result.nextCursor;
   document.querySelector("#more-statement").hidden = !cursor;
 }
-async function loadProjects(version) {
+async function loadProjects(version, available) {
   const container = document.querySelector("#agora-projects");
   container.replaceChildren(el("p", { text: "Loading your Agora projects..." }));
   try {
@@ -78,10 +78,15 @@ async function loadProjects(version) {
         finally { button.disabled = false; }
       });
       document.addEventListener("visibilitychange", () => { if (document.hidden) hide(); });
-      return el("article", { class: "agora-project" }, [el("h4", { text: project.name }), el("p", { class: "mono", text: "App ID: " + project.appId }), button, secret]);
+      return el("article", { class: "agora-project" }, [el("h4", { text: project.name }), el("p", { class: "mono", text: project.appId ? "App ID: " + project.appId : "App ID unavailable" }), button, secret]);
     }));
     if (!result.projects.length) container.append(el("p", { text: "No Agora projects were returned for this account." }));
-  } catch (error) { if (version === renderVersion) container.replaceChildren(el("p", { class: "form-error", text: error.message })); }
+  } catch (error) {
+    if (version !== renderVersion) return;
+    container.replaceChildren(el("p", { class: "form-error", text: error.message }));
+    // Agora refused to renew the connection: offer to reconnect.
+    if (error.data?.reconnect) showReconnect(available);
+  }
 }
 async function loadAccount() {
   const version = ++renderVersion;
@@ -120,13 +125,23 @@ async function loadAccount() {
   }
   if (results[2].status === "fulfilled") {
     const agora = results[2].value.agora;
+    const connectButton = document.querySelector("#connect-agora");
     document.querySelector("#agora-status").textContent = agora.connected ? "Connected to your Agora account" + (agora.name ? " (" + agora.name + ")" : "") + "." : agora.connect ? "Connect Agora to access your projects and App IDs." : "Agora Console connections are not available yet.";
-    document.querySelector("#connect-agora").hidden = !agora.connect;
+    connectButton.textContent = "Connect Agora Console";
+    connectButton.hidden = !agora.connect || agora.connected;
     document.querySelector("#disconnect-agora").hidden = !agora.connected;
-    document.querySelector("#connect-agora").textContent = agora.connected ? "Reconnect Agora" : "Connect Agora";
-    if (agora.connected) await loadProjects(version);
+    if (agora.connected && agora.reconnect) { document.querySelector("#agora-projects").replaceChildren(); showReconnect(agora.connect); }
+    else if (agora.connected) await loadProjects(version, agora.connect);
+    else document.querySelector("#agora-projects").replaceChildren();
   }
   for (const result of results) if (result.status === "rejected") notify(result.reason.message);
+}
+// The stored connection can no longer be renewed; the account connects again to replace it.
+function showReconnect(available = true) {
+  const connectButton = document.querySelector("#connect-agora");
+  document.querySelector("#agora-status").textContent = "Your Agora Console connection has expired. Reconnect to see your projects.";
+  connectButton.textContent = "Reconnect Agora Console";
+  connectButton.hidden = !available;
 }
 // Signed out or browser-only, the identity card is the sign-in: one link to auth.agora.build, or start with this browser.
 function renderSignInSection() {
