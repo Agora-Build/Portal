@@ -168,8 +168,9 @@ export function createIntegrationService({
 
   async function pushOnce(stationId) {
     try {
+      // A removed Station is still pushed to once, so it learns to stop.
       const station = await repository.station(stationId);
-      if (!station || station.status !== "active") return;
+      if (!station) return;
       const cursor = await repository.latestCursor(stationId);
       const reply = await pushFetch.post(station.origin + CHANGES_PATH, { cursor });
       if (reply.status < 200 || reply.status > 299) log("Station change push failed: status_" + reply.status + ".");
@@ -225,7 +226,10 @@ export function createIntegrationService({
           await repository.appendEvent({ stationId: entry.id, accountId: entry.owner, actor: "system", kind: "station_reconciled" }, client);
           return true;
         });
-        if (added) log("Station reconciled from Auth: missing in Portal.");
+        if (added) {
+          log("Station reconciled from Auth: missing in Portal.");
+          changed(entry.id);
+        }
       }
       if (entry.owner !== accountId && !(await repository.currentMembers(entry.id)).some((member) => member.accountId === accountId)) {
         const added = await db.transaction(async (client) => {
@@ -233,7 +237,10 @@ export function createIntegrationService({
           await repository.appendEvent({ stationId: entry.id, accountId, actor: "system", kind: "member_added", reason: "reconciled" }, client);
           return true;
         });
-        if (added) log("Station member reconciled from Auth: missing in Portal.");
+        if (added) {
+          log("Station member reconciled from Auth: missing in Portal.");
+          changed(entry.id);
+        }
       }
     }
     for (const station of await repository.stationsFor(accountId)) {
@@ -245,6 +252,7 @@ export function createIntegrationService({
           await repository.appendEvent({ stationId: station.id, accountId, actor: "system", kind: "station_removed", reason: "reconciled" }, client);
         });
         log("Station removed in Portal: absent from Auth.");
+        changed(station.id);
         continue;
       }
       // Auth no longer counts this account a member (and has revoked its integrations there); Portal follows.
@@ -254,7 +262,10 @@ export function createIntegrationService({
         await repository.appendEvent({ stationId: station.id, accountId, actor: "system", kind: "member_removed", reason: "reconciled" }, client);
         return true;
       });
-      if (removed) log("Station member removed in Portal: absent from Auth.");
+      if (removed) {
+        log("Station member removed in Portal: absent from Auth.");
+        changed(station.id);
+      }
     }
   }
 
@@ -295,8 +306,8 @@ export function createIntegrationService({
   }
 
   // The Portal half of a change Auth has already made: under the row lock `apply` re-checks the current row and returns
-  // `{ fields, event }` (or null for nothing to do). The Station is notified after commit.
-  async function commit(id, apply) {
+  // `{ fields, event }` (or null for nothing to do). The Station is notified after commit unless `push` is false.
+  async function commit(id, apply, { push = true } = {}) {
     const result = await db.transaction(async (client) => {
       const current = await repository.integrationForUpdate(id, client);
       if (!current) throw notFound();
@@ -309,7 +320,7 @@ export function createIntegrationService({
       }
       return { row: await repository.integration(id, client), done: true };
     });
-    if (result.done) changed(result.row.stationId);
+    if (result.done && push) changed(result.row.stationId);
     return result.row;
   }
 
@@ -427,11 +438,12 @@ export function createIntegrationService({
       const station = await activeStation(stationId);
       if (member === station.ownerAccount) throw failure(400, "The owner already has this Station.", "account");
       await viaAuth(() => manage.addMember(stationId, member, accountId));
-      await db.transaction(async (client) => {
-        if (await repository.addMember(stationId, member, accountId, now(), client)) {
-          await repository.appendEvent({ stationId, accountId: member, actor: accountId, kind: "member_added" }, client);
-        }
+      const added = await db.transaction(async (client) => {
+        if (!(await repository.addMember(stationId, member, accountId, now(), client))) return false;
+        await repository.appendEvent({ stationId, accountId: member, actor: accountId, kind: "member_added" }, client);
+        return true;
       });
+      if (added) changed(stationId);
     },
 
     // Auth removes the member and revokes their integrations on the Station; Portal follows in one transaction.
@@ -443,6 +455,7 @@ export function createIntegrationService({
         await revokeOn(client, stationId, (row) => row.ownerAccount === member, { actor: accountId, reason: "member_removed" });
         await repository.appendEvent({ stationId, accountId: member, actor: accountId, kind: "member_removed" }, client);
       });
+      changed(stationId);
     },
 
     async removeStation(accountId, stationId) {
@@ -453,6 +466,7 @@ export function createIntegrationService({
         await revokeOn(client, stationId, () => true, { actor: accountId, reason: "station_removed" });
         await repository.appendEvent({ stationId, accountId: station?.ownerAccount ?? accountId, actor: accountId, kind: "station_removed" }, client);
       });
+      changed(stationId);
     },
 
     // A 5-minute station.read token for the browser to send to a Station this account owns or belongs to.
@@ -592,7 +606,8 @@ export function createIntegrationService({
         return { fields: { ...transition(current, "report:" + state, now()), lastError: null }, event };
       };
       apply(row);
-      const updated = await commit(row.id, apply);
+      // The Station made this change itself, so it is not pushed back to it.
+      const updated = await commit(row.id, apply, { push: false });
       const { role, ...view } = integrationView(updated, null, station.origin);
       return view;
     },

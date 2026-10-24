@@ -29,9 +29,10 @@ async function setup(t, { wrap = (repository) => repository } = {}) {
     return { accessToken: "read-token-for-" + origin, expiresIn: 300 };
   };
   let counter = 0;
+  const notified = [];
   const service = createIntegrationService({
     repository: wrap(repository), db, manage, stationFetch, exchange: exchangeFn,
-    now: () => clock.now, challengeValue: () => "proof-value-" + (++counter)
+    now: () => clock.now, challengeValue: () => "proof-value-" + (++counter), notify: (stationId) => notified.push(stationId)
   });
   // Register a Station for an account the way the browser does: a challenge, then the served value.
   async function register(accountId = OWNER, origin = "https://one.example") {
@@ -41,7 +42,7 @@ async function setup(t, { wrap = (repository) => repository } = {}) {
     return service.registerStation(accountId, { challengeId: challenge.challengeId, reportKey: REPORT_KEY });
   }
   const events = async (kind) => (await db.pool.query("SELECT * FROM integration_events" + (kind ? " WHERE kind = $1" : "") + " ORDER BY id", kind ? [kind] : [])).rows;
-  return { db, repository, manage, clock, served, fetched, exchange, service, register, events };
+  return { db, repository, manage, clock, served, fetched, exchange, service, register, events, notified };
 }
 
 const refused = (status, code, message) => (error) => {
@@ -176,7 +177,9 @@ test("a Portal write failing after Auth's success is reconciled by the next list
   await assert.rejects(s.register(OWNER, "https://one.example"), /insert failed/);
   assert.equal(await s.repository.station("st1"), null);
   assert.deepEqual(await s.events(), [], "the event rolled back with the failed insert");
+  assert.deepEqual(s.notified, []);
   const listed = await s.service.stations(OWNER);
+  assert.deepEqual(s.notified, ["st1"], "the reconciled Station is pushed to");
   assert.equal(listed.stale, false);
   assert.deepEqual(listed.stations.map((station) => [station.id, station.role]), [["st1", "owner"]]);
   const row = await s.repository.station("st1");
@@ -185,6 +188,7 @@ test("a Portal write failing after Auth's success is reconciled by the next list
   assert.deepEqual([event.station_id, event.actor, event.account_id], ["st1", "system", OWNER]);
   await s.service.stations(OWNER);
   assert.equal((await s.events("station_reconciled")).length, 1, "reconciling twice adds nothing");
+  assert.deepEqual(s.notified, ["st1"]);
 });
 
 test("a Station Auth no longer lists is removed in Portal with its integrations revoked", async (t) => {
@@ -193,8 +197,10 @@ test("a Station Auth no longer lists is removed in Portal with its integrations 
   await s.register(OWNER, "https://one.example");
   await seedIntegration(s.repository, "i-ready", "st1", OWNER, "ready");
   s.manage.records[0].status = "removed";
+  assert.deepEqual(s.notified, [], "registering does not push");
   const listed = await s.service.stations(OWNER);
   assert.deepEqual(listed.stations, []);
+  assert.deepEqual(s.notified, ["st1"]);
   assert.equal((await s.repository.station("st1")).status, "removed");
   assert.equal((await s.repository.integration("i-ready")).state, "revoked");
   const [event] = await s.events("station_removed");
@@ -221,6 +227,7 @@ test("sharing: the owner shares, members see the Station without its report clie
   await s.service.share(OWNER, "st1", MEMBER);
   await s.service.share(OWNER, "st1", MEMBER);
   assert.equal((await s.events("member_added")).length, 1, "sharing again with a current member records nothing");
+  assert.deepEqual(s.notified, ["st1"], "only the recorded share is pushed");
   const [added] = await s.events("member_added");
   assert.deepEqual([added.station_id, added.actor, added.account_id], ["st1", OWNER, MEMBER]);
   assert.deepEqual((await s.repository.currentMembers("st1")).map((member) => member.accountId), [MEMBER]);
@@ -241,6 +248,7 @@ test("sharing: the owner shares, members see the Station without its report clie
     await assert.rejects(s.service.share(OWNER, "st1", bad), (error) => error.status === 400);
   }
   await assert.rejects(s.service.share(OWNER, "missing", MEMBER), refused(404));
+  assert.deepEqual(s.notified, ["st1"], "refused changes push nothing");
 });
 
 test("unsharing by the owner or the member themself revokes that member's integrations on the Station", async (t) => {
@@ -254,7 +262,9 @@ test("unsharing by the owner or the member themself revokes that member's integr
   await seedIntegration(s.repository, "i-waiting", "st1", MEMBER, "awaiting_approval");
   await seedIntegration(s.repository, "i-owner", "st1", OWNER, "ready");
   await seedIntegration(s.repository, "i-other", "st2", MEMBER, "ready");
+  s.notified.length = 0;
   await s.service.unshare(OWNER, "st1", MEMBER);
+  assert.deepEqual(s.notified, ["st1"]);
   assert.equal((await s.repository.integration("i-ready")).state, "revoking");
   assert.equal((await s.repository.integration("i-waiting")).state, "revoked");
   assert.equal((await s.repository.integration("i-owner")).state, "ready");
@@ -269,6 +279,7 @@ test("unsharing by the owner or the member themself revokes that member's integr
   assert.deepEqual((await s.repository.currentMembers("st1")), []);
   assert.deepEqual((await s.service.stations(MEMBER)).stations.map((station) => station.id), ["st2"]);
   await s.service.unshare(MEMBER, "st2", MEMBER);
+  assert.deepEqual(s.notified, ["st1", "st2"]);
   assert.equal((await s.repository.integration("i-other")).state, "revoking");
   const [, self] = await s.events("member_removed");
   assert.deepEqual([self.station_id, self.actor, self.account_id], ["st2", MEMBER, MEMBER]);
@@ -283,9 +294,12 @@ test("removing a Station revokes all its integrations; only the owner may", asyn
   await seedIntegration(s.repository, "i-ready", "st1", MEMBER, "ready");
   await seedIntegration(s.repository, "i-waiting", "st1", OWNER, "awaiting_approval");
   await seedIntegration(s.repository, "i-done", "st1", OWNER, "revoked");
+  s.notified.length = 0;
   await assert.rejects(s.service.removeStation(MEMBER, "st1"), refused(403, "forbidden"));
   assert.equal((await s.repository.station("st1")).status, "active");
+  assert.deepEqual(s.notified, []);
   await s.service.removeStation(OWNER, "st1");
+  assert.deepEqual(s.notified, ["st1"], "the removed Station is pushed to once");
   assert.equal((await s.repository.station("st1")).status, "removed");
   assert.equal((await s.repository.integration("i-ready")).state, "revoking");
   assert.equal((await s.repository.integration("i-waiting")).state, "revoked");
@@ -298,6 +312,7 @@ test("removing a Station revokes all its integrations; only the owner may", asyn
   assert.deepEqual([removed.station_id, removed.actor, removed.account_id, removed.reason], ["st1", OWNER, OWNER, null]);
   assert.deepEqual((await s.service.stations(OWNER)).stations, []);
   await assert.rejects(s.service.removeStation(OWNER, "st1"), refused(404, "not_found"));
+  assert.deepEqual(s.notified, ["st1"]);
 });
 
 test("readToken exchanges the session's ID token for a Station the account can use", async (t) => {
@@ -332,11 +347,13 @@ test("a membership Auth has but Portal lacks is added by the member's next listi
   await s.register(OWNER, "https://one.example");
   s.manage.records[0].members.push({ account: MEMBER, addedAt: new Date().toISOString() });
   const listed = await s.service.stations(MEMBER);
+  assert.deepEqual(s.notified, ["st1"]);
   assert.deepEqual(listed.stations.map((station) => [station.id, station.role]), [["st1", "member"]]);
   const [added] = await s.events("member_added");
   assert.deepEqual([added.actor, added.account_id, added.reason], ["system", MEMBER, "reconciled"]);
   await s.service.stations(MEMBER);
   assert.equal((await s.events("member_added")).length, 1);
+  assert.deepEqual(s.notified, ["st1"]);
 });
 
 test("a membership Auth has dropped is removed by the member's next listing, revoking their integrations there", async (t) => {
@@ -351,12 +368,15 @@ test("a membership Auth has dropped is removed by the member's next listing, rev
   await seedIntegration(s.repository, "i-owner", "st1", OWNER, "ready");
   await seedIntegration(s.repository, "i-other", "st2", MEMBER, "ready");
   s.manage.records[0].members = [];
+  s.notified.length = 0;
   s.manage.down = true;
   assert.deepEqual((await s.service.stations(MEMBER)).stations.map((station) => station.id), ["st1", "st2"], "nothing changes while Auth is down");
   assert.equal((await s.events("member_removed")).length, 0);
+  assert.deepEqual(s.notified, []);
   s.manage.down = false;
   const listed = await s.service.stations(MEMBER);
   assert.deepEqual(listed.stations.map((station) => station.id), ["st2"]);
+  assert.deepEqual(s.notified, ["st1"]);
   assert.deepEqual(await s.repository.currentMembers("st1"), []);
   assert.equal((await s.repository.integration("i-ready")).state, "revoking");
   assert.equal((await s.repository.integration("i-waiting")).state, "revoked");
@@ -372,5 +392,6 @@ test("a membership Auth has dropped is removed by the member's next listing, rev
   await assert.rejects(s.service.readToken(MEMBER, "member-id-token", "st1"), refused(404, "not_found"));
   await s.service.stations(MEMBER);
   assert.equal((await s.events("member_removed")).length, 1, "reconciling twice adds nothing");
+  assert.deepEqual(s.notified, ["st1"]);
   assert.equal((await s.repository.station("st1")).status, "active", "the owner's Station stays");
 });

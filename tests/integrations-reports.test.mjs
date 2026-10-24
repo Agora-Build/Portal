@@ -294,3 +294,26 @@ test("a failing push is logged by reason and never throws", async (t) => {
     "Station change push failed: error."
   ]);
 });
+
+test("a report is not pushed back to its Station; sharing and removal are, a removed Station once", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const id = await s.approved();
+  await s.service._pushesIdle();
+  s.pushFetch.posts.length = 0;
+  await s.service.report(s.station.reportClientId, { integrationId: id, state: "ready" });
+  await s.service.report(s.station.reportClientId, { integrationId: id, state: "error", reason: "R9 host unreachable" });
+  await s.service._pushesIdle();
+  assert.deepEqual(s.pushFetch.posts, []);
+  await s.service.share(OWNER, s.station.id, MEMBER);
+  await s.service._pushesIdle();
+  await s.service.unshare(OWNER, s.station.id, MEMBER);
+  await s.service._pushesIdle();
+  await s.service.removeStation(OWNER, s.station.id);
+  await s.service._pushesIdle();
+  const url = "https://one.example/agora-build/v1/changes";
+  assert.equal(s.pushFetch.posts.length, 3);
+  assert.ok(s.pushFetch.posts.every((post) => post.url === url));
+  assert.deepEqual(s.pushFetch.posts.at(-1).body, { cursor: await s.repository.latestCursor(s.station.id) });
+  assert.equal((await s.repository.integration(id)).state, "revoking");
+});
