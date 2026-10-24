@@ -15,7 +15,7 @@ const R9 = "a".repeat(64);
 
 const publicJwk = () => generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey.export({ format: "jwk" });
 
-async function setup(t) {
+async function setup(t, { wrap = (repository) => repository } = {}) {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
   const repository = createRepository(db);
@@ -24,9 +24,10 @@ async function setup(t) {
   const served = { status: 200, body: "" };
   const stationFetch = { async get() { return { ...served }; } };
   const notified = [];
+  const logs = [];
   let counter = 0;
   const service = createIntegrationService({
-    repository, db, manage, stationFetch, exchange: async () => ({}), now: () => clock.now,
+    repository: wrap(repository), db, manage, stationFetch, exchange: async () => ({}), now: () => clock.now, log: (line) => logs.push(line),
     challengeValue: () => "proof-value-" + (++counter), notify: (stationId) => notified.push(stationId)
   });
   async function register(accountId = OWNER, origin = "https://one.example") {
@@ -39,7 +40,7 @@ async function setup(t) {
   const events = async (kind) => (await db.pool.query("SELECT * FROM integration_events WHERE integration_id IS NOT NULL" + (kind ? " AND kind = $1" : "") + " ORDER BY id", kind ? [kind] : [])).rows;
   const authCalls = (name) => manage.calls.filter((call) => call === name).length;
   const record = (id) => manage.integrationRecords.find((entry) => entry.clientId === id);
-  return { db, repository, manage, clock, service, station, register, create, events, authCalls, record, notified };
+  return { db, repository, manage, clock, service, station, register, create, events, authCalls, record, notified, logs };
 }
 
 const refused = (status, code) => (error) => {
@@ -303,6 +304,43 @@ test("integrations lists the account's own and those on Stations it owns, and fo
   // The member's own listing is reconciled from their Auth list only.
   const member = await s.service.integrations(MEMBER);
   assert.deepEqual(member.integrations.map((view) => [view.id, view.role]), [[theirs.id, "owner"]]);
+});
+
+test("a settings-only change found at Auth is recorded as integration_reconciled, so the Station's feed shows it", async (t) => {
+  let locks = 0;
+  const s = await setup(t, { wrap: (repository) => ({ ...repository, integrationForUpdate: (...args) => { locks += 1; return repository.integrationForUpdate(...args); } }) });
+  if (!s) return;
+  const { id } = await s.create();
+  // Auth took a renew and a quota change whose Portal half never committed.
+  const expiresAt = new Date(s.clock.now + 60 * DAY).toISOString();
+  Object.assign(s.record(id), { quotaPerSecond: 9, expiresAt });
+  s.notified.length = 0;
+  locks = 0;
+  const [view] = (await s.service.integrations(OWNER)).integrations;
+  assert.deepEqual([view.quotaPerSecond, view.expiresAt, view.state], [9, expiresAt, "awaiting_approval"]);
+  const [event] = await s.events("integration_reconciled");
+  assert.deepEqual([event.actor, event.state, event.reason, event.details], ["system", "awaiting_approval", "reconciled", { changed: ["expiresAt", "quotaPerSecond"], expiresAt, quotaPerSecond: 9 }]);
+  assert.deepEqual(s.notified, [s.station.id]);
+  const feed = await s.service.changes(s.station.reportClientId, 0);
+  const change = feed.changes.find((entry) => entry.kind === "integration_reconciled");
+  assert.deepEqual([change.integrationId, change.integration.quotaPerSecond, change.integration.expiresAt], [id, 9, expiresAt]);
+  assert.equal(locks, 1);
+  s.notified.length = 0;
+  locks = 0;
+  await s.service.integrations(OWNER);
+  assert.equal((await s.events("integration_reconciled")).length, 1, "nothing more to record");
+  assert.deepEqual(s.notified, []);
+  assert.equal(locks, 0, "an unchanged listing takes no row lock");
+});
+
+test("an integration Auth lists without an expiry is reconciled with Portal's default, and that is logged", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const { id } = await s.create();
+  s.manage.integrationRecords.push({ ...s.record(id), clientId: "i-" + "8".repeat(26), expiresAt: null, keys: [] });
+  const views = (await s.service.integrations(OWNER)).integrations;
+  assert.equal(views.find((view) => view.id === "i-" + "8".repeat(26)).expiresAt, new Date(s.clock.now + 30 * DAY).toISOString());
+  assert.ok(s.logs.includes("Integration reconciled without an expiry at Auth: Portal shows its 30-day default."));
 });
 
 test("integrations serves Portal's rows as stale when Auth is down", async (t) => {

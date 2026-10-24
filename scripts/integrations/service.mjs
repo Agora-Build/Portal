@@ -373,17 +373,36 @@ export function createIntegrationService({
     return viewOf(updated, role);
   }
 
-  // Brings Portal's integrations in line with Auth's list of the account's own. Auth is authoritative, so following it
-  // is not held back by expiry: transitions are checked at time 0, before any expiry.
+  // What following Auth's entry changes on Portal's row: the fields to write and the status event ([transition, kind])
+  // or null. Auth is authoritative, so following it is not held back by expiry: transitions are checked at time 0.
+  function difference(row, entry) {
+    const fields = {};
+    if (entry.expiresAt && new Date(entry.expiresAt).getTime() !== new Date(row.expiresAt).getTime()) fields.expiresAt = entry.expiresAt;
+    if (entry.quotaPerSecond !== undefined && entry.quotaPerSecond !== row.quotaPerSecond) fields.quotaPerSecond = entry.quotaPerSecond;
+    if ((entry.r9Svc ?? null) !== row.r9Svc) fields.r9Svc = entry.r9Svc ?? null;
+    let event = null;
+    if (entry.status === "revoked" && !STOPPED.includes(row.state)) event = ["revoke", "integration_revoked"];
+    else if (entry.status === "paused" && row.state !== "paused" && !STOPPED.includes(row.state)) event = ["pause", "integration_paused"];
+    else if (entry.status === "active" && row.state === "paused") event = ["resume", "integration_resumed"];
+    const settings = Object.keys(fields);
+    if (event) Object.assign(fields, step(row, event[0], 0));
+    return { fields, event, settings };
+  }
+
+  // Brings Portal's integrations in line with Auth's list of the account's own. Rows are compared first without a
+  // lock, so a listing that changes nothing locks nothing. A change of settings alone (expiry, quota, R9 binding) is
+  // recorded as integration_reconciled, so the Station's feed carries the new values.
   async function reconcileIntegrations(listed) {
     for (const entry of listed) {
       const id = entry.clientId;
       let touched = false;
-      if (!(await repository.integration(id))) {
+      let row = await repository.integration(id);
+      if (!row) {
         if (!(await repository.station(entry.stationId))) {
           log("Integration not reconciled: its Station is unknown to Portal.");
           continue;
         }
+        if (!entry.expiresAt) log("Integration reconciled without an expiry at Auth: Portal shows its 30-day default.");
         touched = await db.transaction(async (client) => {
           const expiresAt = entry.expiresAt ?? new Date(now() + 30 * DAY).toISOString();
           if (!(await repository.insertIntegration({ id, ownerAccount: entry.owner, stationId: entry.stationId, kind: "custom_app", name: entry.name, scopes: entry.scopes, quotaPerSecond: entry.quotaPerSecond ?? 200, expiresAt }, client))) return false;
@@ -391,22 +410,19 @@ export function createIntegrationService({
           return true;
         });
         if (touched) log("Integration reconciled from Auth: missing in Portal.");
+        row = await repository.integration(id);
+        if (!row) continue;
       }
-      const followed = await db.transaction(async (client) => {
-        const row = await repository.integrationForUpdate(id, client);
-        const fields = {};
-        if (entry.expiresAt && new Date(entry.expiresAt).getTime() !== new Date(row.expiresAt).getTime()) fields.expiresAt = entry.expiresAt;
-        if (entry.quotaPerSecond !== undefined && entry.quotaPerSecond !== row.quotaPerSecond) fields.quotaPerSecond = entry.quotaPerSecond;
-        if ((entry.r9Svc ?? null) !== row.r9Svc) fields.r9Svc = entry.r9Svc ?? null;
-        let event = null;
-        if (entry.status === "revoked" && !STOPPED.includes(row.state)) event = ["revoke", "integration_revoked"];
-        else if (entry.status === "paused" && row.state !== "paused" && !STOPPED.includes(row.state)) event = ["pause", "integration_paused"];
-        else if (entry.status === "active" && row.state === "paused") event = ["resume", "integration_resumed"];
-        if (event) Object.assign(fields, step(row, event[0], 0));
+      const followed = Object.keys(difference(row, entry).fields).length > 0 && await db.transaction(async (client) => {
+        const current = await repository.integrationForUpdate(id, client);
+        const { fields, event, settings } = difference(current, entry);
         if (!Object.keys(fields).length) return false;
         await repository.updateIntegration(id, fields, client);
-        if (event) {
-          await repository.appendEvent({ stationId: row.stationId, integrationId: id, accountId: row.ownerAccount, actor: "system", kind: event[1], state: fields.state, reason: "reconciled" }, client);
+        const recorded = { stationId: current.stationId, integrationId: id, accountId: current.ownerAccount, actor: "system", reason: "reconciled" };
+        if (event) await repository.appendEvent({ ...recorded, kind: event[1], state: fields.state }, client);
+        else {
+          const details = { changed: settings, ...Object.fromEntries(settings.map((name) => [name, fields[name]])) };
+          await repository.appendEvent({ ...recorded, kind: "integration_reconciled", state: current.state, details }, client);
         }
         return true;
       });
