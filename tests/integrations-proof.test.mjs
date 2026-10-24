@@ -77,6 +77,8 @@ test("blockedAddress covers each refused range at its edges", () => {
     ["::7f00:1", 6, true], ["::8.8.8.8", 6, true], ["::ffff:0:8.8.8.8", 6, true],
     ["64:ff9b::127.0.0.1", 6, true], ["64:ff9b::a00:1", 6, true], ["64:ff9b::8.8.8.8", 6, false], ["64:ff9b:1::1", 6, false],
     ["2001:db8::1", 6, false], ["2606:4700:4700::1111", 6, false],
+    ["2002:7f00:1::", 6, true], ["2002:a01:203::1", 6, true], ["2002:c0a8:101:1::1", 6, true], ["2002:a9fe:a9fe::", 6, true],
+    ["2002:808:808::1", 6, false], ["2001::1", 6, true], ["2001:0:4136:e378:8000:63bf:3fff:fdd2", 6, true], ["2001:1::1", 6, false],
     ["127.0.0.1", "IPv4", true], ["8.8.8.8", undefined, false], ["::1", "IPv6", true],
     ["not-an-address", 4, true], ["", 6, true], [undefined, 4, true]
   ];

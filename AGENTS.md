@@ -14,7 +14,7 @@ Use Node.js 20 or newer; no dependency installation is required.
 - `npm run build`: copy the public site into `dist/`.
 - `npm run build:atem-core`: rebuild `scripts/vendor/atem-core.wasm` (Atem's token library, as Astation pins it) after changing `native/atem-core-wasm`; needs Rust with the `wasm32-unknown-unknown` target and clang with `llvm-ar`.
 - `npm run preview`: serve the built site locally.
-- `npm run test:e2e`: opt-in; run the Portal against the real auth.agora.build (Node 22, an Agora-Build/Auth checkout in `AUTH_REPO`, default `../Auth`, and a throwaway PostgreSQL in `TEST_DATABASE_URL`).
+- `npm run test:e2e`: opt-in; run the Portal against the real auth.agora.build (Node 22, an Agora-Build/Auth checkout in `AUTH_REPO`, default `../Auth`, and a throwaway PostgreSQL in `TEST_DATABASE_URL`); the Stations and integrations suite also needs the Portal's throwaway PostgreSQL in `PORTAL_TEST_DATABASE_URL` and is skipped without it.
 - `node scripts/browser-smoke.mjs`: opt-in; drive a real Chromium through sign-in on the same stack (the e2e settings plus `PLAYWRIGHT_CORE` and `CHROMIUM_PATH`).
 
 ## Coding Style & Naming Conventions

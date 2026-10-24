@@ -659,7 +659,9 @@ at `<origin>/.well-known/agora-build-station`. The Portal fetches it over HTTPS
 only: no redirects, a 5-second timeout, a body of at most 1024 bytes, status 200,
 and a body equal to the value, optionally followed by one `\n`. It refuses
 loopback, private, link-local, CGNAT, multicast and unspecified addresses
-(IPv4 and IPv6), checking the address actually connected to. A failed check
+(IPv4 and IPv6, including such IPv4 addresses carried in IPv4-mapped, NAT64
+and 6to4 IPv6 addresses, and all Teredo addresses), checking the address
+actually connected to. A failed check
 answers 422 `proof` with `reason` (`status_<code>`, `mismatch`, `timeout`,
 `too_large`, `blocked_address` or `network`), and the value is spent.
 

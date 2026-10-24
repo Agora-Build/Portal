@@ -71,11 +71,14 @@ export function blockedAddress(address, family) {
   if (!isIPv6(plain)) return true;
   const groups = ipv6Groups(plain);
   const zeros = (from, to) => groups.slice(from, to).every((group) => group === 0);
-  const embedded = () => blockedIPv4([groups[6] >> 8, groups[6] & 255, groups[7] >> 8, groups[7] & 255].join("."));
-  // IPv4-mapped ::ffff:0:0/96 and NAT64 64:ff9b::/96 are checked as IPv4; ::/96 (incl. ::, ::1 and the deprecated
-  // IPv4-compatible form) and IPv4-translated ::ffff:0:0:0/96 are refused outright.
+  const embedded = (high = groups[6], low = groups[7]) => blockedIPv4([high >> 8, high & 255, low >> 8, low & 255].join("."));
+  // IPv4-mapped ::ffff:0:0/96, NAT64 64:ff9b::/96 and 6to4 2002::/16 (2002:AABB:CCDD:: carries A.B.C.D) are checked as
+  // IPv4; ::/96 (incl. ::, ::1 and the deprecated IPv4-compatible form), IPv4-translated ::ffff:0:0:0/96 and Teredo
+  // 2001::/32 (whose client address is obscured) are refused outright.
   if (zeros(0, 5) && groups[5] === 0xffff) return embedded();
   if (groups[0] === 0x64 && groups[1] === 0xff9b && zeros(2, 6)) return embedded();
+  if (groups[0] === 0x2002) return embedded(groups[1], groups[2]);
+  if (groups[0] === 0x2001 && groups[1] === 0) return true;
   if (zeros(0, 6) || (zeros(0, 4) && groups[4] === 0xffff && groups[5] === 0)) return true;
   const first = groups[0];
   return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80 || (first & 0xff00) === 0xff00;

@@ -55,6 +55,9 @@ test("the script generates keys in the browser and never stores or logs the priv
   assert.match(script, /crypto\.subtle\.generateKey\(\{ name: "ECDSA", namedCurve: "P-256" \}, true, \["sign", "verify"\]\)/);
   assert.match(script, /\.private\.jwk\.json/);
   assert.match(script, /URL\.revokeObjectURL/);
+  // Re-rendering or hiding the integration rows first releases any private-key URL their key fields still hold.
+  assert.equal((script.match(/releaseRotateKeys\(\);\n\s*(document\.querySelector\("#integration-list"\)|list)\.replaceChildren\(/g) || []).length, 3);
+  assert.match(script, /panel\.addEventListener\("toggle", \(\) => \{ if \(!panel\.open\) key\.reset\(\); \}\)/, "closing a rotate panel releases its key");
   assert.match(script, /Agora\.Build never receives this file\. Keep it with your app\./);
   assert.doesNotMatch(script, /localStorage|sessionStorage/);
   assert.doesNotMatch(script, /console\./);

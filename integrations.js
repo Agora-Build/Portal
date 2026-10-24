@@ -340,9 +340,17 @@ function numberAction(summary, label, attrs, button, run) {
   });
   return el("details", { class: "integration-action" }, [el("summary", { text: summary }), form]);
 }
+// The key fields of the rendered integration rows; released (any pending private-key URL revoked and its link removed)
+// before the rows are re-rendered or hidden.
+let rotateKeys = [];
+function releaseRotateKeys() {
+  for (const key of rotateKeys) key.reset();
+  rotateKeys = [];
+}
 function rotatePanel(integration) {
   const container = el("div", { class: "key-field", id: "rotate-" + integration.id });
   const key = keyField(container, () => integration.name);
+  rotateKeys.push(key);
   const output = el("p", { class: "form-note", role: "status" });
   const submit = el("button", { class: "button button-secondary button-small", type: "submit", text: "Add key" });
   const form = el("form", { class: "stack-form inline-action", novalidate: "" }, [container, submit, output]);
@@ -419,10 +427,12 @@ async function loadIntegrations(current = version) {
     const result = await request("/api/integrations");
     if (current !== version) return;
     document.querySelector("#integrations-stale").textContent = result.stale ? STALE : "";
+    releaseRotateKeys();
     list.replaceChildren(...result.integrations.map(integrationRow));
     if (!result.integrations.length) list.append(el("p", { class: "empty-panel", text: "No integrations yet. Create one to let an app act for you." }));
   } catch (error) {
     if (current !== version) return;
+    releaseRotateKeys();
     list.replaceChildren(el("p", { class: "form-error", text: error.message }));
   }
 }
@@ -445,6 +455,7 @@ async function refresh() {
     closeIntegrationForm();
     for (const dialog of [confirmDialog, historyDialog]) if (dialog.open) dialog.close();
     document.querySelector("#station-list").replaceChildren();
+    releaseRotateKeys();
     document.querySelector("#integration-list").replaceChildren();
     return;
   }
