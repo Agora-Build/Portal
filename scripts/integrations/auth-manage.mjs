@@ -12,6 +12,7 @@ export class ManageError extends Error {
 // RFC 6749 section 2.3.1: both parts are form-urlencoded before base64.
 const formEncode = (value) => encodeURIComponent(value).replace(/%20/g, "+");
 const segment = encodeURIComponent;
+const ERROR_CODE = /^[a-z][a-z0-9_]{0,39}$/;
 
 export function createManageClient({ issuer: issuerSetting, clientId, clientSecret, request = fetch, timeoutMs = 10000 } = {}) {
   const issuer = typeof issuerSetting === "string" ? issuerSetting.replace(/\/$/, "") : issuerSetting;
@@ -41,7 +42,8 @@ export function createManageClient({ issuer: issuerSetting, clientId, clientSecr
       if (!json || typeof json !== "object") throw new ManageError(response.status, "bad_response");
       return json;
     }
-    if (typeof json?.error === "string" && json.error) throw new ManageError(response.status, json.error);
+    // Auth's codes are short snake_case words; anything else is not echoed or logged.
+    if (typeof json?.error === "string" && ERROR_CODE.test(json.error)) throw new ManageError(response.status, json.error);
     throw new ManageError(response.status >= 500 ? 503 : response.status, response.status >= 500 ? "unavailable" : "bad_response");
   }
   const list = (json, name) => {

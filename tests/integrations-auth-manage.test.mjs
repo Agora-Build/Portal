@@ -101,6 +101,15 @@ test("Auth errors become ManageError with Auth's code, never echoing the request
   });
 });
 
+test("an Auth error code that is not a short snake_case word becomes bad_response", async () => {
+  for (const code of ["x".repeat(41), "Has Spaces", "line\nbreak", "", 7]) {
+    const s = stub(Response.json({ error: code }, { status: 400 }));
+    await assert.rejects(clientWith(s).stations(actor), (error) => error instanceof ManageError && error.status === 400 && error.code === "bad_response", JSON.stringify(code));
+  }
+  const s = stub(Response.json({ error: "origin_taken" }, { status: 409 }));
+  await assert.rejects(clientWith(s).stations(actor), (error) => error.code === "origin_taken");
+});
+
 test("network failures, timeouts, non-JSON 5xx and bad 2xx bodies are classified", async () => {
   const unavailable = (error) => error instanceof ManageError && error.status === 503 && error.code === "unavailable";
   await assert.rejects(clientWith(stub(() => { throw new TypeError("fetch failed"); })).stations(actor), unavailable);

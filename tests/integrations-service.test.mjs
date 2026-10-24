@@ -77,7 +77,7 @@ test("createIntegration refuses bad input before Auth, and maps Auth's refusals"
   await assert.rejects(s.create(OWNER, { publicJwk: { ...publicPart, d } }), (error) => refused(400, "private_key")(error) && error.message === "Send only the public key.");
   await assert.rejects(s.create(OWNER, { publicJwk: { kty: "oct", k: "secret" } }), refused(400, "private_key"));
   await assert.rejects(s.create(OWNER, { publicJwk: "not a key" }), refused(400, "jwk"));
-  for (const name of ["", "   ", "x".repeat(81), "line\nbreak", 7]) await assert.rejects(s.create(OWNER, { name }), refused(400, "name"), JSON.stringify(name));
+  for (const name of ["", "   ", "x".repeat(81), "line\nbreak", 7, "evil\u202Eppa", "a\u2066b", "a\u200Fb", "\u{1F600}".repeat(41)]) await assert.rejects(s.create(OWNER, { name }), refused(400, "name"), JSON.stringify(name));
   for (const scopes of [["agent.view", "agent.view"], ["station.read"], "agent.view", [1]]) await assert.rejects(s.create(OWNER, { scopes }), refused(400, "scopes"), JSON.stringify(scopes));
   for (const expiresInDays of [0, 91, 1.5, "30"]) await assert.rejects(s.create(OWNER, { expiresInDays }), refused(400, "expiry"));
   for (const quotaPerSecond of [0, 10001, 2.5]) await assert.rejects(s.create(OWNER, { quotaPerSecond }), refused(400, "quota"));

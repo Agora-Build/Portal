@@ -15,7 +15,8 @@ const DAY = 86400000;
 const SCOPES = ["agent.view", "agent.prompt", "agent.approve", "agent.interrupt", "agent.terminal"];
 const PRIVATE_MEMBERS = ["d", "p", "q", "dp", "dq", "qi", "k"];
 const R9_SVC = /^[0-9a-f]{64}$/;
-const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+// Control characters, and the bidirectional marks and overrides that could make a name read differently.
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
 const STOPPED = ["revoking", "revoked"];
 const REPORT_FIELDS = ["integrationId", "state", "reason"];
 const PRINTABLE_REASON = /^[^\p{Cc}]{1,200}$/u;
@@ -71,6 +72,7 @@ function memberAccount(value) {
 
 function integrationName(value) {
   const name = typeof value === "string" ? value.trim() : "";
+  // Counted in UTF-16 units, as Auth counts it.
   if (!name || name.length > 80 || CONTROL.test(name)) throw failure(400, "Name the integration in 1 to 80 characters, without control characters.", "name");
   return name;
 }
@@ -282,7 +284,11 @@ export function createIntegrationService({
       }
     }
     for (const entry of listed) {
-      if (!(await repository.station(entry.id))) {
+      const existing = await repository.station(entry.id);
+      // Auth still lists a Station Portal has removed (its integrations already revoked here); restoring it is left to
+      // an operator, so it is logged.
+      if (existing?.status === "removed") log("Station listed by Auth is removed in Portal: not restored.");
+      if (!existing) {
         // The insert's own answer gates the event, so concurrent listings record the Station once.
         const { added, stale } = await appending(async (client) => {
           const stale = await retireStale(client, entry.origin, entry.id);

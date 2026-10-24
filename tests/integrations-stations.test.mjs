@@ -245,6 +245,17 @@ test("another account's stale Station at the origin is retired when it is regist
   assert.equal((await s.repository.station("st2")).status, "removed");
 });
 
+test("a Station Auth lists that Portal has as removed is logged, not silently skipped", async (t) => {
+  const logs = [];
+  const s = await setup(t);
+  if (!s) return;
+  const service = createIntegrationService({ repository: s.repository, db: s.db, manage: s.manage, stationFetch: { get: async () => ({}) }, exchange: async () => ({}), log: (line) => logs.push(line), notify: () => {} });
+  await s.register(OWNER, "https://one.example");
+  await s.db.pool.query("UPDATE stations SET status = 'removed', removed_at = now() WHERE id = 'st1'");
+  assert.deepEqual((await service.stations(OWNER)).stations, []);
+  assert.ok(logs.includes("Station listed by Auth is removed in Portal: not restored."));
+});
+
 test("with Auth down the listing answers Portal's rows marked stale", async (t) => {
   const s = await setup(t);
   if (!s) return;
