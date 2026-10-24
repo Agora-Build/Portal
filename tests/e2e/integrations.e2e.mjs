@@ -226,6 +226,10 @@ describe("Stations and integrations against the real auth.agora.build", { skip: 
     const personFeed = await bearer(stack, "/api/v1/stations/changes?cursor=0", state.astation.access_token);
     assert.equal(personFeed.status, 403);
     assert.match(personFeed.headers.get("www-authenticate"), /insufficient_scope", scope="station\.report"/);
+    // The other direction: a Portal-audience token is never accepted by a Station (A5, aud is not the Station).
+    for (const [token, scope] of [[state.reportToken, "station.read"], [state.reportToken, "station.report"], [state.astation.access_token, "station.read"], [state.astation.access_token, "integrations:read"]]) {
+      assert.deepEqual(await station.refusal(token, { scope }), { status: 401, error: "invalid_token" }, "the Station refuses a Portal token");
+    }
     assertNothingSecretLogged();
   });
 

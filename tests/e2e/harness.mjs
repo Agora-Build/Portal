@@ -232,7 +232,8 @@ export async function startStack(lib, { integrations = false } = {}) {
   front.point(auth.origin);
   const logs = [];
   const database = integrations ? await portalDatabase() : null;
-  const portal = await startPortal({ issuer, port: portalPort, directory, clientSecret: secrets.PORTAL_CLIENT_SECRET, logs, databaseUrl: database?.url });
+  const portal = await startPortal({ issuer, port: portalPort, directory, clientSecret: secrets.PORTAL_CLIENT_SECRET, logs, databaseUrl: database?.url })
+    .catch(async (error) => { await database?.drop(); throw error; });
   // What the relying-party helpers need: the issuer, reached over real HTTP through its public address.
   const idp = { issuer, fake: auth.fake, fetch: (input, init) => fetch(input, init) };
   const closers = [];
