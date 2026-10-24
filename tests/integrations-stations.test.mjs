@@ -238,16 +238,24 @@ test("sharing: the owner shares, members see the Station without its report clie
   assert.equal(members.owner, OWNER);
   assert.deepEqual(members.members.map((member) => member.account), [MEMBER]);
   assert.ok(members.members[0].addedAt);
-  await assert.rejects(s.service.members(STRANGER, "st1"), refused(403, "forbidden", "Only the Station owner can do this."));
-  await assert.rejects(s.service.share(STRANGER, "st1", STRANGER), refused(403, "forbidden"));
-  await assert.rejects(s.service.share(MEMBER, "st1", STRANGER), refused(403, "forbidden"));
-  await assert.rejects(s.service.unshare(STRANGER, "st1", MEMBER), refused(403, "forbidden"));
+  const calls = s.manage.calls.length;
+  const hidden = refused(404, "not_found", "This Station or integration was not found.");
+  await assert.rejects(s.service.members(STRANGER, "st1"), hidden);
+  await assert.rejects(s.service.share(STRANGER, "st1", STRANGER), hidden);
+  await assert.rejects(s.service.unshare(STRANGER, "st1", MEMBER), hidden);
+  await assert.rejects(s.service.removeStation(STRANGER, "st1"), hidden);
+  const ownerOnly = refused(403, "forbidden", "Only the Station owner can do this.");
+  await assert.rejects(s.service.share(MEMBER, "st1", STRANGER), ownerOnly);
+  await assert.rejects(s.service.unshare(MEMBER, "st1", OWNER), ownerOnly);
+  assert.equal(s.manage.calls.length, calls, "neither a stranger nor a member's owner-only change reaches Auth");
   assert.deepEqual((await s.repository.currentMembers("st1")).map((member) => member.accountId), [MEMBER], "Portal changed nothing");
   assert.equal((await s.events("member_removed")).length, 0);
   for (const bad of ["not-an-account", OWNER]) {
     await assert.rejects(s.service.share(OWNER, "st1", bad), (error) => error.status === 400);
   }
   await assert.rejects(s.service.share(OWNER, "missing", MEMBER), refused(404));
+  await assert.rejects(s.service.members(OWNER, "missing"), refused(404));
+  assert.equal(s.manage.calls.length, calls, "unknown Stations are not asked about at Auth");
   assert.deepEqual(s.notified, ["st1"], "refused changes push nothing");
 });
 
@@ -295,7 +303,9 @@ test("removing a Station revokes all its integrations; only the owner may", asyn
   await seedIntegration(s.repository, "i-waiting", "st1", OWNER, "awaiting_approval");
   await seedIntegration(s.repository, "i-done", "st1", OWNER, "revoked");
   s.notified.length = 0;
+  const calls = s.manage.calls.length;
   await assert.rejects(s.service.removeStation(MEMBER, "st1"), refused(403, "forbidden"));
+  assert.equal(s.manage.calls.length, calls, "a member's removal is refused before Auth");
   assert.equal((await s.repository.station("st1")).status, "active");
   assert.deepEqual(s.notified, []);
   await s.service.removeStation(OWNER, "st1");
@@ -311,8 +321,23 @@ test("removing a Station revokes all its integrations; only the owner may", asyn
   const [removed] = await s.events("station_removed");
   assert.deepEqual([removed.station_id, removed.actor, removed.account_id, removed.reason], ["st1", OWNER, OWNER, null]);
   assert.deepEqual((await s.service.stations(OWNER)).stations, []);
+  const removedCalls = s.manage.calls.length;
   await assert.rejects(s.service.removeStation(OWNER, "st1"), refused(404, "not_found"));
+  assert.equal(s.manage.calls.length, removedCalls, "a removed Station is not asked about at Auth");
   assert.deepEqual(s.notified, ["st1"]);
+});
+
+test("unsharing someone Portal does not count a member still asks Auth but records nothing", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await s.register(OWNER, "https://one.example");
+  await s.service.share(OWNER, "st1", MEMBER);
+  await s.service.unshare(OWNER, "st1", MEMBER);
+  s.notified.length = 0;
+  await s.service.unshare(OWNER, "st1", MEMBER);
+  assert.equal(s.manage.calls.filter((name) => name === "removeMember").length, 2);
+  assert.equal((await s.events("member_removed")).length, 1, "a repeated unshare adds no event");
+  assert.deepEqual(s.notified, [], "and pushes nothing");
 });
 
 test("readToken exchanges the session's ID token for a Station the account can use", async (t) => {

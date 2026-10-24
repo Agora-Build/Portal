@@ -25,6 +25,7 @@ const CHANGES_PATH = "/agora-build/v1/changes";
 
 const failure = (status, message, code, extra = {}) => new AppError(status, message, { code, ...extra });
 const notFound = () => failure(404, "This Station or integration was not found.", "not_found");
+const ownerOnly = () => failure(403, "Only the Station owner can do this.", "forbidden");
 const unknownStation = () => failure(403, "This Station is not registered.", "station");
 const expiredChallenge = () => failure(400, "This check has expired or was already used. Start again.", "challenge");
 
@@ -38,7 +39,7 @@ const MANAGE_CONFLICTS = {
 export function fromManage(error) {
   if (!(error instanceof ManageError)) throw error;
   if (error.status === 400) return failure(400, "Auth refused this request.", error.code);
-  if (error.status === 403) return failure(403, "Only the Station owner can do this.", "forbidden");
+  if (error.status === 403) return ownerOnly();
   if (error.status === 404) return failure(404, "This Station or integration was not found.", "not_found");
   if (error.status === 409) return failure(409, MANAGE_CONFLICTS[error.code] || "Auth refused this request.", error.code);
   return failure(503, "Auth is unavailable. Try again shortly.", "unavailable");
@@ -196,9 +197,11 @@ export function createIntegrationService({
   }
 
   // Revokes, inside the caller's transaction, each integration `pick` selects on the Station; already revoking or
-  // revoked ones are left as they are. `direct` sets revoked at once (Auth has already removed the Station).
+  // revoked ones are left as they are. `direct` sets revoked at once (Auth has already removed the Station). Returns
+  // how many it revoked.
   async function revokeOn(client, stationId, pick, { actor, reason, direct = false }) {
     const at = now();
+    let revoked = 0;
     for (const listed of await repository.integrationsOnStation(stationId, client)) {
       if (!pick(listed) || listed.state === "revoking" || listed.state === "revoked") continue;
       const row = await repository.integrationForUpdate(listed.id, client);
@@ -206,12 +209,24 @@ export function createIntegrationService({
       const next = direct ? { state: "revoked", resumeState: null } : transition(row, "revoke", at);
       await repository.updateIntegration(row.id, next, client);
       await repository.appendEvent({ stationId, integrationId: row.id, accountId: row.ownerAccount, actor, kind: "integration_revoked", state: next.state, reason }, client);
+      revoked += 1;
     }
+    return revoked;
   }
 
-  async function activeStation(stationId) {
-    const station = typeof stationId === "string" && stationId ? await repository.station(stationId) : null;
-    if (!station || station.status !== "active") throw notFound();
+  // The active Station as this account has it in Portal (with its role, "owner" or "member"). An account that neither
+  // owns it nor is a current member gets the same 404 as for an unknown ID, before Auth is asked, so nothing about the
+  // Station is revealed (as for integrations, Ruling T7-8).
+  async function usable(accountId, stationId) {
+    const station = typeof stationId === "string" && stationId ? (await repository.stationsFor(accountId)).find((entry) => entry.id === stationId) : null;
+    if (!station) throw notFound();
+    return station;
+  }
+
+  // For changes only the Station's owner may make; a member sees the Station, so it is told why.
+  async function ownStation(accountId, stationId) {
+    const station = await usable(accountId, stationId);
+    if (station.role !== "owner") throw ownerOnly();
     return station;
   }
 
@@ -429,13 +444,14 @@ export function createIntegrationService({
     },
 
     async members(accountId, stationId) {
+      await usable(accountId, stationId);
       const answer = await viaAuth(() => manage.members(stationId, accountId));
       return { owner: answer.owner, members: (answer.members || []).map(({ account, addedAt }) => ({ account, addedAt })) };
     },
 
     async share(accountId, stationId, member) {
       memberAccount(member);
-      const station = await activeStation(stationId);
+      const station = await ownStation(accountId, stationId);
       if (member === station.ownerAccount) throw failure(400, "The owner already has this Station.", "account");
       await viaAuth(() => manage.addMember(stationId, member, accountId));
       const added = await db.transaction(async (client) => {
@@ -446,33 +462,36 @@ export function createIntegrationService({
       if (added) changed(stationId);
     },
 
-    // Auth removes the member and revokes their integrations on the Station; Portal follows in one transaction.
+    // The owner removes anyone; a member removes only themself. Auth removes the member and revokes their integrations
+    // on the Station; Portal follows in one transaction, recording the removal only when it had the member.
     async unshare(accountId, stationId, member) {
       memberAccount(member);
+      const station = await usable(accountId, stationId);
+      if (station.role !== "owner" && member !== accountId) throw ownerOnly();
       await viaAuth(() => manage.removeMember(stationId, member, accountId));
-      await db.transaction(async (client) => {
-        await repository.removeMember(stationId, member, accountId, now(), client);
-        await revokeOn(client, stationId, (row) => row.ownerAccount === member, { actor: accountId, reason: "member_removed" });
-        await repository.appendEvent({ stationId, accountId: member, actor: accountId, kind: "member_removed" }, client);
+      const wrote = await db.transaction(async (client) => {
+        const removed = await repository.removeMember(stationId, member, accountId, now(), client);
+        const revoked = await revokeOn(client, stationId, (row) => row.ownerAccount === member, { actor: accountId, reason: "member_removed" });
+        if (removed) await repository.appendEvent({ stationId, accountId: member, actor: accountId, kind: "member_removed" }, client);
+        return removed || revoked > 0;
       });
-      changed(stationId);
+      if (wrote) changed(stationId);
     },
 
     async removeStation(accountId, stationId) {
+      const station = await ownStation(accountId, stationId);
       await viaAuth(() => manage.removeStation(stationId, accountId));
-      const station = await repository.station(stationId);
       await db.transaction(async (client) => {
         await repository.markStationRemoved(stationId, now(), client);
         await revokeOn(client, stationId, () => true, { actor: accountId, reason: "station_removed" });
-        await repository.appendEvent({ stationId, accountId: station?.ownerAccount ?? accountId, actor: accountId, kind: "station_removed" }, client);
+        await repository.appendEvent({ stationId, accountId: station.ownerAccount, actor: accountId, kind: "station_removed" }, client);
       });
       changed(stationId);
     },
 
     // A 5-minute station.read token for the browser to send to a Station this account owns or belongs to.
     async readToken(accountId, idToken, stationId) {
-      const station = (await repository.stationsFor(accountId)).find((entry) => entry.id === stationId);
-      if (!station) throw notFound();
+      const station = await usable(accountId, stationId);
       if (!idToken) throw new AppError(401, "Sign in again to read this Station's details.");
       try {
         const { accessToken, expiresIn } = await exchange(idToken, station.origin);
@@ -489,8 +508,7 @@ export function createIntegrationService({
       const fields = { name: integrationName(name), scopes: integrationScopes(scopes), quotaPerSecond: quota(quotaPerSecond) };
       expiryDays(expiresInDays);
       publicKey(publicJwk);
-      const station = (await repository.stationsFor(accountId)).find((entry) => entry.id === stationId);
-      if (!station) throw notFound();
+      const station = await usable(accountId, stationId);
       const expiresAt = new Date(now() + expiresInDays * DAY).toISOString();
       const created = await viaAuth(() => manage.createIntegration({ owner: accountId, stationId, ...fields, publicJwk, expiresAt, actor: accountId }));
       await db.transaction(async (client) => {

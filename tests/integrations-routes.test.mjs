@@ -258,6 +258,31 @@ test("browser routes refuse guests, other sites, bearer tokens and malformed IDs
   }
 });
 
+test("a stranger's Station routes answer 404 and a member's owner-only ones 403, both without asking Auth", async (t) => {
+  const integrations = await stack(t);
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service });
+  const owner = await signIn(app);
+  const member = await signIn(app);
+  const stranger = await signIn(app);
+  const { station } = await registerStation(app, integrations, owner.cookie);
+  assert.equal((await call(app.base, "/api/stations/" + station.id + "/members/" + member.sub, { cookie: owner.cookie, method: "PUT" })).status, 200);
+  const calls = integrations.manage.calls.length;
+  const base = "/api/stations/" + station.id;
+  for (const id of [station.id, "st-unknown"]) {
+    for (const [path, method] of [["/members", "GET"], ["/members/" + stranger.sub, "PUT"], ["/members/" + member.sub, "DELETE"], ["", "DELETE"]]) {
+      const response = await call(app.base, "/api/stations/" + id + path, { cookie: stranger.cookie, method });
+      assert.deepEqual([response.status, (await response.json()).error], [404, "This Station or integration was not found."], method + " " + id + path);
+    }
+  }
+  for (const [path, method] of [["/members/" + stranger.sub, "PUT"], ["/members/" + owner.sub, "DELETE"], ["", "DELETE"]]) {
+    const response = await call(app.base, base + path, { cookie: member.cookie, method });
+    assert.deepEqual([response.status, (await response.json()).code], [403, "forbidden"], method + path);
+  }
+  assert.equal(integrations.manage.calls.length, calls, "Auth was not called");
+  assert.equal((await call(app.base, base + "/members", { cookie: member.cookie })).status, 200, "a member may list the members");
+});
+
 test("the v1 integration list and approval take scoped access tokens", async (t) => {
   const integrations = await stack(t);
   if (!integrations) return;
