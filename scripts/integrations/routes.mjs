@@ -12,6 +12,10 @@ const ID = "[A-Za-z0-9_-]{1,64}";
 const STATION = new RegExp("^/api/stations/(" + ID + ")(?:/(members|read-token)(?:/([^/]+))?)?$");
 const INTEGRATION = new RegExp("^/api/integrations/(" + ID + ")/(keys|pause|resume|revoke|renew|settings|events|approval)$");
 const PARTITION_INTERVAL = 3600000;
+// Per-account limits on routes that call Auth: each list is limited on its own, and all changes share one budget.
+// Registering a Station and creating an integration keep their own, stricter limits.
+const LISTS_PER_MINUTE = 60;
+const CHANGES_PER_MINUTE = 30;
 
 export const integrationPath = (path) => /^\/api\/(stations|integrations)(\/|$)/.test(path);
 
@@ -69,6 +73,8 @@ export async function handleIntegrations({ path, method, url, read, service, cal
   if (!integrationPath(path)) return null;
   if (!service) throw new AppError(503, "Stations and integrations need the Portal database.");
   const ok = (body) => ({ status: 200, body });
+  const listing = (name, accountId) => { limit("list-" + name + ":" + accountId, LISTS_PER_MINUTE, 60000); return accountId; };
+  const changing = (accountId) => { limit("manage:" + accountId, CHANGES_PER_MINUTE, 60000); return accountId; };
   // A Station's own client: the station.report scope, then a Station report client ID (s-…).
   const reporter = () => {
     if (!caller) throw invalidToken("Station reports need an auth.agora.build access token.");
@@ -85,16 +91,16 @@ export async function handleIntegrations({ path, method, url, read, service, cal
     const clientId = reporter(); limit("changes:" + clientId, 120, 60000);
     return ok(await service.changes(clientId, url.searchParams.get("cursor") ?? "0"));
   }
-  if (path === "/api/integrations" && method === "GET") return ok(await service.integrations(caller ? scoped("integrations:read") : await portalUser()));
+  if (path === "/api/integrations" && method === "GET") return ok(await service.integrations(listing("integrations", caller ? scoped("integrations:read") : await portalUser())));
   const integration = INTEGRATION.exec(path);
   if (integration?.[2] === "approval" && method === "POST") {
     if (!caller) throw invalidToken("Approving an integration needs an auth.agora.build access token.");
-    const accountId = scoped("integrations:approve");
+    const accountId = changing(scoped("integrations:approve"));
     return ok(await service.approve(accountId, integration[1], { r9Svc: (await read()).r9Svc }));
   }
 
   // Everything below is for the browser session only.
-  if (path === "/api/stations" && method === "GET") return ok(await service.stations(await portalUser()));
+  if (path === "/api/stations" && method === "GET") return ok(await service.stations(listing("stations", await portalUser())));
   if (path === "/api/stations/challenges" && method === "POST") {
     const accountId = await portalUser();
     return { status: 201, body: await service.createChallenge(accountId, (await read()).origin) };
@@ -113,12 +119,12 @@ export async function handleIntegrations({ path, method, url, read, service, cal
     const [, id, action, member] = station;
     if (member !== undefined) {
       if (action !== "members" || !ACCOUNT_ID.test(member)) return null;
-      if (method === "PUT") { await service.share(await portalUser(), id, member); return ok({ shared: true }); }
-      if (method === "DELETE") { await service.unshare(await portalUser(), id, member); return ok({ unshared: true }); }
+      if (method === "PUT") { await service.share(changing(await portalUser()), id, member); return ok({ shared: true }); }
+      if (method === "DELETE") { await service.unshare(changing(await portalUser()), id, member); return ok({ unshared: true }); }
       return null;
     }
-    if (!action && method === "DELETE") { await service.removeStation(await portalUser(), id); return ok({ removed: true }); }
-    if (action === "members" && method === "GET") return ok(await service.members(await portalUser(), id));
+    if (!action && method === "DELETE") { await service.removeStation(changing(await portalUser()), id); return ok({ removed: true }); }
+    if (action === "members" && method === "GET") return ok(await service.members(listing("members", await portalUser()), id));
     if (action === "read-token" && method === "POST") {
       const accountId = await portalUser(); limit("read-token:" + accountId, 30, 60000);
       return ok(await service.readToken(accountId, await idToken(), id));
@@ -129,7 +135,7 @@ export async function handleIntegrations({ path, method, url, read, service, cal
   const [, id, action] = integration;
   if (action === "events") return method === "GET" ? ok(await service.history(await portalUser(), id)) : null;
   if (method !== "POST") return null;
-  const accountId = await portalUser();
+  const accountId = changing(await portalUser());
   if (action === "pause" || action === "resume" || action === "revoke") return ok(await service[action](accountId, id));
   if (action === "keys") return { status: 201, body: await service.rotateKey(accountId, id, { publicJwk: (await read()).publicJwk }) };
   if (action === "renew") return ok(await service.renew(accountId, id, { expiresInDays: (await read()).expiresInDays }));

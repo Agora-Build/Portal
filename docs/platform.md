@@ -603,9 +603,24 @@ refused), a quota of 1 to 10000 token requests per second (default 200) and an
 expiry of 1 to 90 days (default 30). A new integration waits for approval; the
 owner approves it in Astation, which sends the approval with an
 `integrations:approve` token for the owner. An account that is neither an
-integration's owner nor its Station's owner gets 404 for it. Limits per minute:
-Station registration 10 and integration creation 20 per account, read tokens 30
-per account, Station challenges 10 per hour per account, Station reports 600 and feed reads 120 per Station.
+integration's owner nor its Station's owner gets 404 for it; likewise an account
+that neither owns a Station nor is a current member of it gets 404 for every
+Station route, and a member gets 403 for the owner's changes (sharing, removing,
+unsharing someone else), all without the Portal asking Auth. Limits per minute
+per account: each list (`GET /api/stations`, `GET /api/integrations` and
+`/api/v1/integrations` together, and a Station's members) 60; all other changes
+that call Auth (share, unshare, remove, pause, resume, revoke, renew, settings,
+keys, approval) 30 together; Station registration 10; integration creation 20;
+read tokens 30. Station challenges are 10 per hour per account; Station reports
+600 and feed reads 120 per minute per Station.
+
+All of the Portal's management calls to Auth (`/manage/v1`) come from the
+Portal's own address, so they share Auth's per-address limit on that API (600
+a minute). Auth should be configured to exempt the Portal's `manage` client
+from that limit or raise it for the Portal (an Auth-side change); until then
+the per-account limits above keep one account from using up the budget, but
+many accounts together still can, and Auth's 429 then shows as 503
+`unavailable` (lists are served stale).
 
 Common error codes: `not_found` (404), `forbidden` (403), `invalid_state` and
 `expired` (409, the action does not fit the current state), `revoked` (409),

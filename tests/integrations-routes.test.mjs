@@ -283,6 +283,33 @@ test("a stranger's Station routes answer 404 and a member's owner-only ones 403,
   assert.equal((await call(app.base, base + "/members", { cookie: member.cookie })).status, 200, "a member may list the members");
 });
 
+test("routes that call Auth are limited per account: lists 60 a minute, changes 30", async (t) => {
+  const integrations = await stack(t);
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service });
+  const busy = await signIn(app);
+  const other = await signIn(app);
+  const limited = async (path, options, max) => {
+    for (let index = 0; index < max; index += 1) assert.notEqual((await call(app.base, path, options)).status, 429, path + " #" + (index + 1));
+    const over = await call(app.base, path, options);
+    assert.deepEqual([over.status, (await over.json()).error], [429, "A few too many requests. Please try again in a moment."], path);
+  };
+  await limited("/api/stations", { cookie: busy.cookie }, 60);
+  await limited("/api/stations/st-unknown/members", { cookie: busy.cookie }, 60);
+  await limited("/api/integrations", { cookie: busy.cookie }, 60);
+  const calls = integrations.manage.calls.length;
+  assert.equal((await call(app.base, "/api/v1/integrations", { bearer: await app.fake.issueAccessToken({ sub: busy.sub, scope: "integrations:read" }) })).status, 429, "the v1 list shares the account's budget");
+  assert.equal(integrations.manage.calls.length, calls, "a limited request does not reach Auth");
+  // Changes share one budget across Station and integration routes.
+  for (let index = 0; index < 10; index += 1) assert.equal((await call(app.base, "/api/stations/st-unknown", { cookie: busy.cookie, method: "DELETE" })).status, 404);
+  for (let index = 0; index < 10; index += 1) assert.equal((await call(app.base, "/api/stations/st-unknown/members/" + other.sub, { cookie: busy.cookie, method: "PUT" })).status, 404);
+  await limited("/api/integrations/i-unknown/pause", { cookie: busy.cookie, method: "POST" }, 10);
+  const approver = await app.fake.issueAccessToken({ sub: busy.sub, scope: "integrations:approve" });
+  assert.equal((await call(app.base, "/api/v1/integrations/i-unknown/approval", { bearer: approver, method: "POST", data: { r9Svc: R9 } })).status, 429);
+  assert.equal((await call(app.base, "/api/stations", { cookie: other.cookie })).status, 200, "another account is not limited");
+  assert.equal((await call(app.base, "/api/integrations/i-unknown/revoke", { cookie: other.cookie, method: "POST" })).status, 404);
+});
+
 test("the v1 integration list and approval take scoped access tokens", async (t) => {
   const integrations = await stack(t);
   if (!integrations) return;
