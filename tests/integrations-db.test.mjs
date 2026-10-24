@@ -27,6 +27,25 @@ test("ensureEventPartitions creates this and next month once and adopts rows fro
   assert.deepEqual(await where(), ["integration_events_y2026m12"]);
 });
 
+test("ensureEventPartitions waits for event appends to finish before moving rows", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) return t.skip("PORTAL_TEST_DATABASE_URL is not set");
+  const appender = await db.pool.connect();
+  try {
+    await appender.query("BEGIN");
+    await appender.query("SELECT pg_advisory_xact_lock(hashtext('portal_integration_events'))");
+    let settled = false;
+    const making = db.ensureEventPartitions({ now: new Date("2031-03-10T00:00:00Z"), months: 1 }).finally(() => { settled = true; });
+    await new Promise((done) => setTimeout(done, 200));
+    assert.equal(settled, false, "the partition waits for the append in flight");
+    await appender.query("COMMIT");
+    assert.deepEqual(await making, ["integration_events_y2031m03"]);
+  } finally {
+    await appender.query("ROLLBACK").catch(() => {});
+    appender.release();
+  }
+});
+
 test("transaction rolls back when the work throws", async (t) => {
   const db = await testDatabase(t);
   if (!db) return t.skip("PORTAL_TEST_DATABASE_URL is not set");

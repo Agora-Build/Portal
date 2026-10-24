@@ -376,6 +376,38 @@ test("unsharing someone Portal does not count a member still asks Auth but recor
   assert.deepEqual(s.notified, [], "and pushes nothing");
 });
 
+test("a change waits for the event lock before locking any integration row, so it cannot deadlock with another", async (t) => {
+  let reached;
+  const waiting = new Promise((done) => { reached = done; });
+  const s = await setup(t, { wrap: (repository) => ({ ...repository, async lockEvents(client) { reached(); return repository.lockEvents(client); } }) });
+  if (!s) return;
+  await s.register(OWNER, "https://one.example");
+  await seedIntegration(s.repository, "i-one", "st1", OWNER, "ready");
+  await seedIntegration(s.repository, "i-two", "st1", OWNER, "ready");
+  const holder = await s.db.pool.connect();
+  const other = await s.db.pool.connect();
+  try {
+    await holder.query("BEGIN");
+    await holder.query("SELECT pg_advisory_xact_lock(hashtext('portal_integration_events'))");
+    const removal = s.service.removeStation(OWNER, "st1");
+    await Promise.race([waiting, new Promise((done) => setTimeout(done, 300))]);
+    await new Promise((done) => setTimeout(done, 100));
+    await other.query("BEGIN");
+    // Before the fix, the removal held i-one's row lock while it waited for the event lock.
+    const { rows } = await other.query("SELECT id FROM integrations WHERE station_id = 'st1' ORDER BY id FOR UPDATE NOWAIT");
+    assert.deepEqual(rows.map((row) => row.id), ["i-one", "i-two"]);
+    await other.query("ROLLBACK");
+    await holder.query("COMMIT");
+    await removal;
+  } finally {
+    await other.query("ROLLBACK").catch(() => {});
+    await holder.query("ROLLBACK").catch(() => {});
+    other.release();
+    holder.release();
+  }
+  assert.equal((await s.repository.integration("i-one")).state, "revoking");
+});
+
 test("readToken exchanges the session's ID token for a Station the account can use", async (t) => {
   const s = await setup(t);
   if (!s) return;

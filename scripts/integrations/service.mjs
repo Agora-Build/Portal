@@ -141,6 +141,12 @@ export function createIntegrationService({
   repository, db, manage, stationFetch, exchange, now = Date.now, log = () => {}, ids = randomUUID,
   challengeValue = () => randomBytes(32).toString("base64url"), pushFetch = createStationFetch({ timeoutMs: 3000 }), notify
 }) {
+  // Every transaction here appends events, so each takes the event lock before any row lock (see lockEvents).
+  const appending = (work) => db.transaction(async (client) => {
+    await repository.lockEvents(client);
+    return work(client);
+  });
+
   // Per Station: the push in flight and whether another change arrived while it ran.
   const pushes = new Map();
 
@@ -254,7 +260,7 @@ export function createIntegrationService({
     for (const station of await repository.stationsFor(accountId)) {
       if (known.has(station.id)) continue;
       if (station.role === "owner") {
-        await db.transaction(async (client) => {
+        await appending(async (client) => {
           await repository.markStationRemoved(station.id, now(), client);
           await revokeOn(client, station.id, () => true, { actor: "system", reason: "reconciled", direct: true });
           await repository.appendEvent({ stationId: station.id, accountId, actor: "system", kind: "station_removed", reason: "reconciled" }, client);
@@ -264,7 +270,7 @@ export function createIntegrationService({
         continue;
       }
       // Auth no longer counts this account a member (and has revoked its integrations there); Portal follows.
-      const removed = await db.transaction(async (client) => {
+      const removed = await appending(async (client) => {
         if (!(await repository.removeMember(station.id, accountId, "system", now(), client))) return false;
         await revokeOn(client, station.id, (row) => row.ownerAccount === accountId, { actor: "system", reason: "member_removed" });
         await repository.appendEvent({ stationId: station.id, accountId, actor: "system", kind: "member_removed", reason: "reconciled" }, client);
@@ -278,7 +284,7 @@ export function createIntegrationService({
     for (const entry of listed) {
       if (!(await repository.station(entry.id))) {
         // The insert's own answer gates the event, so concurrent listings record the Station once.
-        const { added, stale } = await db.transaction(async (client) => {
+        const { added, stale } = await appending(async (client) => {
           const stale = await retireStale(client, entry.origin, entry.id);
           if (!(await repository.insertStation({ id: entry.id, origin: entry.origin, ownerAccount: entry.owner, reportClientId: entry.reportClientId, verifiedAt: entry.createdAt }, client))) return { added: false, stale };
           await repository.appendEvent({ stationId: entry.id, accountId: entry.owner, actor: "system", kind: "station_reconciled" }, client);
@@ -291,7 +297,7 @@ export function createIntegrationService({
         }
       }
       if (entry.owner !== accountId && !(await repository.currentMembers(entry.id)).some((member) => member.accountId === accountId)) {
-        const added = await db.transaction(async (client) => {
+        const added = await appending(async (client) => {
           if (!(await repository.addMember(entry.id, accountId, "system", now(), client))) return false;
           await repository.appendEvent({ stationId: entry.id, accountId, actor: "system", kind: "member_added", reason: "reconciled" }, client);
           return true;
@@ -343,7 +349,7 @@ export function createIntegrationService({
   // The Portal half of a change Auth has already made: under the row lock `apply` re-checks the current row and returns
   // `{ fields, event }` (or null for nothing to do). The Station is notified after commit unless `push` is false.
   async function commit(id, apply, { push = true } = {}) {
-    const result = await db.transaction(async (client) => {
+    const result = await appending(async (client) => {
       const current = await repository.integrationForUpdate(id, client);
       if (!current) throw notFound();
       const change = apply(current);
@@ -403,7 +409,7 @@ export function createIntegrationService({
           continue;
         }
         if (!entry.expiresAt) log("Integration reconciled without an expiry at Auth: Portal shows its 30-day default.");
-        touched = await db.transaction(async (client) => {
+        touched = await appending(async (client) => {
           const expiresAt = entry.expiresAt ?? new Date(now() + 30 * DAY).toISOString();
           if (!(await repository.insertIntegration({ id, ownerAccount: entry.owner, stationId: entry.stationId, kind: "custom_app", name: entry.name, scopes: entry.scopes, quotaPerSecond: entry.quotaPerSecond ?? 200, expiresAt }, client))) return false;
           await repository.appendEvent({ stationId: entry.stationId, integrationId: id, accountId: entry.owner, actor: "system", kind: "integration_reconciled", state: "awaiting_approval" }, client);
@@ -413,7 +419,7 @@ export function createIntegrationService({
         row = await repository.integration(id);
         if (!row) continue;
       }
-      const followed = Object.keys(difference(row, entry).fields).length > 0 && await db.transaction(async (client) => {
+      const followed = Object.keys(difference(row, entry).fields).length > 0 && await appending(async (client) => {
         const current = await repository.integrationForUpdate(id, client);
         const { fields, event, settings } = difference(current, entry);
         if (!Object.keys(fields).length) return false;
@@ -459,7 +465,7 @@ export function createIntegrationService({
         throw failure(422, "The Station did not serve the check value at " + origin + WELL_KNOWN_PATH + ".", "proof", { reason: proof.reason });
       }
       const registered = await viaAuth(() => manage.registerStation({ origin, owner: accountId, reportKey, actor: accountId }));
-      const stale = await db.transaction(async (client) => {
+      const stale = await appending(async (client) => {
         const stale = await retireStale(client, origin, registered.id);
         await repository.insertStation({ id: registered.id, origin, ownerAccount: accountId, reportClientId: registered.reportClientId, verifiedAt: now() }, client);
         await repository.appendEvent({ stationId: registered.id, accountId, actor: accountId, kind: "station_registered" }, client);
@@ -493,7 +499,7 @@ export function createIntegrationService({
       const station = await ownStation(accountId, stationId);
       if (member === station.ownerAccount) throw failure(400, "The owner already has this Station.", "account");
       await viaAuth(() => manage.addMember(stationId, member, accountId));
-      const added = await db.transaction(async (client) => {
+      const added = await appending(async (client) => {
         if (!(await repository.addMember(stationId, member, accountId, now(), client))) return false;
         await repository.appendEvent({ stationId, accountId: member, actor: accountId, kind: "member_added" }, client);
         return true;
@@ -508,7 +514,7 @@ export function createIntegrationService({
       const station = await usable(accountId, stationId);
       if (station.role !== "owner" && member !== accountId) throw ownerOnly();
       await viaAuth(() => manage.removeMember(stationId, member, accountId));
-      const wrote = await db.transaction(async (client) => {
+      const wrote = await appending(async (client) => {
         const removed = await repository.removeMember(stationId, member, accountId, now(), client);
         const revoked = await revokeOn(client, stationId, (row) => row.ownerAccount === member, { actor: accountId, reason: "member_removed" });
         if (removed) await repository.appendEvent({ stationId, accountId: member, actor: accountId, kind: "member_removed" }, client);
@@ -520,7 +526,7 @@ export function createIntegrationService({
     async removeStation(accountId, stationId) {
       const station = await ownStation(accountId, stationId);
       await viaAuth(() => manage.removeStation(stationId, accountId));
-      await db.transaction(async (client) => {
+      await appending(async (client) => {
         await repository.markStationRemoved(stationId, now(), client);
         await revokeOn(client, stationId, () => true, { actor: accountId, reason: "station_removed" });
         await repository.appendEvent({ stationId, accountId: station.ownerAccount, actor: accountId, kind: "station_removed" }, client);
@@ -550,7 +556,7 @@ export function createIntegrationService({
       const station = await usable(accountId, stationId);
       const expiresAt = new Date(now() + expiresInDays * DAY).toISOString();
       const created = await viaAuth(() => manage.createIntegration({ owner: accountId, stationId, ...fields, publicJwk, expiresAt, actor: accountId }));
-      await db.transaction(async (client) => {
+      await appending(async (client) => {
         await repository.insertIntegration({ id: created.clientId, ownerAccount: accountId, stationId, kind: "custom_app", ...fields, expiresAt: created.expiresAt ?? expiresAt }, client);
         await repository.appendEvent({ stationId, integrationId: created.clientId, accountId, actor: accountId, kind: "integration_created", state: "awaiting_approval", details: { scopes: fields.scopes, name: fields.name } }, client);
       });

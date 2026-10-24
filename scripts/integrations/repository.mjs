@@ -174,6 +174,13 @@ export function createRepository(db) {
       await run(client, "UPDATE integrations SET " + assignments.join(", ") + " WHERE id = $1", values);
     },
 
+    // The lock appendEvent takes. A transaction that will append takes it first, before any row lock, so two of them
+    // never hold a row lock each while waiting for the other's (taking it again in the same transaction is free).
+    async lockEvents(client) {
+      if (!client) throw new TypeError("lockEvents needs a transaction client.");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('portal_integration_events'))");
+    },
+
     // One advisory lock serialises appenders until commit, so id order is commit order and a feed cursor never skips.
     async appendEvent({ stationId, integrationId = null, accountId, actor, kind, state = null, reason = null, details = {} }, client) {
       if (!client) throw new TypeError("appendEvent needs a transaction client.");

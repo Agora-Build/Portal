@@ -75,6 +75,8 @@ export function createDatabase(connectionString, { schema, max = 10, log = () =>
       const made = await transaction(async (client) => {
         await client.query("SET LOCAL lock_timeout = '5s'");
         await client.query("SELECT pg_advisory_xact_lock(hashtext('portal_event_partitions'))");
+        // Appends wait meanwhile, so none lands in the default partition between the move and the attach.
+        await client.query("SELECT pg_advisory_xact_lock(hashtext('portal_integration_events'))");
         if ((await client.query("SELECT to_regclass($1) AS found", [name])).rows[0].found) return false;
         // The name and the bounds come from dates, never from input; partition bounds must be literals.
         await client.query("CREATE TABLE " + name + " (LIKE integration_events INCLUDING DEFAULTS INCLUDING CONSTRAINTS)");
