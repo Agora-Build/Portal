@@ -239,6 +239,9 @@ the browser:
 | `POST /connections/agora/certificate` | account | `agora:certificates` |
 | `POST /connections/agora/token` | account | `agora:tokens` |
 | `POST /platform/credits/reserve`, `/settle` | not accepted | `credits`, from a client in `PORTAL_BILLING_FILE` |
+| `GET /integrations` | account | `integrations:read` |
+| `POST /integrations/<id>/approval` | not accepted | `integrations:approve` |
+| `POST /stations/reports`, `GET /stations/changes` | not accepted | `station.report`, from a Station's `s-` client |
 | Billing account, checkout and manage | account | not accepted |
 | Stoa spaces (create, own, admin), profile, radar, signaling | account (spaces) or guest | not accepted |
 
@@ -323,6 +326,10 @@ only behind a proxy that appends `X-Forwarded-For`: the client address is then
 the header's last hop, the one that proxy appended, and anything a client put
 before it is ignored. Without the header the socket address is used. Logs never
 include addresses.
+
+Stations and integrations also need `DATABASE_URL`: they keep their own tables
+(created by migrations that run at startup) beside `agora_build_state`, and
+their rows are kept forever. See "Stations And Integrations".
 
 Without PostgreSQL, local development uses `.data/community.json` and supports
 one Node process. Back up the database or this private directory. Local admin
@@ -504,6 +511,195 @@ tests rebuild Astation's eight captured tokens byte for byte. Stoa's call and
 signaling tokens use the same module; only the opt-in RTM channel permissions
 (`AGORA_RTM_PERMISSIONS`) still use `agora-token`, which atem-core doesn't cover.
 
+## Stations And Integrations
+
+A Station is a server an account runs and registers with the Portal, for
+example the Astation host. An integration is a custom app (the only kind in
+phase 1) that an account lets use one Station with the `agent.*` scopes. Auth
+decides who can get tokens; the Portal keeps the accounts' view, the history and
+the change feed the Stations read. Account deletion (with its waiting period)
+and the Discord apps come later and are not covered here.
+
+### Database And Settings
+
+Stations and integrations need PostgreSQL (`DATABASE_URL`). Without it every
+`/api/stations...`, `/api/integrations...` and the matching `/api/v1` route
+answers 503 `{ "error": "Stations and integrations need the Portal database." }`,
+and the account page hides the section. They also need the Auth settings
+`AUTH_ISSUER`, `PORTAL_CLIENT_ID` (default `portal`) and `PORTAL_CLIENT_SECRET`,
+used to call Auth's management API; if `AUTH_ISSUER` or `PORTAL_CLIENT_SECRET`
+is missing the feature is off and the log names the missing setting.
+
+Migrations (`migrations/*.sql`) run automatically before the first request;
+if the database is not ready that request gets 503 and the next one tries again.
+The tables:
+
+| Table | Holds |
+| --- | --- |
+| `stations` | Auth's Station ID, origin, owner, report client ID, `active` or `removed` |
+| `station_members` | accounts a Station is shared with, with who added or removed them and when |
+| `station_challenges` | issued proof values, valid 10 minutes, single use |
+| `integrations` | Auth's `i-` client ID, owner, Station, scopes, state, `resume_state`, `r9_svc`, quota, expiry, `last_error` |
+| `integration_events` | every change, kept forever; also the Stations' change feed |
+
+Rows are never deleted: Stations get `removed_at`, members get `removed_at`,
+integrations end in `revoked`, and the event log only grows. `integration_events`
+is partitioned by month on `at` (UTC, named `integration_events_yYYYYmMM`, with
+a default partition); partitions for this month and next are created at startup
+and hourly. Events are appended under one lock, so event IDs follow commit
+order and a cursor never skips a change.
+
+Auth is always called first, and the Portal writes its rows only after Auth
+answers success. Every change Auth is asked to make names the signed-in account
+as `actor`. If Auth is unreachable while listing, the lists are served from the
+Portal's rows with `"stale": true`; otherwise the Portal brings its rows in
+line with Auth's, which is authoritative.
+
+Auth's clients file must be set up for this:
+
+- the `https://agora.build` resource lists `integrations:read` and
+  `integrations:approve`, and `astation` is granted both (see "Portal scopes for
+  approvals" in Auth's `docs/integrating.md` and `config/clients.example.json`);
+- exactly one resource lists `station.report`, the Portal's;
+- the `portal` client has `"manage": true`, `"exchange": true`,
+  `"stationScopes": ["station.read"]` and its `backchannelLogoutUri`.
+
+### Routes
+
+Browser routes use the session cookie and are not accepted with tokens. Request
+bodies are JSON of at most 16 KB. Errors are `{ "error": "<message>" }` and, where
+the Portal has one, `"code"` (and for a failed proof, `"reason"`).
+
+| Route | Who | What |
+| --- | --- | --- |
+| `GET /api/stations` | browser | the account's Stations (`role` `owner` or `member`) |
+| `POST /api/stations/challenges` `{ origin }` | browser | issue a proof value; 201 `{ challengeId, origin, value, url, expiresAt }`; 10 per hour |
+| `POST /api/stations` `{ challengeId, reportKey }` | browser | check the proof, register with Auth; 201 with the Station |
+| `DELETE /api/stations/<id>` | browser | remove (owner only); revokes its integrations |
+| `GET /api/stations/<id>/members` | browser | owner and members |
+| `PUT`, `DELETE /api/stations/<id>/members/<ab...>` | browser | share and unshare; unsharing revokes that member's integrations there |
+| `POST /api/stations/<id>/read-token` | browser | a 5-minute `station.read` token for that Station: `{ accessToken, expiresIn, origin }` |
+| `POST /api/integrations` `{ stationId, name, scopes, publicJwk, quotaPerSecond, expiresInDays }` | browser | create; 201 |
+| `POST /api/integrations/<id>/keys` `{ publicJwk }` | browser | add a key; 201 `{ kid, overlapEndsAt }` |
+| `POST /api/integrations/<id>/pause`, `resume`, `revoke` | browser | pause and revoke also by the Station's owner |
+| `POST /api/integrations/<id>/renew` `{ expiresInDays }` | browser | new expiry counted from now |
+| `POST /api/integrations/<id>/settings` `{ quotaPerSecond }` | browser | change the quota |
+| `GET /api/integrations/<id>/events` | browser | history (`actor` is `you` for your own changes) |
+| `GET /api/integrations` | browser, or `integrations:read` | the account's integrations, and others on Stations it owns |
+| `POST /api/integrations/<id>/approval` `{ r9Svc }` | `integrations:approve` | native approval; `r9Svc` is 64 lower-case hex characters |
+| `POST /api/stations/reports` | `station.report` | a Station's report |
+| `GET /api/stations/changes?cursor=` | `station.report` | the Station's change feed |
+
+The last four are on the versioned API, so apps call
+`<origin>/api/v1/integrations`, `/api/v1/integrations/<id>/approval`,
+`/api/v1/stations/reports` and `/api/v1/stations/changes`. Everything else
+on this list is browser-only.
+
+Create takes a name of 1 to 80 characters, scopes from `agent.view`,
+`agent.prompt`, `agent.approve`, `agent.interrupt` and `agent.terminal` (each at
+most once; `agent.view` is always added), a public JWK (a private member is
+refused), a quota of 1 to 10000 token requests per second (default 200) and an
+expiry of 1 to 90 days (default 30). A new integration waits for approval; the
+owner approves it in Astation, which sends the approval with an
+`integrations:approve` token for the owner. An account that is neither an
+integration's owner nor its Station's owner gets 404 for it. Limits per minute:
+Station registration 10 and integration creation 20 per account, read tokens 30
+per account, Station reports 600 and feed reads 120 per Station.
+
+Common error codes: `not_found` (404), `forbidden` (403), `invalid_state` and
+`expired` (409, the action does not fit the current state), `revoked` (409),
+`origin_taken` and `duplicate_key` (409, from Auth), `challenge` (400, expired or
+used), `proof` (422), `unavailable` (503, Auth unreachable). Field mistakes are
+400 with `name`, `scopes`, `quota`, `expiry`, `jwk`, `private_key`, `account`,
+`report_key`, `r9_svc`, `reason`, `state`, `report` or `cursor`.
+
+### Lifecycle
+
+| State | Meaning | Moved by |
+| --- | --- | --- |
+| `awaiting_approval` | created, not approved | approval moves it on; revoke ends it directly |
+| `provisioning` | approved; the Station has not taken it up | the Station's report |
+| `waiting_for_host` | the Station is up but its host is not | the Station's report |
+| `ready` | usable | the Station's report only |
+| `paused` | stopped by the owner or Station owner; remembers where it was | resume returns it there |
+| `revoking` | revoked at Auth; the Station has not confirmed | the Station reports `revoked` |
+| `revoked` | final | nothing |
+
+The Portal never sets `ready` itself. A pause is allowed from any state before
+`revoking`; a report received while paused updates the state to return to.
+Revoking, removing a Station and unsharing a Station all set the affected
+integrations to `revoking` (an integration still awaiting approval goes straight
+to `revoked`; so does one found missing at Auth when the lists are reconciled). Expiry
+is shown as the state `expired` for anything not yet revoking; expired
+integrations cannot be approved, paused or resumed, but can be renewed, rotated
+or have their quota changed.
+
+### For Station Builders
+
+**Proof of control.** To register, the Station's owner asks for a check on the
+Station's origin (`https://host`, no path, port or IP address). The Portal issues
+a random value valid 10 minutes, once. The Station must serve exactly that value
+at `<origin>/.well-known/agora-build-station`. The Portal fetches it over HTTPS
+only: no redirects, a 5-second timeout, a body of at most 1024 bytes, status 200,
+and a body equal to the value, optionally followed by one `\n`. It refuses
+loopback, private, link-local, CGNAT, multicast and unspecified addresses
+(IPv4 and IPv6), checking the address actually connected to. A failed check
+answers 422 `proof` with `reason` (`status_<code>`, `mismatch`, `timeout`,
+`too_large`, `blocked_address` or `network`), and the value is spent.
+
+**The report key.** The Station generates its own key pair and gives only the
+public JWK as `reportKey` (a JSON object of at most 4 KB) when it is registered.
+Auth creates the Station's report client, `s-` plus 26 characters, which the
+owner sees as `reportClientId`.
+
+**Getting a token.** The Station signs in as that client with `private_key_jwt`
+(the assertion rules and the 60-second limit are in Auth's `docs/integrating.md`)
+and asks for `scope=station.report` with `resource=<the Portal origin>`. The
+Portal accepts only that scope from a client whose ID starts with `s-` and
+belongs to an active Station.
+
+**Reports.** `POST /api/v1/stations/reports` with
+`{ "integrationId", "state", "reason" }` and no other field. `state` is
+`waiting_for_host`, `ready`, `revoked` or `error`; `reason` is 1 to 200
+characters without control characters, required for `error` and optional
+otherwise. The answer is the integration (without `role`).
+
+| Report | Accepted when the integration is | Effect |
+| --- | --- | --- |
+| `waiting_for_host` | `provisioning` or `ready` | moves it; clears `lastError` |
+| `ready` | `provisioning` or `waiting_for_host` | moves it; clears `lastError` |
+| `revoked` | `revoking` | moves it to `revoked` |
+| `error` | any state except `revoked` | records `lastError`, keeps the state |
+
+Repeating the current state changes nothing and succeeds. Any other report is
+409 `invalid_state`. An integration of another Station is 404, as if unknown.
+
+**The change feed.** `GET /api/v1/stations/changes?cursor=<n>` returns
+`{ changes, cursor }` and, only for `cursor=0`, `integrations`, a snapshot of
+every integration on the Station. Start at 0, then poll every minute with the
+returned `cursor` (it stays the same when nothing changed). A page holds at most
+500 changes, oldest first; if it is full, ask again at once. Each change is
+`{ id, at, integrationId, kind, state, reason }` plus, for integration changes,
+`integration`: `{ state, scopes, r9Svc, expiresAt, quotaPerSecond }` as they
+stand now (state may be `expired`). Station changes (`station_registered`,
+`member_added`, `member_removed`, `station_removed`) have no integration. The
+Station's own reports appear in its feed too.
+
+**The push nudge.** After a committed change the Portal sends
+`POST <origin>/agora-build/v1/changes` with `{ "cursor": <n> }` to the Station,
+over the same guarded HTTPS fetch with a 3-second timeout; one push per Station
+is in flight, and changes meanwhile collapse into one more. The nudge is unsigned
+by design: it carries only a cursor and no authority, so the Station treats it
+only as a reason to poll the feed with its own token, and never acts on its
+content. A failed nudge never fails the change; polling covers it. A removed
+Station is nudged once more so it learns to stop.
+
+**Browser details.** The browser asks the Portal for
+`POST /api/stations/<id>/read-token`, then calls
+`GET <origin>/agora-build/v1/details` on the Station with that `station.read`
+token (valid 5 minutes). The Station must allow that request by
+CORS from the Portal's origin only.
+
 ## Vox, Atem And Astation
 
 Moving Vox, Astation and Atem onto the IdP is their teams' work; the Portal side
@@ -526,7 +722,12 @@ IdP, plus the ledger, payments, subscriptions, ownership and public-file
 restrictions. PostgreSQL integration is optional in the default suite: set
 `PORTAL_TEST_DATABASE_URL` to a dedicated database named `agora_portal_test` and
 run `node --test tests/persistence.test.mjs`. That test rebuilds its own table;
-never point it at production.
+never point it at production. The Stations and integrations tests
+(`tests/integrations-*.test.mjs`) cover the migrations and event partitions,
+the lifecycle states, proof of control and its address checks, the Auth
+management client, Station registration and sharing, integration changes,
+reports, the change feed and push, the routes and the account page; the ones that
+need PostgreSQL use the same variable and run in throwaway schemas.
 
 `npm run test:e2e` runs the real Portal against the real auth.agora.build, loaded
 from an Agora-Build/Auth checkout (`AUTH_REPO`, default `../Auth`, with
