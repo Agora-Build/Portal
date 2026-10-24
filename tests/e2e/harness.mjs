@@ -8,8 +8,15 @@
 //   Portal  ──HTTP──▶ http://auth.localhost:<P>  (discovery, token exchange, JWKS; no injected request function)
 //   IdP     ──HTTP──▶ http://127.0.0.1:<Q>/auth/backchannel-logout
 // Only GitHub and Google are stand-ins (Auth's fake upstream), as in Auth's own tests.
+//
+// With { integrations: true } the Portal also runs Stations and integrations: its own PostgreSQL schema (in
+// PORTAL_TEST_DATABASE_URL), Auth's management API and token exchange, and a Station fetch that reaches
+// https://station.test:<port> on 127.0.0.1 and trusts tests/fixtures/tls/station-test.crt. Auth never connects to a
+// Station, so only the Portal needs that name resolved.
+import dns from "node:dns";
 import { createServer, request as httpRequest } from "node:http";
-import { existsSync } from "node:fs";
+import { Agent as HttpsAgent } from "node:https";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -21,6 +28,7 @@ import { createStore } from "../../scripts/store.mjs";
 import { modelConfig } from "../../scripts/models.mjs";
 import { agoraConfig, createAgoraCalls } from "../../scripts/calls.mjs";
 import { createSignaling, signalingConfig } from "../../scripts/spaces/signaling.mjs";
+import { createStationFetch } from "../../scripts/integrations/proof.mjs";
 
 export const portalRoot = fileURLToPath(new URL("../../", import.meta.url));
 export const authRepo = resolve(portalRoot, process.env.AUTH_REPO || "../Auth");
@@ -28,6 +36,10 @@ export const authRepo = resolve(portalRoot, process.env.AUTH_REPO || "../Auth");
 // default (the Portal's own origin).
 export const API = "https://portal.e2e.test";
 const SAMPLE_REDIRECT = "https://sample.test/callback";
+// The Station stub's host name: the one the test certificate names. The Portal's Station fetch resolves it to
+// 127.0.0.1 (any port).
+export const STATION_HOST = "station.test";
+export const stationTls = () => ({ key: readFileSync(resolve(portalRoot, "tests/fixtures/tls/station-test.key")), cert: readFileSync(resolve(portalRoot, "tests/fixtures/tls/station-test.crt")) });
 
 // Why the suite cannot run here, or null. Never includes a connection string.
 export async function skipReason() {
@@ -39,6 +51,18 @@ export async function skipReason() {
   const client = new pg.Client({ connectionString: process.env.TEST_DATABASE_URL, connectionTimeoutMillis: 3000 });
   try { await client.connect(); await client.query("SELECT 1"); }
   catch { return "the database named by TEST_DATABASE_URL is unreachable"; }
+  finally { await client.end().catch(() => {}); }
+  return null;
+}
+
+// Why the Stations and integrations flows cannot run (beyond skipReason()), or null. Never includes a connection string.
+export async function integrationsSkipReason() {
+  const url = process.env.PORTAL_TEST_DATABASE_URL;
+  if (!url) return "PORTAL_TEST_DATABASE_URL is not set (the Portal's own throwaway PostgreSQL database, agora_portal_test)";
+  if (new URL(url).pathname !== "/agora_portal_test") return "PORTAL_TEST_DATABASE_URL must name the agora_portal_test database";
+  const client = new pg.Client({ connectionString: url, connectionTimeoutMillis: 3000 });
+  try { await client.connect(); await client.query("SELECT 1"); }
+  catch { return "the database named by PORTAL_TEST_DATABASE_URL is unreachable"; }
   finally { await client.end().catch(() => {}); }
   return null;
 }
@@ -111,8 +135,10 @@ function createFront() {
 
 // Auth's clients document (its testClients() format) for one Portal: §3.6 of the Portal spec plus the apps the
 // flows need. Secrets are named by setting; the values are random per run and stay in this process.
-function clientsDocument(site) {
-  return {
+// With `integrations` the Portal client may manage Stations and exchange ID tokens for station.read, the API carries the
+// Station report and approval scopes, and a native "astation" app (device flow) may list and approve integrations.
+function clientsDocument(site, { integrations = false } = {}) {
+  const document = {
     resources: [
       { indicator: API, name: "Agora Build API", scopes: ["credits", "agora:projects", "agora:certificates"] },
       { indicator: "https://api.sample.test", name: "Sample API", scopes: ["sample:read"] }
@@ -124,6 +150,40 @@ function clientsDocument(site) {
       { id: "atem", name: "Atem", type: "native", firstParty: true, grants: ["device_code"], scopes: ["openid", "profile", "credits", "agora:projects"], resources: [API] },
       { id: "notes", name: "Third Party Notes", type: "web", secretEnv: "NOTES_CLIENT_SECRET", redirectUris: ["https://notes.test/callback"], homeUrl: "https://notes.test/", grants: ["authorization_code"], scopes: ["openid", "profile", "credits"], resources: [API] }
     ]
+  };
+  if (!integrations) return document;
+  document.resources[0].scopes.push("station.report", "integrations:read", "integrations:approve");
+  Object.assign(document.clients[0], { manage: true, exchange: true, stationScopes: ["station.read"] });
+  document.clients.push({ id: "astation", name: "Astation", type: "native", firstParty: true, grants: ["device_code"], scopes: ["openid", "integrations:read", "integrations:approve"], resources: [API] });
+  return document;
+}
+
+// The Portal's Station fetches for the stack: station.test resolves to 127.0.0.1, which the production fetch refuses
+// (allowPrivate), over TLS trusting only the test certificate.
+function stationFetches() {
+  const lookup = (hostname, options, callback) => {
+    if (hostname !== STATION_HOST) return dns.lookup(hostname, options, callback);
+    if (options?.all) callback(null, [{ address: "127.0.0.1", family: 4 }]);
+    else callback(null, "127.0.0.1", 4);
+  };
+  const agent = new HttpsAgent({ ca: stationTls().cert });
+  return { stationFetch: createStationFetch({ allowPrivate: true, lookup, agent }), pushFetch: createStationFetch({ allowPrivate: true, lookup, agent, timeoutMs: 3000 }) };
+}
+
+// A fresh schema in PORTAL_TEST_DATABASE_URL for one Portal; the URL selects it through the connection's options.
+async function portalDatabase() {
+  const url = process.env.PORTAL_TEST_DATABASE_URL;
+  const schema = "e2e_" + randomBytes(6).toString("hex");
+  const admin = new pg.Client({ connectionString: url });
+  await admin.connect();
+  await admin.query("CREATE SCHEMA " + schema);
+  const scoped = new URL(url);
+  scoped.searchParams.set("options", "-c statement_timeout=30000 -c search_path=" + schema);
+  return {
+    url: scoped.href,
+    async drop() {
+      try { await admin.query("DROP SCHEMA " + schema + " CASCADE"); } finally { await admin.end(); }
+    }
   };
 }
 
@@ -140,24 +200,27 @@ const models = { config: modelConfig({}), chat: async () => "unused", speak: asy
 const signalingEnv = { AGORA_APP_ID: "a".repeat(32), AGORA_APP_CERTIFICATE: "b".repeat(32), SPACES_SIGNALING_SECRET: randomBytes(24).toString("hex") };
 
 // Starts a Portal server on `port` against `issuer`, with a temp data file and a billing file.
-async function startPortal({ issuer, port, directory, clientSecret, logs }) {
+async function startPortal({ issuer, port, directory, clientSecret, logs, databaseUrl }) {
   const site = "http://127.0.0.1:" + port;
   const billingFile = resolve(directory, "billing-" + port + ".json");
   await writeFile(billingFile, JSON.stringify({ vox: { services: { evaluation: { credits: 3, maxUnits: 5 } } } }));
   const store = createStore(resolve(portalRoot, "data/people.json"), resolve(directory, "community-" + port + ".json"), { log: (line) => logs.push(line) });
   const server = withEnv({
     AUTH_ISSUER: issuer, PORTAL_CLIENT_ID: "portal", PORTAL_CLIENT_SECRET: clientSecret, SITE_URL: site, PORTAL_API_AUDIENCE: API,
-    PORTAL_BILLING_FILE: billingFile, AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64"), PLATFORM_ADMINS: ""
+    PORTAL_BILLING_FILE: billingFile, AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64"), PLATFORM_ADMINS: "",
+    ...(databaseUrl ? { DATABASE_URL: databaseUrl } : {})
   }, () => createAppServer(portalRoot, {
     monitor: false, store, log: (line) => logs.push(line), models, modelLimit: 1000,
-    calls: createAgoraCalls(agoraConfig(signalingEnv)), signaling: createSignaling(signalingConfig(signalingEnv)), channelSecret: signalingEnv.SPACES_SIGNALING_SECRET
+    calls: createAgoraCalls(agoraConfig(signalingEnv)), signaling: createSignaling(signalingConfig(signalingEnv)), channelSecret: signalingEnv.SPACES_SIGNALING_SECRET,
+    ...(databaseUrl ? { integrationOptions: stationFetches() } : {})
   }));
   await listen(server, port, "127.0.0.1");
   return { site, store, server, close: () => shut(server) };
 }
 
-// One IdP + one Portal. Returns everything a flow needs; close() tears it all down.
-export async function startStack(lib) {
+// One IdP + one Portal. Returns everything a flow needs; close() tears it all down. `integrations` turns on Stations
+// and integrations (see the top of this file); it needs PORTAL_TEST_DATABASE_URL (integrationsSkipReason()).
+export async function startStack(lib, { integrations = false } = {}) {
   const directory = await mkdtemp(resolve(tmpdir(), "portal-e2e-"));
   const front = createFront();
   await front.start();
@@ -165,10 +228,11 @@ export async function startStack(lib) {
   const portalPort = await freePort();
   const site = "http://127.0.0.1:" + portalPort;
   const secrets = { PORTAL_CLIENT_SECRET: secret(), SAMPLE_CLIENT_SECRET: secret(), VOX_CLIENT_SECRET: secret(), NOTES_CLIENT_SECRET: secret() };
-  const auth = await lib.startAuth({ issuer, clients: clientsDocument(site), env: secrets });
+  const auth = await lib.startAuth({ issuer, clients: clientsDocument(site, { integrations }), env: secrets });
   front.point(auth.origin);
   const logs = [];
-  const portal = await startPortal({ issuer, port: portalPort, directory, clientSecret: secrets.PORTAL_CLIENT_SECRET, logs });
+  const database = integrations ? await portalDatabase() : null;
+  const portal = await startPortal({ issuer, port: portalPort, directory, clientSecret: secrets.PORTAL_CLIENT_SECRET, logs, databaseUrl: database?.url });
   // What the relying-party helpers need: the issuer, reached over real HTTP through its public address.
   const idp = { issuer, fake: auth.fake, fetch: (input, init) => fetch(input, init) };
   const closers = [];
@@ -183,6 +247,7 @@ export async function startStack(lib) {
     async close() {
       for (const close of closers) await close();
       await portal.close();
+      await database?.drop();
       await front.stop();
       await auth.close();
       await rm(directory, { recursive: true, force: true });

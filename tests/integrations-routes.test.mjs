@@ -155,6 +155,40 @@ test("the stack migrates once before the first request, answers 503 and retries 
   assert.equal(calls.at(-1), "close");
 });
 
+// The end-to-end harness injects its own Station fetches; without them the stack keeps the real, guarded fetch.
+test("the stack uses injected Station fetches for proof and pushes, and the real network fetch by default", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
+  const owner = accountId();
+  const register = async (service, origin) => {
+    const issued = await service.createChallenge(owner, origin);
+    return { issued, result: await service.registerStation(owner, { challengeId: issued.challengeId, reportKey: publicJwk() }).catch((error) => error) };
+  };
+
+  const logs = [];
+  const fallback = createIntegrationStack({ db, manage: fakeManage(), idp: null, log: (line) => logs.push(line) });
+  const refused = (await register(fallback.service, "https://station.invalid")).result;
+  assert.equal(refused.status, 422, "the default proof fetch goes to the network, which cannot reach station.invalid");
+  assert.equal(refused.details.reason, "network");
+
+  const fetched = [];
+  const pushed = [];
+  const stationFetch = { async get(url) { fetched.push(url); return { status: 200, body: served }; } };
+  const pushFetch = { async post(url, body) { pushed.push({ url, body }); return { status: 202 }; } };
+  let served = "";
+  const injected = integrationsFromEnv({ DATABASE_URL: "postgres://unused@127.0.0.1:1/none", AUTH_ISSUER: issuer, PORTAL_CLIENT_SECRET: clientSecret }, { idp: null, log: () => {}, stationFetch, pushFetch });
+  assert.ok(injected, "integrationsFromEnv accepts the injected fetches");
+  await injected.close();
+  const stack = createIntegrationStack({ db, manage: fakeManage(), idp: null, log: () => {}, stationFetch, pushFetch });
+  const issued = await stack.service.createChallenge(owner, "https://two.example");
+  served = issued.value;
+  const station = await stack.service.registerStation(owner, { challengeId: issued.challengeId, reportKey: publicJwk() });
+  assert.deepEqual(fetched, ["https://two.example/.well-known/agora-build-station"]);
+  await stack.service.share(owner, station.id, accountId());
+  await stack.service._pushesIdle();
+  assert.deepEqual(pushed.map((entry) => entry.url), ["https://two.example/agora-build/v1/changes"]);
+});
+
 test("a browser account registers, shares and removes a Station and manages an integration", async (t) => {
   const integrations = await stack(t);
   if (!integrations) return;

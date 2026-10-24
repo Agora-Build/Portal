@@ -127,8 +127,8 @@ export function createAppServer(directory = root, options = {}) {
   const signaling = options.signaling || createSignaling(signalingConfig());
   const spaces = options.spaces || createSpaces({ store, worlds, signaling, calls, secret: options.channelSecret ?? signalingConfig().secret, admins: platformAdmins(process.env.PLATFORM_ADMINS, log), plazaCapacity: options.plazaCapacity });
   // Stations and integrations: a ready service (tests), null (off), or built from DATABASE_URL; without it every
-  // integration route answers 503.
-  const integrations = "integrations" in options ? (options.integrations && readyIntegrations(options.integrations)) : integrationsFromEnv(process.env, { idp, log });
+  // integration route answers 503. integrationOptions ({ stationFetch, pushFetch }) are for the end-to-end tests.
+  const integrations = "integrations" in options ? (options.integrations && readyIntegrations(options.integrations)) : integrationsFromEnv(process.env, { ...options.integrationOptions, idp, log });
   const windows = new Map();
   const scanning = new Set();
   const radarHours = Math.max(1, Number(process.env.RADAR_INTERVAL_HOURS) || 24);

@@ -19,10 +19,11 @@ export const integrationPath = (path) => /^\/api\/(stations|integrations)(\/|$)/
 export const readyIntegrations = (service) => ({ service, ready: async () => service, close: async () => {} });
 
 // The service over `db`. ready() migrates and creates the event partitions before the first request, once; a failure
-// answers 503 and the next request tries again. The partitions are then kept up hourly.
-export function createIntegrationStack({ db, manage, idp, log, stationFetch = createStationFetch() }) {
+// answers 503 and the next request tries again. The partitions are then kept up hourly. `stationFetch` (proof of
+// control) and `pushFetch` (change nudges) are only given by tests; production uses the guarded defaults.
+export function createIntegrationStack({ db, manage, idp, log, stationFetch = createStationFetch(), pushFetch }) {
   const exchange = (idToken, origin) => idp ? idp.exchangeForStation(idToken, origin) : Promise.reject(new TokenError(503, "unavailable"));
-  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, exchange, log });
+  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, pushFetch, exchange, log });
   let pending = null;
   let prepared = false;
   const partitions = setInterval(() => {
@@ -46,8 +47,8 @@ export function createIntegrationStack({ db, manage, idp, log, stationFetch = cr
 }
 
 // The stack from the environment: only with DATABASE_URL, and null (logged once, by setting name) when Auth's settings
-// are missing or invalid.
-export function integrationsFromEnv(env, { idp, log }) {
+// are missing or invalid. Tests may pass `stationFetch` and `pushFetch` (see createIntegrationStack).
+export function integrationsFromEnv(env, { idp, log, stationFetch, pushFetch }) {
   if (!env.DATABASE_URL) return null;
   let manage;
   try {
@@ -58,7 +59,7 @@ export function integrationsFromEnv(env, { idp, log }) {
     log("Stations and integrations are unavailable: " + (error instanceof TypeError ? error.message : "their settings are invalid") + ".");
     return null;
   }
-  return createIntegrationStack({ db: createDatabase(env.DATABASE_URL, { log }), manage, idp, log });
+  return createIntegrationStack({ db: createDatabase(env.DATABASE_URL, { log }), manage, idp, log, stationFetch, pushFetch });
 }
 
 // Maps HTTP requests to the integration service. Returns null when the request is not an integration route. `caller`
