@@ -449,3 +449,29 @@ and on the `Run tests` step `env: PORTAL_TEST_DATABASE_URL: postgres://postgres:
 - Account deletion with the 14-day window (needs Auth endpoints to disable, restore and finally delete accounts).
 - The official Discord app (needs the Station agent API) and bring-your-own Discord (Station/Astation).
 - Astation's approval UI, the Station's report client and feed polling (Astation/Station owners; this plan documents the contract).
+
+---
+
+### Task 12: End-to-end check against the real Auth (Portal ↔ Auth ↔ Station)
+
+Added by the controller (Ruling P6): the owner stressed "validation/verification between auth and station.agora.build"; the unit tests use a fake Auth. This task proves the real contract.
+
+**Files:**
+- Modify: `tests/e2e/harness.mjs` (opt-in integrations stack), `scripts/integrations/routes.mjs` only if the stack needs an injectable `stationFetch`/`pushFetch` for tests (option on `createAppServer`, never an environment switch)
+- Create: `tests/e2e/integrations.e2e.mjs`
+
+**Interfaces:**
+- Consumes: everything from Tasks 1–9; Auth's `startAuth` (via the harness `lib`), Auth's `scripts/verify-station-token.mjs` (or its exported verifier) for checking Station tokens exactly as a Station would.
+
+- [ ] **Step 1:** Harness: `startStack(lib, { integrations: true })` gives the Portal client `manage: true`, `exchange: true`, `stationScopes: ["station.read"]` (it already has a back-channel logout URI) and the API resource the scopes `station.report`, `integrations:read`, `integrations:approve`; starts the Portal with `DATABASE_URL` = a fresh schema in `PORTAL_TEST_DATABASE_URL` (dropped at close; skip with a reason when unset), and a Station fetch that may reach `127.0.0.1` and trusts the test certificate in `tests/fixtures/tls/`.
+- [ ] **Step 2:** A Station stub: a local HTTPS server (test certificate) at `https://station.localhost:<port>` (resolve to 127.0.0.1 through the injected lookup) serving `/.well-known/agora-build-station` with the value it is given, recording `POST /agora-build/v1/changes`, holding its own report key pair (ES256) and verifying tokens with Auth's Station verifier (issuer, JWKS from the real Auth, `aud` = its origin).
+- [ ] **Step 3: Flows** (one test each, real HTTP everywhere):
+  1. A person signs in (existing helpers), requests a challenge, the stub serves it, registration succeeds; the Station is listed; Auth's `GET /manage/v1/stations?account=` lists it.
+  2. The stub gets a `station.report` token from Auth with `private_key_jwt` (client `s-…` from registration, `resource` = the Portal API audience); `GET /api/v1/stations/changes?cursor=0` answers with its snapshot; a token for another resource or a Portal user token is refused.
+  3. The person creates an integration with a generated ES256 key; the integration gets a client-credentials token from Auth for the Station; the stub's verifier accepts it with `sub` = the person, `client_id` = the integration, scopes as created, and `aud` = the Station; the same token is refused by the Portal's `/api/v1/` routes (wrong audience).
+  4. Approval: an `integrations:approve` token (from a native client registered in the harness with those scopes, via the device flow helpers if available) approves with an `r9Svc`; the next integration token carries `r9_svc`. If a native token cannot be obtained with the harness helpers, record the gap in the report and test approval through the service directly.
+  5. The stub reports `ready`; the Portal shows Ready; a report about an unknown integration is 404.
+  6. Pause and revoke from the browser: the stub receives a push nudge and sees the change in the feed; Auth refuses the next integration token (`invalid_client` or as Auth answers).
+  7. The browser's `read-token` for the Station returns a `station.read` token that the stub's verifier accepts (`sub` = the person); an unshared second person gets 404.
+  8. Sharing: the owner shares with a second signed-in person, who can then get a `read-token`; unsharing stops it.
+- [ ] **Step 4:** Run with `npm run test:e2e` (Node 22, `TEST_DATABASE_URL` and `PORTAL_TEST_DATABASE_URL` set) → PASS; `npm test` unchanged and green. **Commit** `Check Stations and integrations end to end against Auth`.
