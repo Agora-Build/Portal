@@ -209,6 +209,42 @@ test("a Station Auth no longer lists is removed in Portal with its integrations 
   assert.deepEqual([revoked.integration_id, revoked.state, revoked.reason], ["i-ready", "revoked", "reconciled"]);
 });
 
+test("a stale active Station at an origin Auth has given to another Station is retired, not a 500", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  // Auth removed st1 and registered st2 at the same origin, but Portal's half of the removal never happened.
+  await s.register(OWNER, "https://one.example");
+  await seedIntegration(s.repository, "i-ready", "st1", OWNER, "ready");
+  s.manage.records[0].status = "removed";
+  await s.manage.registerStation({ origin: "https://one.example", owner: OWNER, reportKey: REPORT_KEY, actor: OWNER });
+  const listed = await s.service.stations(OWNER);
+  assert.deepEqual(listed.stations.map((station) => [station.id, station.origin]), [["st2", "https://one.example"]]);
+  assert.equal((await s.repository.station("st1")).status, "removed");
+  assert.equal((await s.repository.integration("i-ready")).state, "revoked");
+  assert.deepEqual((await s.events("station_removed")).map((event) => [event.station_id, event.reason]), [["st1", "reconciled"]]);
+  assert.deepEqual(s.notified.sort(), ["st1", "st2"]);
+});
+
+test("another account's stale Station at the origin is retired when it is registered or listed again", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await s.register(STRANGER, "https://one.example");
+  await seedIntegration(s.repository, "i-theirs", "st1", STRANGER, "ready");
+  s.manage.records[0].status = "removed";
+  const view = await s.register(OWNER, "https://one.example");
+  assert.equal(view.id, "st2");
+  assert.equal((await s.repository.station("st1")).status, "removed");
+  assert.equal((await s.repository.integration("i-theirs")).state, "revoked");
+  const [removed] = await s.events("station_removed");
+  assert.deepEqual([removed.station_id, removed.actor, removed.account_id, removed.reason], ["st1", "system", STRANGER, "reconciled"]);
+  assert.deepEqual(s.notified, ["st1"], "the retired Station is told");
+  // The same through a listing: Auth gives the origin to st3 while Portal still has st2 active there.
+  s.manage.records[1].status = "removed";
+  await s.manage.registerStation({ origin: "https://one.example", owner: MEMBER, reportKey: REPORT_KEY, actor: MEMBER });
+  assert.deepEqual((await s.service.stations(MEMBER)).stations.map((station) => station.id), ["st3"]);
+  assert.equal((await s.repository.station("st2")).status, "removed");
+});
+
 test("with Auth down the listing answers Portal's rows marked stale", async (t) => {
   const s = await setup(t);
   if (!s) return;

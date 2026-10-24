@@ -214,6 +214,23 @@ export function createIntegrationService({
     return revoked;
   }
 
+  // Inside the caller's transaction, retires an active Portal Station at `origin` other than `id`: Auth has given the
+  // origin to `id`, so the old Station is gone there, with its integrations. Returns the retired Station's ID or null.
+  async function retireStale(client, origin, id) {
+    const stale = await repository.activeStationAt(origin, client);
+    if (!stale || stale.id === id) return null;
+    await repository.markStationRemoved(stale.id, now(), client);
+    await revokeOn(client, stale.id, () => true, { actor: "system", reason: "reconciled", direct: true });
+    await repository.appendEvent({ stationId: stale.id, accountId: stale.ownerAccount, actor: "system", kind: "station_removed", reason: "reconciled" }, client);
+    return stale.id;
+  }
+
+  function retired(stationId) {
+    if (!stationId) return;
+    log("Station removed in Portal: its origin belongs to another Station at Auth.");
+    changed(stationId);
+  }
+
   // The active Station as this account has it in Portal (with its role, "owner" or "member"). An account that neither
   // owns it nor is a current member gets the same 404 as for an unknown ID, before Auth is asked, so nothing about the
   // Station is revealed (as for integrations, Ruling T7-8).
@@ -230,34 +247,10 @@ export function createIntegrationService({
     return station;
   }
 
-  // Brings Portal's rows in line with Auth's list for this account; Auth is authoritative.
+  // Brings Portal's rows in line with Auth's list for this account; Auth is authoritative. Removals run first, so a
+  // Station Auth has replaced at the same origin is retired before its successor is added.
   async function reconcile(accountId, listed) {
     const known = new Set(listed.map((station) => station.id));
-    for (const entry of listed) {
-      if (!(await repository.station(entry.id))) {
-        // The insert's own answer gates the event, so concurrent listings record the Station once.
-        const added = await db.transaction(async (client) => {
-          if (!(await repository.insertStation({ id: entry.id, origin: entry.origin, ownerAccount: entry.owner, reportClientId: entry.reportClientId, verifiedAt: entry.createdAt }, client))) return false;
-          await repository.appendEvent({ stationId: entry.id, accountId: entry.owner, actor: "system", kind: "station_reconciled" }, client);
-          return true;
-        });
-        if (added) {
-          log("Station reconciled from Auth: missing in Portal.");
-          changed(entry.id);
-        }
-      }
-      if (entry.owner !== accountId && !(await repository.currentMembers(entry.id)).some((member) => member.accountId === accountId)) {
-        const added = await db.transaction(async (client) => {
-          if (!(await repository.addMember(entry.id, accountId, "system", now(), client))) return false;
-          await repository.appendEvent({ stationId: entry.id, accountId, actor: "system", kind: "member_added", reason: "reconciled" }, client);
-          return true;
-        });
-        if (added) {
-          log("Station member reconciled from Auth: missing in Portal.");
-          changed(entry.id);
-        }
-      }
-    }
     for (const station of await repository.stationsFor(accountId)) {
       if (known.has(station.id)) continue;
       if (station.role === "owner") {
@@ -280,6 +273,33 @@ export function createIntegrationService({
       if (removed) {
         log("Station member removed in Portal: absent from Auth.");
         changed(station.id);
+      }
+    }
+    for (const entry of listed) {
+      if (!(await repository.station(entry.id))) {
+        // The insert's own answer gates the event, so concurrent listings record the Station once.
+        const { added, stale } = await db.transaction(async (client) => {
+          const stale = await retireStale(client, entry.origin, entry.id);
+          if (!(await repository.insertStation({ id: entry.id, origin: entry.origin, ownerAccount: entry.owner, reportClientId: entry.reportClientId, verifiedAt: entry.createdAt }, client))) return { added: false, stale };
+          await repository.appendEvent({ stationId: entry.id, accountId: entry.owner, actor: "system", kind: "station_reconciled" }, client);
+          return { added: true, stale };
+        });
+        retired(stale);
+        if (added) {
+          log("Station reconciled from Auth: missing in Portal.");
+          changed(entry.id);
+        }
+      }
+      if (entry.owner !== accountId && !(await repository.currentMembers(entry.id)).some((member) => member.accountId === accountId)) {
+        const added = await db.transaction(async (client) => {
+          if (!(await repository.addMember(entry.id, accountId, "system", now(), client))) return false;
+          await repository.appendEvent({ stationId: entry.id, accountId, actor: "system", kind: "member_added", reason: "reconciled" }, client);
+          return true;
+        });
+        if (added) {
+          log("Station member reconciled from Auth: missing in Portal.");
+          changed(entry.id);
+        }
       }
     }
   }
@@ -423,10 +443,13 @@ export function createIntegrationService({
         throw failure(422, "The Station did not serve the check value at " + origin + WELL_KNOWN_PATH + ".", "proof", { reason: proof.reason });
       }
       const registered = await viaAuth(() => manage.registerStation({ origin, owner: accountId, reportKey, actor: accountId }));
-      await db.transaction(async (client) => {
+      const stale = await db.transaction(async (client) => {
+        const stale = await retireStale(client, origin, registered.id);
         await repository.insertStation({ id: registered.id, origin, ownerAccount: accountId, reportClientId: registered.reportClientId, verifiedAt: now() }, client);
         await repository.appendEvent({ stationId: registered.id, accountId, actor: accountId, kind: "station_registered" }, client);
+        return stale;
       });
+      retired(stale);
       return stationView(await repository.station(registered.id), "owner");
     },
 

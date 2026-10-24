@@ -98,6 +98,13 @@ export function createRepository(db) {
       return rows[0] ? stationRow(rows[0]) : null;
     },
 
+    // The active Station at an origin, locked for the caller's transaction.
+    async activeStationAt(origin, client) {
+      if (!client) throw new TypeError("activeStationAt needs a transaction client.");
+      const { rows } = await client.query("SELECT * FROM stations WHERE origin = $1 AND status = 'active' FOR UPDATE", [origin]);
+      return rows[0] ? stationRow(rows[0]) : null;
+    },
+
     async stationByReportClient(clientId, client) {
       const { rows } = await run(client, "SELECT * FROM stations WHERE report_client_id = $1 AND status = 'active'", [clientId]);
       return rows[0] ? stationRow(rows[0]) : null;
