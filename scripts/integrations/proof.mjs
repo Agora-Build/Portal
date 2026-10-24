@@ -30,7 +30,8 @@ export function stationOrigin(value) {
   // Host names are case-insensitive; anything else the URL parser rewrote (ports, IP forms, paths) is refused.
   const given = value.toLowerCase();
   if (given !== origin && given !== origin + "/") refuse();
-  if (!url.hostname.includes(".") || isIP(unbracket(url.hostname))) refuse();
+  if (!url.hostname.includes(".") || url.hostname.endsWith(".") || isIP(unbracket(url.hostname))) refuse();
+  if (url.port === "0") refuse();
   return origin;
 }
 
@@ -69,9 +70,13 @@ export function blockedAddress(address, family) {
   if (isIPv4(plain) && family !== 6 && family !== "IPv6") return blockedIPv4(plain);
   if (!isIPv6(plain)) return true;
   const groups = ipv6Groups(plain);
-  const leadingZero = groups.slice(0, 5).every((group) => group === 0);
-  if (leadingZero && groups[5] === 0xffff) return blockedIPv4([groups[6] >> 8, groups[6] & 255, groups[7] >> 8, groups[7] & 255].join("."));
-  if (leadingZero && groups[5] === 0 && groups[6] === 0 && (groups[7] === 0 || groups[7] === 1)) return true;
+  const zeros = (from, to) => groups.slice(from, to).every((group) => group === 0);
+  const embedded = () => blockedIPv4([groups[6] >> 8, groups[6] & 255, groups[7] >> 8, groups[7] & 255].join("."));
+  // IPv4-mapped ::ffff:0:0/96 and NAT64 64:ff9b::/96 are checked as IPv4; ::/96 (incl. ::, ::1 and the deprecated
+  // IPv4-compatible form) and IPv4-translated ::ffff:0:0:0/96 are refused outright.
+  if (zeros(0, 5) && groups[5] === 0xffff) return embedded();
+  if (groups[0] === 0x64 && groups[1] === 0xff9b && zeros(2, 6)) return embedded();
+  if (zeros(0, 6) || (zeros(0, 4) && groups[4] === 0xffff && groups[5] === 0)) return true;
   const first = groups[0];
   return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80 || (first & 0xff00) === 0xff00;
 }
@@ -113,8 +118,8 @@ export function createStationFetch({ allowPrivate = false, lookup = dns.lookup, 
         servername: url.hostname, headers, lookup: guardedLookup, agent: agent ?? false
       }, (response) => {
         const status = response.statusCode;
-        // Redirects are never followed and a non-2xx body is never needed; a POST only reports its status.
-        if (method === "POST" || status < 200 || status > 299) {
+        // Redirects are never followed and only a 200 body is ever needed; a POST only reports its status.
+        if (method === "POST" || status !== 200) {
           finish(null, method === "POST" ? { status } : { status, body: "" });
           response.destroy();
           return;
@@ -128,7 +133,6 @@ export function createStationFetch({ allowPrivate = false, lookup = dns.lookup, 
         });
         response.on("end", () => finish(null, { status, body: Buffer.concat(chunks).toString("utf8") }));
         response.on("error", (error) => finish(error));
-        response.on("aborted", () => finish(new ProofError("network")));
       });
       const timer = setTimeout(() => { finish(new ProofError("timeout")); request.destroy(); }, timeoutMs);
       request.on("error", (error) => finish(error));
@@ -143,6 +147,8 @@ export function createStationFetch({ allowPrivate = false, lookup = dns.lookup, 
 }
 
 export async function checkProof(origin, value, { fetch }) {
+  // An empty or missing value would let an empty or "undefined" body pass; that is a caller bug, never a proof.
+  if (typeof value !== "string" || !value) throw new TypeError("checkProof needs the issued proof value");
   let reply;
   try {
     reply = await fetch.get(origin + WELL_KNOWN_PATH);

@@ -35,6 +35,8 @@ test("stationOrigin refuses anything that is not a bare https origin with a DNS 
     "https://station.example ",
     " https://station.example",
     "https://station.example//",
+    "https://station.example.",
+    "https://station.example:0",
     "",
     "https://" + "a".repeat(300) + ".example",
     "not a url",
@@ -67,11 +69,13 @@ test("blockedAddress covers each refused range at its edges", () => {
     ["223.255.255.255", 4, false], ["224.0.0.0", 4, true], ["239.255.255.255", 4, true],
     ["240.0.0.0", 4, true], ["255.255.255.254", 4, true], ["255.255.255.255", 4, true],
     ["8.8.8.8", 4, false], ["93.184.216.34", 4, false],
-    ["::", 6, true], ["::1", 6, true], ["::2", 6, false],
+    ["::", 6, true], ["::1", 6, true], ["::2", 6, true], ["::1:0:0", 6, false],
     ["fbff:ffff::1", 6, false], ["fc00::", 6, true], ["fd00::1", 6, true], ["fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 6, true], ["fe00::", 6, false],
     ["fe7f:ffff::1", 6, false], ["fe80::1", 6, true], ["fe80::1%eth0", 6, true], ["febf:ffff::1", 6, true], ["fec0::1", 6, false],
     ["feff:ffff::1", 6, false], ["ff00::", 6, true], ["ff02::1", 6, true], ["FF02::1", 6, true],
     ["::ffff:127.0.0.1", 6, true], ["::ffff:7f00:1", 6, true], ["::ffff:10.1.2.3", 6, true], ["::ffff:8.8.8.8", 6, false],
+    ["::7f00:1", 6, true], ["::8.8.8.8", 6, true], ["::ffff:0:8.8.8.8", 6, true],
+    ["64:ff9b::127.0.0.1", 6, true], ["64:ff9b::a00:1", 6, true], ["64:ff9b::8.8.8.8", 6, false], ["64:ff9b:1::1", 6, false],
     ["2001:db8::1", 6, false], ["2606:4700:4700::1111", 6, false],
     ["127.0.0.1", "IPv4", true], ["8.8.8.8", undefined, false], ["::1", "IPv6", true],
     ["not-an-address", 4, true], ["", 6, true], [undefined, 4, true]
@@ -212,6 +216,26 @@ test("an untrusted certificate is a network failure without the test agent", asy
   const s = await station(t, replyWith(200, VALUE));
   const fetch = createStationFetch({ allowPrivate: true, lookup: lookupTo("127.0.0.1").lookup });
   assert.deepEqual(await checkProof(s.origin, VALUE, { fetch }), { ok: false, reason: "network" });
+});
+
+test("an empty or non-string proof value is a TypeError and fetches nothing", async (t) => {
+  const s = await station(t, replyWith(200, "undefined\n"));
+  for (const value of [undefined, null, "", 42]) {
+    await assert.rejects(checkProof(s.origin, value, { fetch: testFetch() }), TypeError, String(value));
+  }
+  assert.equal(s.connections(), 0);
+  assert.equal(s.seen.length, 0);
+});
+
+test("a body dripping slower than timeoutMs still times out", async (t) => {
+  const s = await station(t, (request, response) => {
+    response.writeHead(200, { "Content-Type": "text/plain" });
+    const drip = setInterval(() => response.write("x"), 50);
+    response.on("close", () => clearInterval(drip));
+  });
+  const started = Date.now();
+  assert.deepEqual(await checkProof(s.origin, VALUE, { fetch: testFetch({ timeoutMs: 200 }) }), { ok: false, reason: "timeout" });
+  assert.ok(Date.now() - started < 1500);
 });
 
 test("post sends JSON and returns the status, with the same safety", async (t) => {
