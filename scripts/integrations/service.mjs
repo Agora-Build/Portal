@@ -4,8 +4,8 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { TokenError } from "../idp.mjs";
 import { ACCOUNT_ID, AppError } from "../store.mjs";
 import { ManageError } from "./auth-manage.mjs";
-import { checkProof, stationOrigin, WELL_KNOWN_PATH } from "./proof.mjs";
-import { effectiveState, transition } from "./states.mjs";
+import { checkProof, createStationFetch, ProofError, stationOrigin, WELL_KNOWN_PATH } from "./proof.mjs";
+import { effectiveState, REPORT_STATES, transition } from "./states.mjs";
 
 const CHALLENGE_LIFETIME = 600000;
 const CHALLENGES_PER_HOUR = 10;
@@ -17,9 +17,15 @@ const PRIVATE_MEMBERS = ["d", "p", "q", "dp", "dq", "qi", "k"];
 const R9_SVC = /^[0-9a-f]{64}$/;
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
 const STOPPED = ["revoking", "revoked"];
+const REPORT_FIELDS = ["integrationId", "state", "reason"];
+const PRINTABLE_REASON = /^[^\p{Cc}]{1,200}$/u;
+const CURSOR = /^\d{1,15}$/;
+const FEED_LIMIT = 500;
+const CHANGES_PATH = "/agora-build/v1/changes";
 
 const failure = (status, message, code, extra = {}) => new AppError(status, message, { code, ...extra });
 const notFound = () => failure(404, "This Station or integration was not found.", "not_found");
+const unknownStation = () => failure(403, "This Station is not registered.", "station");
 const expiredChallenge = () => failure(400, "This check has expired or was already used. Start again.", "challenge");
 
 const MANAGE_CONFLICTS = {
@@ -103,14 +109,85 @@ function step(row, event, at) {
   return transition(row, event, at);
 }
 
+function reportReason(value) {
+  if (typeof value !== "string" || !PRINTABLE_REASON.test(value)) throw failure(400, "Give the reason in 1 to 200 characters, without control characters.", "reason");
+  return value;
+}
+
+// A report's body: only integrationId, state and reason; `error` needs a reason, any other report may carry one.
+function reportBody(body) {
+  if (!plainObject(body) || Object.keys(body).some((key) => !REPORT_FIELDS.includes(key))) {
+    throw failure(400, "Send a report as { integrationId, state, reason }.", "report");
+  }
+  const { integrationId, state, reason } = body;
+  if (state !== "error" && !REPORT_STATES.includes(state)) throw failure(400, "Report a state of " + [...REPORT_STATES, "error"].join(", ") + ".", "state");
+  if (state === "error" || reason !== undefined) reportReason(reason);
+  return { integrationId, state, reason: reason ?? null };
+}
+
+function feedCursor(value) {
+  const cursor = typeof value === "string" && CURSOR.test(value) ? Number(value) : value;
+  if (!Number.isSafeInteger(cursor) || cursor < 0) throw failure(400, "Send the cursor as a whole number of at least 0.", "cursor");
+  return cursor;
+}
+
+// What a Station needs to act on an integration; the state is the effective one, so it may be "expired".
+function feedIntegration(row, at) {
+  return { state: effectiveState(row, at), scopes: row.scopes, r9Svc: row.r9Svc, expiresAt: row.expiresAt, quotaPerSecond: row.quotaPerSecond };
+}
+
 export function createIntegrationService({
   repository, db, manage, stationFetch, exchange, now = Date.now, log = () => {}, ids = randomUUID,
-  challengeValue = () => randomBytes(32).toString("base64url"), notify = () => {}
+  challengeValue = () => randomBytes(32).toString("base64url"), pushFetch = createStationFetch({ timeoutMs: 3000 }), notify
 }) {
+  // Per Station: the push in flight and whether another change arrived while it ran.
+  const pushes = new Map();
+
+  // Nudges the Station to read its change feed. The nudge carries no authority, only the latest cursor; the Station
+  // learns what changed by polling with its own token. At most one push per Station is in flight; calls meanwhile
+  // collapse into one more push, sent once it ends with the then-latest cursor. Never throws; failures are logged.
+  function push(stationId) {
+    const running = pushes.get(stationId);
+    if (running) {
+      running.pending = true;
+      return;
+    }
+    const entry = { pending: false, done: null };
+    pushes.set(stationId, entry);
+    entry.done = (async () => {
+      try {
+        do {
+          entry.pending = false;
+          await pushOnce(stationId);
+        } while (entry.pending);
+      } finally {
+        pushes.delete(stationId);
+      }
+    })();
+  }
+
+  async function pushOnce(stationId) {
+    try {
+      const station = await repository.station(stationId);
+      if (!station || station.status !== "active") return;
+      const cursor = await repository.latestCursor(stationId);
+      const reply = await pushFetch.post(station.origin + CHANGES_PATH, { cursor });
+      if (reply.status < 200 || reply.status > 299) log("Station change push failed: status_" + reply.status + ".");
+    } catch (error) {
+      log("Station change push failed: " + (error instanceof ProofError ? error.reason : "error") + ".");
+    }
+  }
+
+  async function reportingStation(clientId) {
+    const station = typeof clientId === "string" && clientId ? await repository.stationByReportClient(clientId) : null;
+    if (!station) throw unknownStation();
+    return station;
+  }
+
   // Tells the Station about a committed change; a failed nudge never fails the change itself.
   function changed(stationId) {
     try {
-      const result = notify(stationId);
+      const result = (notify ?? push)(stationId);
       if (typeof result?.catch === "function") result.catch(() => log("Station notify failed."));
     } catch {
       log("Station notify failed.");
@@ -494,6 +571,57 @@ export function createIntegrationService({
         return { event: { actor: accountId, kind: "integration_key_added", details: { kid, overlapEndsAt } } };
       });
       return { kid, overlapEndsAt };
+    },
+
+    // An authenticated Station's report about one of its integrations. Only these reports move an integration into
+    // waiting_for_host, ready or revoked (Portal never sets ready itself); `error` records lastError and keeps the state.
+    async report(clientId, body) {
+      const station = await reportingStation(clientId);
+      const { integrationId, state, reason } = reportBody(body);
+      const row = typeof integrationId === "string" && integrationId ? await repository.integration(integrationId) : null;
+      // Integrations of other Stations get the same answer as unknown ones.
+      if (!row || row.stationId !== station.id) throw notFound();
+      const apply = (current) => {
+        const event = { actor: "station", kind: "integration_reported", reason };
+        if (state === "error") {
+          if (current.state === "revoked") throw failure(409, "This integration is revoked and cannot take that action.", "invalid_state");
+          if (current.lastError === reason) return null;
+          return { fields: { lastError: reason }, event };
+        }
+        if (current.state === state || (current.state === "paused" && current.resumeState === state)) return null;
+        return { fields: { ...transition(current, "report:" + state, now()), lastError: null }, event };
+      };
+      apply(row);
+      const updated = await commit(row.id, apply);
+      const { role, ...view } = integrationView(updated, null, station.origin);
+      return view;
+    },
+
+    // This Station's changes after `cursor`, oldest first, each with its integration's current settings. From cursor 0
+    // the answer also lists every integration on the Station, so a Station starting fresh has a snapshot.
+    async changes(clientId, cursorInput) {
+      const station = await reportingStation(clientId);
+      const cursor = feedCursor(cursorInput);
+      const events = await repository.changesSince(station.id, cursor, FEED_LIMIT);
+      const rows = await repository.integrationsOnStation(station.id);
+      const at = now();
+      const current = new Map(rows.map((row) => [row.id, row]));
+      const changes = events.map(({ id, at: when, integrationId, kind, state, reason }) => {
+        const change = { id, at: when, integrationId, kind, state, reason };
+        const row = integrationId ? current.get(integrationId) : null;
+        if (row) change.integration = feedIntegration(row, at);
+        return change;
+      });
+      const answer = { changes, cursor: events.length ? events.at(-1).id : cursor };
+      if (cursor === 0) answer.integrations = rows.map((row) => ({ id: row.id, ...feedIntegration(row, at) }));
+      return answer;
+    },
+
+    notify: (stationId) => changed(stationId),
+
+    // For tests: resolves once no push is in flight.
+    async _pushesIdle() {
+      while (pushes.size) await Promise.all([...pushes.values()].map((entry) => entry.done));
     },
 
     async history(accountId, id) {
