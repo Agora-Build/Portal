@@ -57,6 +57,9 @@ const safePicture = (value) => {
 const verifiedEmail = (value, verified) => verified === true && typeof value === "string" && value.length <= 254 && /^[\x21-\x3f\x41-\x7e]+@[\x21-\x3f\x41-\x7e]+\.[\x21-\x3f\x41-\x7e]+$/.test(value) ? value.toLowerCase() : null;
 const plainString = (value, max = 255) => typeof value === "string" && value.length > 0 && value.length <= max;
 
+// RFC 6749 section 2.3.1: client credentials are form-urlencoded before base64.
+const formEncode = (value) => encodeURIComponent(value).replace(/%20/g, "+");
+
 const SILENT_NO = new Set(["login_required", "interaction_required", "consent_required", "account_selection_required"]);
 
 export function createIdp({ issuer: issuerSetting, clientId = "portal", clientSecret, siteUrl, audience: audienceSetting, request = fetch, now = Date.now } = {}) {
@@ -295,6 +298,42 @@ export function createIdp({ issuer: issuerSetting, clientId = "portal", clientSe
       const url = new URL(issuer.replace(/\/$/, "") + "/logout");
       url.search = new URLSearchParams({ client_id: clientId, ...parameters }).toString();
       return url.href;
+    },
+    // Trades the signed-in person's ID token for a 5-minute station.read token for one Station (RFC 8693). Not done
+    // through openid-client, which has no generic token-exchange grant.
+    async exchangeForStation(idToken, origin) {
+      const state = await discover();
+      const endpoint = state?.client.serverMetadata().token_endpoint;
+      if (!endpoint) throw new TokenError(503, "unavailable");
+      const form = new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+        subject_token: idToken,
+        subject_token_type: "urn:ietf:params:oauth:token-type:id_token",
+        resource: origin,
+        scope: "station.read"
+      });
+      let response, json;
+      try {
+        response = await clientRequest(endpoint, {
+          method: "POST",
+          headers: {
+            Authorization: "Basic " + Buffer.from(formEncode(clientId) + ":" + formEncode(clientSecret)).toString("base64"),
+            "Content-Type": "application/x-www-form-urlencoded",
+            Accept: "application/json"
+          },
+          body: form.toString()
+        });
+        json = await response.json().catch(() => null);
+      } catch {
+        throw new TokenError(503, "unavailable");
+      }
+      lastContact = now();
+      if (!response.ok) {
+        if (response.status >= 500 || !plainString(json?.error, 100)) throw new TokenError(response.status >= 500 ? 503 : 401, response.status >= 500 ? "unavailable" : "response");
+        throw new TokenError(401, json.error);
+      }
+      if (json?.issued_token_type !== "urn:ietf:params:oauth:token-type:access_token" || !plainString(json.access_token, 8192) || !(Number.isFinite(json.expires_in) && json.expires_in > 0)) throw new TokenError(401, "response");
+      return { accessToken: json.access_token, expiresIn: json.expires_in };
     },
     async verifyLogoutToken(token) {
       const payload = await verify(token, { audience: clientId, typ: "logout+jwt", requiredClaims: ["iat", "jti"], maxTokenAge: 300 });
