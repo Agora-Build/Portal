@@ -577,7 +577,7 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
 | `POST /api/stations` `{ challengeId, reportKey }` | browser | check the proof, register with Auth; 201 with the Station |
 | `DELETE /api/stations/<id>` | browser | remove (owner only); revokes its integrations |
 | `GET /api/stations/<id>/members` | browser | owner and members |
-| `PUT`, `DELETE /api/stations/<id>/members/<ab...>` | browser | share and unshare; unsharing revokes that member's integrations there |
+| `PUT`, `DELETE /api/stations/<id>/members/<ab...>` | browser | share (owner only) and unshare (the owner, or a member removing themself); unsharing revokes that member's integrations there |
 | `POST /api/stations/<id>/read-token` | browser | a 5-minute `station.read` token for that Station: `{ accessToken, expiresIn, origin }` |
 | `POST /api/integrations` `{ stationId, name, scopes, publicJwk, quotaPerSecond, expiresInDays }` | browser | create; 201 |
 | `POST /api/integrations/<id>/keys` `{ publicJwk }` | browser | add a key; 201 `{ kid, overlapEndsAt }` |
@@ -611,7 +611,10 @@ per account: each list (`GET /api/stations`, `GET /api/integrations` and
 `/api/v1/integrations` together, and a Station's members) 60; all other changes
 that call Auth (share, unshare, remove, pause, resume, revoke, renew, settings,
 keys, approval) 30 together; Station registration 10; integration creation 20;
-read tokens 30. Station challenges are 10 per hour per account; Station reports
+read tokens 30. Sharing with an `ab…` account Auth does not know (or has
+disabled) is refused as 400 from Auth, so a Station owner can tell whether an
+account ID exists; account IDs are random ULIDs, so this is accepted rather
+than guessed at. Station challenges are 10 per hour per account; Station reports
 600 and feed reads 120 per minute per Station.
 
 All of the Portal's management calls to Auth (`/manage/v1`) come from the
@@ -645,7 +648,8 @@ The Portal never sets `ready` itself. Pause is allowed from `awaiting_approval`,
 `waiting_for_host` and `ready` (not when expired); a report received while paused updates the state to return to.
 Revoking, removing a Station and unsharing a Station all set the affected
 integrations to `revoking` (an integration still awaiting approval goes straight
-to `revoked`; so does one found missing at Auth when the lists are reconciled). Expiry
+to `revoked`; so do the integrations of a Station that a listing finds Auth no
+longer has). Expiry
 is shown as the state `expired` for anything not yet revoking; expired
 integrations cannot be approved, paused or resumed, but can be renewed, rotated
 or have their quota changed.
@@ -699,9 +703,17 @@ returned `cursor` (it stays the same when nothing changed). A page holds at most
 500 changes, oldest first; if it is full, ask again at once. Each change is
 `{ id, at, integrationId, kind, state, reason }` plus, for integration changes,
 `integration`: `{ state, scopes, r9Svc, expiresAt, quotaPerSecond }` as they
-stand now (state may be `expired`). Station changes (`station_registered`,
-`member_added`, `member_removed`, `station_removed`) have no integration. The
-Station's own reports appear in its feed too.
+stand now (state may be `expired`). `kind` is one of `integration_created`,
+`integration_approved`, `integration_paused`, `integration_resumed`,
+`integration_revoked`, `integration_renewed`, `integration_settings_changed`,
+`integration_key_added`, `integration_reported` (the Station's own reports),
+`integration_reconciled` (the Portal caught up with a change made at Auth,
+such as a new expiry, quota or R9 binding, or an integration it had missed),
+and for the Station itself `station_registered`, `station_reconciled`,
+`member_added` and `member_removed`, which have no integration. New kinds may
+be added; treat an unknown one as a reason to act on the `integration` it
+carries. A removed Station cannot read its feed any more (its report client is
+gone at Auth), so it never sees its own `station_removed`.
 
 **The push nudge.** After a committed change the Portal sends
 `POST <origin>/agora-build/v1/changes` with `{ "cursor": <n> }` to the Station,
@@ -710,7 +722,8 @@ is in flight, and changes meanwhile collapse into one more. The nudge is unsigne
 by design: it carries only a cursor and no authority, so the Station treats it
 only as a reason to poll the feed with its own token, and never acts on its
 content. A failed nudge never fails the change; polling covers it. A removed
-Station is nudged once more so it learns to stop.
+Station is nudged once more; the feed then refuses its token (401 or 403),
+which is how it learns to stop.
 
 **Browser details.** The browser asks the Portal for
 `POST /api/stations/<id>/read-token`, then calls

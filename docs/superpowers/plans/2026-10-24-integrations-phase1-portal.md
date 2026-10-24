@@ -449,6 +449,8 @@ and on the `Run tests` step `env: PORTAL_TEST_DATABASE_URL: postgres://postgres:
 - Account deletion with the 14-day window (needs Auth endpoints to disable, restore and finally delete accounts).
 - The official Discord app (needs the Station agent API) and bring-your-own Discord (Station/Astation).
 - Astation's approval UI, the Station's report client and feed polling (Astation/Station owners; this plan documents the contract).
+- The per-account JSON export of integrations, events and receipts (spec §3.6); deferred, with account deletion.
+- Auth exempting or raising its per-address `/manage/v1` limit for the Portal's `manage` client, or keying it by client (an Auth change; see "Stations And Integrations" in `docs/platform.md`).
 
 ---
 
