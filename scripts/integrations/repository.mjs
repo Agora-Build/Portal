@@ -130,7 +130,8 @@ export function createRepository(db) {
     },
 
     async insertIntegration({ id, ownerAccount, stationId, kind, name, scopes, quotaPerSecond, expiresAt }, client) {
-      await run(client, "INSERT INTO integrations (id, owner_account, station_id, kind, name, scopes, state, quota_per_second, expires_at) VALUES ($1, $2, $3, $4, $5, $6, 'awaiting_approval', $7, $8) ON CONFLICT (id) DO NOTHING", [id, ownerAccount, stationId, kind, name, scopes, quotaPerSecond, when(expiresAt)]);
+      const { rowCount } = await run(client, "INSERT INTO integrations (id, owner_account, station_id, kind, name, scopes, state, quota_per_second, expires_at) VALUES ($1, $2, $3, $4, $5, $6, 'awaiting_approval', $7, $8) ON CONFLICT (id) DO NOTHING", [id, ownerAccount, stationId, kind, name, scopes, quotaPerSecond, when(expiresAt)]);
+      return rowCount > 0;
     },
 
     async integration(id, client) {
@@ -181,9 +182,10 @@ export function createRepository(db) {
       return rows.map(eventRow);
     },
 
+    // Unlike the feed, an integration's own history names who acted.
     async eventsFor(integrationId, limit = 100, client) {
-      const { rows } = await run(client, "SELECT id, at, integration_id, kind, state, reason, details FROM integration_events WHERE integration_id = $1 ORDER BY id DESC LIMIT $2", [integrationId, limit]);
-      return rows.map(eventRow);
+      const { rows } = await run(client, "SELECT id, at, integration_id, actor, kind, state, reason, details FROM integration_events WHERE integration_id = $1 ORDER BY id DESC LIMIT $2", [integrationId, limit]);
+      return rows.map((row) => ({ ...eventRow(row), actor: row.actor }));
     },
 
     async latestCursor(stationId, client) {

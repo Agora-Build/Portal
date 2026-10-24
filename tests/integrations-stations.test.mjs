@@ -5,75 +5,13 @@ import { createRepository } from "../scripts/integrations/repository.mjs";
 import { createIntegrationService, fromManage } from "../scripts/integrations/service.mjs";
 import { TokenError } from "../scripts/idp.mjs";
 import { AppError } from "../scripts/store.mjs";
+import { fakeManage } from "./helpers/fake-manage.mjs";
 import { testDatabase } from "./helpers/test-db.mjs";
 
 const OWNER = "ab" + "0".repeat(25) + "1";
 const MEMBER = "ab" + "0".repeat(25) + "2";
 const STRANGER = "ab" + "0".repeat(25) + "3";
 const REPORT_KEY = { kty: "EC", crv: "P-256", x: "test-x", y: "test-y" };
-
-// An in-memory Auth /manage/v1 following the actor rules of Auth's docs/integrating.md.
-function fakeManage() {
-  const stations = [];
-  let next = 0;
-  const valid = (account) => typeof account === "string" && /^ab[0-9A-HJKMNP-TV-Z]{26}$/.test(account);
-  const fail = (status, code) => { throw new ManageError(status, code); };
-  const auth = {
-    down: false,
-    calls: [],
-    records: stations,
-    find(id) {
-      const station = stations.find((entry) => entry.id === id && entry.status === "active");
-      if (!station) fail(404, "not_found");
-      return station;
-    },
-    async gate(name, actor, ...accounts) {
-      auth.calls.push(name);
-      if (auth.down) fail(503, "unavailable");
-      if (![actor, ...accounts].every(valid)) fail(400, "invalid_request");
-    },
-    async registerStation({ origin, owner, reportKey, actor }) {
-      await auth.gate("registerStation", actor, owner);
-      if (actor !== owner) fail(403, "forbidden");
-      if (!reportKey || typeof reportKey !== "object") fail(400, "jwk");
-      if (stations.some((entry) => entry.origin === origin && entry.status === "active")) fail(409, "origin_taken");
-      next += 1;
-      const station = { id: "st" + next, origin, owner, status: "active", reportClientId: "s-st" + next, createdAt: new Date(Date.now() - 1000).toISOString(), members: [] };
-      stations.push(station);
-      return { id: station.id, origin, owner, status: "active", reportClientId: station.reportClientId };
-    },
-    async stations(account) {
-      await auth.gate("stations", account);
-      return stations.filter((entry) => entry.status === "active" && (entry.owner === account || entry.members.some((member) => member.account === account)))
-        .map(({ id, origin, owner, status, reportClientId, createdAt }) => ({ id, origin, owner, status, reportClientId, createdAt }));
-    },
-    async removeStation(id, actor) {
-      await auth.gate("removeStation", actor);
-      const station = auth.find(id);
-      if (station.owner !== actor) fail(403, "forbidden");
-      station.status = "removed";
-    },
-    async members(id, actor) {
-      await auth.gate("members", actor);
-      const station = auth.find(id);
-      if (station.owner !== actor && !station.members.some((member) => member.account === actor)) fail(403, "forbidden");
-      return { owner: station.owner, members: station.members.map((member) => ({ ...member })) };
-    },
-    async addMember(id, account, actor) {
-      await auth.gate("addMember", actor, account);
-      const station = auth.find(id);
-      if (station.owner !== actor) fail(403, "forbidden");
-      if (!station.members.some((member) => member.account === account)) station.members.push({ account, addedAt: new Date().toISOString() });
-    },
-    async removeMember(id, account, actor) {
-      await auth.gate("removeMember", actor, account);
-      const station = auth.find(id);
-      if (station.owner !== actor && account !== actor) fail(403, "forbidden");
-      station.members = station.members.filter((member) => member.account !== account);
-    }
-  };
-  return auth;
-}
 
 async function setup(t, { wrap = (repository) => repository } = {}) {
   const db = await testDatabase(t);

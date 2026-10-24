@@ -5,12 +5,18 @@ import { TokenError } from "../idp.mjs";
 import { ACCOUNT_ID, AppError } from "../store.mjs";
 import { ManageError } from "./auth-manage.mjs";
 import { checkProof, stationOrigin, WELL_KNOWN_PATH } from "./proof.mjs";
-import { transition } from "./states.mjs";
+import { effectiveState, transition } from "./states.mjs";
 
 const CHALLENGE_LIFETIME = 600000;
 const CHALLENGES_PER_HOUR = 10;
 const REPORT_KEY_MAX = 4096;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DAY = 86400000;
+const SCOPES = ["agent.view", "agent.prompt", "agent.approve", "agent.interrupt", "agent.terminal"];
+const PRIVATE_MEMBERS = ["d", "p", "q", "dp", "dq", "qi", "k"];
+const R9_SVC = /^[0-9a-f]{64}$/;
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+const STOPPED = ["revoking", "revoked"];
 
 const failure = (status, message, code, extra = {}) => new AppError(status, message, { code, ...extra });
 const notFound = () => failure(404, "This Station or integration was not found.", "not_found");
@@ -56,10 +62,61 @@ function memberAccount(value) {
   return value;
 }
 
+function integrationName(value) {
+  const name = typeof value === "string" ? value.trim() : "";
+  if (!name || name.length > 80 || CONTROL.test(name)) throw failure(400, "Name the integration in 1 to 80 characters, without control characters.", "name");
+  return name;
+}
+
+// Unique scopes from SCOPES; agent.view is always granted, so it is added when missing.
+function integrationScopes(value) {
+  if (!Array.isArray(value) || value.some((scope) => !SCOPES.includes(scope)) || new Set(value).size !== value.length) {
+    throw failure(400, "Choose scopes from " + SCOPES.join(", ") + ", each at most once.", "scopes");
+  }
+  return value.includes("agent.view") ? [...value] : ["agent.view", ...value];
+}
+
+function wholeNumber(value, min, max, message, code) {
+  if (!Number.isInteger(value) || value < min || value > max) throw failure(400, message, code);
+  return value;
+}
+
+const expiryDays = (value) => wholeNumber(value, 1, 90, "Choose an expiry of 1 to 90 days.", "expiry");
+const quota = (value) => wholeNumber(value, 1, 10000, "Choose a quota of 1 to 10000 token requests per second.", "quota");
+
+// Auth checks that the key is usable; Portal only refuses what is not a JWK object or carries private members.
+function publicKey(value) {
+  if (!plainObject(value)) throw failure(400, "Send the public key as a JSON Web Key object.", "jwk");
+  if (PRIVATE_MEMBERS.some((member) => Object.hasOwn(value, member))) throw failure(400, "Send only the public key.", "private_key");
+  return value;
+}
+
+function notRevoked(row) {
+  if (STOPPED.includes(row.state)) throw failure(409, MANAGE_CONFLICTS.revoked, "revoked");
+}
+
+// transition, except that resuming a paused row with no recorded prior state goes back to where approval left it.
+function step(row, event, at) {
+  if (event === "resume" && row.state === "paused" && row.resumeState == null) {
+    return transition({ ...row, resumeState: row.approvedAt ? "provisioning" : "awaiting_approval" }, event, at);
+  }
+  return transition(row, event, at);
+}
+
 export function createIntegrationService({
   repository, db, manage, stationFetch, exchange, now = Date.now, log = () => {}, ids = randomUUID,
-  challengeValue = () => randomBytes(32).toString("base64url")
+  challengeValue = () => randomBytes(32).toString("base64url"), notify = () => {}
 }) {
+  // Tells the Station about a committed change; a failed nudge never fails the change itself.
+  function changed(stationId) {
+    try {
+      const result = notify(stationId);
+      if (typeof result?.catch === "function") result.catch(() => log("Station notify failed."));
+    } catch {
+      log("Station notify failed.");
+    }
+  }
+
   // Revokes, inside the caller's transaction, each integration `pick` selects on the Station; already revoking or
   // revoked ones are left as they are. `direct` sets revoked at once (Auth has already removed the Station).
   async function revokeOn(client, stationId, pick, { actor, reason, direct = false }) {
@@ -121,6 +178,112 @@ export function createIntegrationService({
         return true;
       });
       if (removed) log("Station member removed in Portal: absent from Auth.");
+    }
+  }
+
+  function integrationView(row, role, origin) {
+    return {
+      id: row.id, kind: row.kind, name: row.name, stationId: row.stationId, stationOrigin: origin, scopes: row.scopes,
+      state: effectiveState(row, now()), pausedFrom: row.resumeState, r9Svc: row.r9Svc, quotaPerSecond: row.quotaPerSecond,
+      expiresAt: row.expiresAt, approvedAt: row.approvedAt, lastError: row.lastError, createdAt: row.createdAt, role
+    };
+  }
+
+  async function viewOf(row, role) {
+    return integrationView(row, role, (await repository.station(row.stationId))?.origin ?? null);
+  }
+
+  // The row and the account's part in it: "owner", "station_owner" (it owns the integration's Station) or null.
+  async function access(accountId, id) {
+    const row = typeof id === "string" && id ? await repository.integration(id) : null;
+    if (!row) throw notFound();
+    if (row.ownerAccount === accountId) return { row, role: "owner" };
+    const station = await repository.station(row.stationId);
+    return { row, role: station?.ownerAccount === accountId ? "station_owner" : null };
+  }
+
+  // For changes only the integration's owner may make; a Station owner sees the integration, so it is told why.
+  async function owned(accountId, id) {
+    const { row, role } = await access(accountId, id);
+    if (role === "station_owner") throw failure(403, "Only the integration's owner can do this.", "forbidden");
+    if (!role) throw notFound();
+    return row;
+  }
+
+  // The Portal half of a change Auth has already made: under the row lock `apply` re-checks the current row and returns
+  // `{ fields, event }` (or null for nothing to do). The Station is notified after commit.
+  async function commit(id, apply) {
+    const result = await db.transaction(async (client) => {
+      const current = await repository.integrationForUpdate(id, client);
+      if (!current) throw notFound();
+      const change = apply(current);
+      if (!change) return { row: current, done: false };
+      const { fields = {}, event } = change;
+      if (Object.keys(fields).length) await repository.updateIntegration(id, fields, client);
+      if (event) {
+        await repository.appendEvent({ stationId: current.stationId, integrationId: id, accountId: current.ownerAccount, state: fields.state ?? current.state, ...event }, client);
+      }
+      return { row: await repository.integration(id, client), done: true };
+    });
+    if (result.done) changed(result.row.stationId);
+    return result.row;
+  }
+
+  // pause and revoke: the integration's owner or its Station's owner. Anyone else is left to Auth, which refuses them.
+  async function stop(accountId, id, event) {
+    const { row, role } = await access(accountId, id);
+    step(row, event, now());
+    if (role && event === "revoke" && STOPPED.includes(row.state)) return viewOf(row, role);
+    await viaAuth(() => manage.changeIntegration(id, { status: event === "pause" ? "paused" : "revoked" }, accountId));
+    // Auth allowed it, so Auth counts this account the Station's owner even if Portal has not caught up.
+    const by = role ?? "station_owner";
+    const kind = event === "pause" ? "integration_paused" : "integration_revoked";
+    const updated = await commit(id, (current) => {
+      if (event === "revoke" && STOPPED.includes(current.state)) return null;
+      return { fields: step(current, event, now()), event: { actor: accountId, kind, reason: by === "owner" ? "owner" : "station_owner" } };
+    });
+    return viewOf(updated, by);
+  }
+
+  // Brings Portal's integrations in line with Auth's list of the account's own. Auth is authoritative, so following it
+  // is not held back by expiry: transitions are checked at time 0, before any expiry.
+  async function reconcileIntegrations(listed) {
+    for (const entry of listed) {
+      const id = entry.clientId;
+      let touched = false;
+      if (!(await repository.integration(id))) {
+        if (!(await repository.station(entry.stationId))) {
+          log("Integration not reconciled: its Station is unknown to Portal.");
+          continue;
+        }
+        touched = await db.transaction(async (client) => {
+          const expiresAt = entry.expiresAt ?? new Date(now() + 30 * DAY).toISOString();
+          if (!(await repository.insertIntegration({ id, ownerAccount: entry.owner, stationId: entry.stationId, kind: "custom_app", name: entry.name, scopes: entry.scopes, quotaPerSecond: entry.quotaPerSecond, expiresAt }, client))) return false;
+          await repository.appendEvent({ stationId: entry.stationId, integrationId: id, accountId: entry.owner, actor: "system", kind: "integration_reconciled", state: "awaiting_approval" }, client);
+          return true;
+        });
+        if (touched) log("Integration reconciled from Auth: missing in Portal.");
+      }
+      const followed = await db.transaction(async (client) => {
+        const row = await repository.integrationForUpdate(id, client);
+        const fields = {};
+        if (entry.expiresAt && new Date(entry.expiresAt).getTime() !== new Date(row.expiresAt).getTime()) fields.expiresAt = entry.expiresAt;
+        if (entry.quotaPerSecond !== row.quotaPerSecond) fields.quotaPerSecond = entry.quotaPerSecond;
+        if ((entry.r9Svc ?? null) !== row.r9Svc) fields.r9Svc = entry.r9Svc ?? null;
+        let event = null;
+        if (entry.status === "revoked" && !STOPPED.includes(row.state)) event = ["revoke", "integration_revoked"];
+        else if (entry.status === "paused" && row.state !== "paused" && !STOPPED.includes(row.state)) event = ["pause", "integration_paused"];
+        else if (entry.status === "active" && row.state === "paused") event = ["resume", "integration_resumed"];
+        if (event) Object.assign(fields, step(row, event[0], 0));
+        if (!Object.keys(fields).length) return false;
+        await repository.updateIntegration(id, fields, client);
+        if (event) {
+          await repository.appendEvent({ stationId: row.stationId, integrationId: id, accountId: row.ownerAccount, actor: "system", kind: event[1], state: fields.state, reason: "reconciled" }, client);
+        }
+        return true;
+      });
+      if (followed) log("Integration reconciled from Auth: changed in Auth.");
+      if (touched || followed) changed(entry.stationId);
     }
   }
 
@@ -224,6 +387,112 @@ export function createIntegrationService({
         if (error.status === 503) throw failure(503, "Auth is unavailable. Try again shortly.", "unavailable");
         throw failure(403, "Auth did not allow reading this Station.", "exchange");
       }
+    },
+
+    async createIntegration(accountId, { stationId, name, scopes = [], publicJwk, quotaPerSecond = 200, expiresInDays = 30 } = {}) {
+      const fields = { name: integrationName(name), scopes: integrationScopes(scopes), quotaPerSecond: quota(quotaPerSecond) };
+      expiryDays(expiresInDays);
+      publicKey(publicJwk);
+      const station = (await repository.stationsFor(accountId)).find((entry) => entry.id === stationId);
+      if (!station) throw notFound();
+      const expiresAt = new Date(now() + expiresInDays * DAY).toISOString();
+      const created = await viaAuth(() => manage.createIntegration({ owner: accountId, stationId, ...fields, publicJwk, expiresAt, actor: accountId }));
+      await db.transaction(async (client) => {
+        await repository.insertIntegration({ id: created.clientId, ownerAccount: accountId, stationId, kind: "custom_app", ...fields, expiresAt: created.expiresAt ?? expiresAt }, client);
+        await repository.appendEvent({ stationId, integrationId: created.clientId, accountId, actor: accountId, kind: "integration_created", state: "awaiting_approval", details: { scopes: fields.scopes, name: fields.name } }, client);
+      });
+      changed(stationId);
+      return integrationView(await repository.integration(created.clientId), "owner", station.origin);
+    },
+
+    // The account's own integrations (reconciled with Auth's list of them) and, read from Portal only, the others on
+    // Stations it owns, which it may pause or revoke.
+    async integrations(accountId) {
+      let listed;
+      try {
+        listed = await manage.integrations(accountId);
+      } catch (error) {
+        if (!(error instanceof ManageError) || fromManage(error).status !== 503) throw fromManage(error);
+        log("Integration list served from Portal: Auth " + error.code + ".");
+      }
+      if (listed) await reconcileIntegrations(listed);
+      const views = [];
+      for (const row of await repository.integrationsFor(accountId)) views.push(await viewOf(row, "owner"));
+      for (const station of await repository.stationsFor(accountId)) {
+        if (station.role !== "owner") continue;
+        for (const row of await repository.integrationsOnStation(station.id)) {
+          if (row.ownerAccount !== accountId) views.push(integrationView(row, "station_owner", station.origin));
+        }
+      }
+      return { integrations: views, stale: !listed };
+    },
+
+    // Called for a native app holding integrations:approve for the owner, so only the owner's integrations exist here.
+    async approve(accountId, id, { r9Svc } = {}) {
+      const row = typeof id === "string" && id ? await repository.integration(id) : null;
+      if (!row || row.ownerAccount !== accountId) throw notFound();
+      if (typeof r9Svc !== "string" || !R9_SVC.test(r9Svc)) throw failure(400, "Send the R9 service fingerprint as 64 lower-case hex characters.", "r9_svc");
+      step(row, "approve", now());
+      await viaAuth(() => manage.changeIntegration(id, { r9Svc }, accountId));
+      const updated = await commit(id, (current) => ({
+        fields: { ...step(current, "approve", now()), r9Svc, approvedBy: accountId, approvedAt: now() },
+        event: { actor: accountId, kind: "integration_approved" }
+      }));
+      return viewOf(updated, "owner");
+    },
+
+    pause: (accountId, id) => stop(accountId, id, "pause"),
+    revoke: (accountId, id) => stop(accountId, id, "revoke"),
+
+    async resume(accountId, id) {
+      const row = await owned(accountId, id);
+      step(row, "resume", now());
+      await viaAuth(() => manage.changeIntegration(id, { status: "active" }, accountId));
+      const updated = await commit(id, (current) => ({ fields: step(current, "resume", now()), event: { actor: accountId, kind: "integration_resumed", reason: "owner" } }));
+      return viewOf(updated, "owner");
+    },
+
+    async renew(accountId, id, { expiresInDays } = {}) {
+      const row = await owned(accountId, id);
+      expiryDays(expiresInDays);
+      step(row, "renew", now());
+      const changedAt = await viaAuth(() => manage.changeIntegration(id, { expiresAt: new Date(now() + expiresInDays * DAY).toISOString() }, accountId));
+      const updated = await commit(id, (current) => {
+        step(current, "renew", now());
+        return { fields: { expiresAt: changedAt.expiresAt }, event: { actor: accountId, kind: "integration_renewed", details: { expiresAt: changedAt.expiresAt } } };
+      });
+      return viewOf(updated, "owner");
+    },
+
+    async settings(accountId, id, { quotaPerSecond } = {}) {
+      const row = await owned(accountId, id);
+      quota(quotaPerSecond);
+      notRevoked(row);
+      const answer = await viaAuth(() => manage.changeIntegration(id, { quotaPerSecond }, accountId));
+      const updated = await commit(id, (current) => {
+        notRevoked(current);
+        return { fields: { quotaPerSecond: answer.quotaPerSecond }, event: { actor: accountId, kind: "integration_settings_changed", details: { quotaPerSecond: answer.quotaPerSecond } } };
+      });
+      return viewOf(updated, "owner");
+    },
+
+    async rotateKey(accountId, id, { publicJwk } = {}) {
+      const row = await owned(accountId, id);
+      publicKey(publicJwk);
+      notRevoked(row);
+      const { kid, overlapEndsAt } = await viaAuth(() => manage.addKey(id, publicJwk, accountId));
+      await commit(id, (current) => {
+        notRevoked(current);
+        return { event: { actor: accountId, kind: "integration_key_added", details: { kid, overlapEndsAt } } };
+      });
+      return { kid, overlapEndsAt };
+    },
+
+    async history(accountId, id) {
+      const { row, role } = await access(accountId, id);
+      if (!role) throw notFound();
+      const events = await repository.eventsFor(row.id);
+      return { events: events.map(({ at, kind, state, reason, actor }) => ({ at, kind, state, reason, actor: actor === accountId ? "you" : actor })) };
     }
   };
 }
