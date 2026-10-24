@@ -281,6 +281,8 @@ test("sharing: the owner shares, members see the Station without its report clie
   if (!s) return;
   await s.register(OWNER, "https://one.example");
   await s.service.share(OWNER, "st1", MEMBER);
+  await s.service.share(OWNER, "st1", MEMBER);
+  assert.equal((await s.events("member_added")).length, 1, "sharing again with a current member records nothing");
   const [added] = await s.events("member_added");
   assert.deepEqual([added.station_id, added.actor, added.account_id], ["st1", OWNER, MEMBER]);
   assert.deepEqual((await s.repository.currentMembers("st1")).map((member) => member.accountId), [MEMBER]);
@@ -382,6 +384,8 @@ test("an account may start at most 10 Station checks an hour", async (t) => {
   for (let index = 0; index < 10; index++) await s.service.createChallenge(OWNER, "https://one.example");
   await assert.rejects(s.service.createChallenge(OWNER, "https://one.example"), refused(429, undefined, "Too many Station checks. Try again later."));
   await s.service.createChallenge(MEMBER, "https://one.example");
+  s.clock.now += 3600001;
+  await s.service.createChallenge(OWNER, "https://one.example");
 });
 
 test("a membership Auth has but Portal lacks is added by the member's next listing", async (t) => {
@@ -395,4 +399,40 @@ test("a membership Auth has but Portal lacks is added by the member's next listi
   assert.deepEqual([added.actor, added.account_id, added.reason], ["system", MEMBER, "reconciled"]);
   await s.service.stations(MEMBER);
   assert.equal((await s.events("member_added")).length, 1);
+});
+
+test("a membership Auth has dropped is removed by the member's next listing, revoking their integrations there", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await s.register(OWNER, "https://one.example");
+  await s.register(OWNER, "https://two.example");
+  await s.service.share(OWNER, "st1", MEMBER);
+  await s.service.share(OWNER, "st2", MEMBER);
+  await seedIntegration(s.repository, "i-ready", "st1", MEMBER, "ready");
+  await seedIntegration(s.repository, "i-waiting", "st1", MEMBER, "awaiting_approval");
+  await seedIntegration(s.repository, "i-owner", "st1", OWNER, "ready");
+  await seedIntegration(s.repository, "i-other", "st2", MEMBER, "ready");
+  s.manage.records[0].members = [];
+  s.manage.down = true;
+  assert.deepEqual((await s.service.stations(MEMBER)).stations.map((station) => station.id), ["st1", "st2"], "nothing changes while Auth is down");
+  assert.equal((await s.events("member_removed")).length, 0);
+  s.manage.down = false;
+  const listed = await s.service.stations(MEMBER);
+  assert.deepEqual(listed.stations.map((station) => station.id), ["st2"]);
+  assert.deepEqual(await s.repository.currentMembers("st1"), []);
+  assert.equal((await s.repository.integration("i-ready")).state, "revoking");
+  assert.equal((await s.repository.integration("i-waiting")).state, "revoked");
+  assert.equal((await s.repository.integration("i-owner")).state, "ready");
+  assert.equal((await s.repository.integration("i-other")).state, "ready");
+  const revoked = await s.events("integration_revoked");
+  assert.deepEqual(revoked.map((event) => [event.integration_id, event.state, event.reason, event.actor, event.account_id]), [
+    ["i-ready", "revoking", "member_removed", "system", MEMBER],
+    ["i-waiting", "revoked", "member_removed", "system", MEMBER]
+  ]);
+  const [removed] = await s.events("member_removed");
+  assert.deepEqual([removed.station_id, removed.actor, removed.account_id, removed.reason], ["st1", "system", MEMBER, "reconciled"]);
+  await assert.rejects(s.service.readToken(MEMBER, "member-id-token", "st1"), refused(404, "not_found"));
+  await s.service.stations(MEMBER);
+  assert.equal((await s.events("member_removed")).length, 1, "reconciling twice adds nothing");
+  assert.equal((await s.repository.station("st1")).status, "active", "the owner's Station stays");
 });

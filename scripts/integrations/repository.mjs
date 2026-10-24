@@ -74,8 +74,8 @@ export function createRepository(db) {
   const run = (client, text, values) => (client || db.pool).query(text, values);
 
   return {
-    async createChallenge({ id, accountId, origin, value, expiresAt }, client) {
-      await run(client, "INSERT INTO station_challenges (id, account_id, origin, value, expires_at) VALUES ($1, $2, $3, $4, $5)", [id, accountId, origin, value, when(expiresAt)]);
+    async createChallenge({ id, accountId, origin, value, expiresAt, createdAt }, client) {
+      await run(client, "INSERT INTO station_challenges (id, account_id, origin, value, expires_at, created_at) VALUES ($1, $2, $3, $4, $5, $6)", [id, accountId, origin, value, when(expiresAt), when(createdAt)]);
     },
 
     async takeChallenge(id, accountId, now, client) {
@@ -89,7 +89,8 @@ export function createRepository(db) {
     },
 
     async insertStation({ id, origin, ownerAccount, reportClientId, verifiedAt }, client) {
-      await run(client, "INSERT INTO stations (id, origin, owner_account, report_client_id, status, verified_at) VALUES ($1, $2, $3, $4, 'active', $5) ON CONFLICT (id) DO NOTHING", [id, origin, ownerAccount, reportClientId, when(verifiedAt)]);
+      const { rowCount } = await run(client, "INSERT INTO stations (id, origin, owner_account, report_client_id, status, verified_at) VALUES ($1, $2, $3, $4, 'active', $5) ON CONFLICT (id) DO NOTHING", [id, origin, ownerAccount, reportClientId, when(verifiedAt)]);
+      return rowCount > 0;
     },
 
     async station(id, client) {
@@ -114,7 +115,8 @@ export function createRepository(db) {
     },
 
     async addMember(stationId, accountId, addedBy, now, client) {
-      await run(client, "INSERT INTO station_members (station_id, account_id, added_by, added_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING", [stationId, accountId, addedBy, when(now)]);
+      const { rowCount } = await run(client, "INSERT INTO station_members (station_id, account_id, added_by, added_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING", [stationId, accountId, addedBy, when(now)]);
+      return rowCount > 0;
     },
 
     async removeMember(stationId, accountId, removedBy, now, client) {

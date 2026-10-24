@@ -85,40 +85,55 @@ export function createIntegrationService({
     const known = new Set(listed.map((station) => station.id));
     for (const entry of listed) {
       if (!(await repository.station(entry.id))) {
-        await db.transaction(async (client) => {
-          await repository.insertStation({ id: entry.id, origin: entry.origin, ownerAccount: entry.owner, reportClientId: entry.reportClientId, verifiedAt: entry.createdAt }, client);
+        // The insert's own answer gates the event, so concurrent listings record the Station once.
+        const added = await db.transaction(async (client) => {
+          if (!(await repository.insertStation({ id: entry.id, origin: entry.origin, ownerAccount: entry.owner, reportClientId: entry.reportClientId, verifiedAt: entry.createdAt }, client))) return false;
           await repository.appendEvent({ stationId: entry.id, accountId: entry.owner, actor: "system", kind: "station_reconciled" }, client);
+          return true;
         });
-        log("Station reconciled from Auth: missing in Portal.");
+        if (added) log("Station reconciled from Auth: missing in Portal.");
       }
       if (entry.owner !== accountId && !(await repository.currentMembers(entry.id)).some((member) => member.accountId === accountId)) {
-        await db.transaction(async (client) => {
-          await repository.addMember(entry.id, accountId, "system", now(), client);
+        const added = await db.transaction(async (client) => {
+          if (!(await repository.addMember(entry.id, accountId, "system", now(), client))) return false;
           await repository.appendEvent({ stationId: entry.id, accountId, actor: "system", kind: "member_added", reason: "reconciled" }, client);
+          return true;
         });
-        log("Station member reconciled from Auth: missing in Portal.");
+        if (added) log("Station member reconciled from Auth: missing in Portal.");
       }
     }
     for (const station of await repository.stationsFor(accountId)) {
-      if (station.role !== "owner" || known.has(station.id)) continue;
-      await db.transaction(async (client) => {
-        await repository.markStationRemoved(station.id, now(), client);
-        await revokeOn(client, station.id, () => true, { actor: "system", reason: "reconciled", direct: true });
-        await repository.appendEvent({ stationId: station.id, accountId, actor: "system", kind: "station_removed", reason: "reconciled" }, client);
+      if (known.has(station.id)) continue;
+      if (station.role === "owner") {
+        await db.transaction(async (client) => {
+          await repository.markStationRemoved(station.id, now(), client);
+          await revokeOn(client, station.id, () => true, { actor: "system", reason: "reconciled", direct: true });
+          await repository.appendEvent({ stationId: station.id, accountId, actor: "system", kind: "station_removed", reason: "reconciled" }, client);
+        });
+        log("Station removed in Portal: absent from Auth.");
+        continue;
+      }
+      // Auth no longer counts this account a member (and has revoked its integrations there); Portal follows.
+      const removed = await db.transaction(async (client) => {
+        if (!(await repository.removeMember(station.id, accountId, "system", now(), client))) return false;
+        await revokeOn(client, station.id, (row) => row.ownerAccount === accountId, { actor: "system", reason: "member_removed" });
+        await repository.appendEvent({ stationId: station.id, accountId, actor: "system", kind: "member_removed", reason: "reconciled" }, client);
+        return true;
       });
-      log("Station removed in Portal: absent from Auth.");
+      if (removed) log("Station member removed in Portal: absent from Auth.");
     }
   }
 
   return {
     async createChallenge(accountId, originInput) {
       const origin = stationOrigin(originInput);
+      // A soft limit: check, then insert, so concurrent requests may pass it by a few.
       const since = new Date(now() - 3600000);
       if (await repository.challengesSince(accountId, since) >= CHALLENGES_PER_HOUR) throw new AppError(429, "Too many Station checks. Try again later.");
       const challengeId = ids();
       const value = challengeValue();
       const expiresAt = new Date(now() + CHALLENGE_LIFETIME).toISOString();
-      await repository.createChallenge({ id: challengeId, accountId, origin, value, expiresAt });
+      await repository.createChallenge({ id: challengeId, accountId, origin, value, expiresAt, createdAt: now() });
       return { challengeId, origin, value, url: origin + WELL_KNOWN_PATH, expiresAt };
     },
 
@@ -168,8 +183,9 @@ export function createIntegrationService({
       if (member === station.ownerAccount) throw failure(400, "The owner already has this Station.", "account");
       await viaAuth(() => manage.addMember(stationId, member, accountId));
       await db.transaction(async (client) => {
-        await repository.addMember(stationId, member, accountId, now(), client);
-        await repository.appendEvent({ stationId, accountId: member, actor: accountId, kind: "member_added" }, client);
+        if (await repository.addMember(stationId, member, accountId, now(), client)) {
+          await repository.appendEvent({ stationId, accountId: member, actor: accountId, kind: "member_added" }, client);
+        }
       });
     },
 

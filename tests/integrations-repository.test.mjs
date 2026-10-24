@@ -33,7 +33,7 @@ test("challenges are single-use, owned and expiring", async (t) => {
 });
 
 test("challengesSince counts an account's challenges created since a time, used or not", async (t) => {
-  const { repo, db } = await setup(t);
+  const { repo } = await setup(t);
   if (!repo) return;
   const since = new Date(Date.now() - 3600000);
   assert.equal(await repo.challengesSince("ab1", since), 0);
@@ -42,18 +42,17 @@ test("challengesSince counts an account's challenges created since a time, used 
   await repo.takeChallenge(used, "ab1", Date.now());
   await repo.createChallenge({ id: randomUUID(), accountId: "ab1", origin: "https://b.example", value: "v2", expiresAt: new Date(Date.now() + 600000) });
   await repo.createChallenge({ id: randomUUID(), accountId: "ab2", origin: "https://a.example", value: "v3", expiresAt: new Date(Date.now() + 600000) });
-  const old = randomUUID();
-  await repo.createChallenge({ id: old, accountId: "ab1", origin: "https://c.example", value: "v4", expiresAt: new Date(Date.now() + 600000) });
-  await db.pool.query("UPDATE station_challenges SET created_at = $2 WHERE id = $1", [old, new Date(Date.now() - 2 * 3600000)]);
+  await repo.createChallenge({ id: randomUUID(), accountId: "ab1", origin: "https://c.example", value: "v4", expiresAt: new Date(Date.now() + 600000), createdAt: new Date(Date.now() - 2 * 3600000) });
   assert.equal(await repo.challengesSince("ab1", since), 2);
+  assert.equal(await repo.challengesSince("ab1", new Date(Date.now() - 3 * 3600000)), 3);
   assert.equal(await repo.challengesSince("ab2", since), 1);
 });
 
 test("stations: insert is idempotent, lookups, roles and removal", async (t) => {
   const { repo } = await setup(t);
   if (!repo) return;
-  await station(repo, "st1");
-  await station(repo, "st1", "ab9");
+  assert.equal(await repo.insertStation({ id: "st1", origin: "https://st1.example", ownerAccount: "ab1", reportClientId: "s-st1", verifiedAt: NOW }), true);
+  assert.equal(await repo.insertStation({ id: "st1", origin: "https://st1.example", ownerAccount: "ab9", reportClientId: "s-st1", verifiedAt: NOW }), false);
   const found = await repo.station("st1");
   assert.equal(found.ownerAccount, "ab1");
   assert.equal(found.reportClientId, "s-st1");
@@ -79,8 +78,8 @@ test("members: add is a no-op when current, re-adding after removal keeps histor
   const { repo, db } = await setup(t);
   if (!repo) return;
   await station(repo, "st1");
-  await repo.addMember("st1", "ab2", "ab1", NOW);
-  await repo.addMember("st1", "ab2", "ab1", later(1000));
+  assert.equal(await repo.addMember("st1", "ab2", "ab1", NOW), true);
+  assert.equal(await repo.addMember("st1", "ab2", "ab1", later(1000)), false);
   assert.deepEqual((await repo.currentMembers("st1")).map((m) => m.accountId), ["ab2"]);
   assert.equal(await repo.removeMember("st1", "ab2", "ab1", later(2000)), true);
   assert.equal(await repo.removeMember("st1", "ab2", "ab1", later(2500)), false);
