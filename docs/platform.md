@@ -585,15 +585,16 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
 | `POST /api/integrations/<id>/renew` `{ expiresInDays }` | browser | new expiry counted from now |
 | `POST /api/integrations/<id>/settings` `{ quotaPerSecond }` | browser | change the quota |
 | `GET /api/integrations/<id>/events` | browser | history (`actor` is `you` for your own changes) |
-| `GET /api/integrations` | browser, or `integrations:read` | the account's integrations, and others on Stations it owns |
-| `POST /api/integrations/<id>/approval` `{ r9Svc }` | `integrations:approve` | native approval; `r9Svc` is 64 lower-case hex characters |
-| `POST /api/stations/reports` | `station.report` | a Station's report |
-| `GET /api/stations/changes?cursor=` | `station.report` | the Station's change feed |
+| `GET /api/integrations` | browser | the account's integrations, and others on Stations it owns |
+| `GET /api/v1/integrations` | token, `integrations:read` | the same list |
+| `POST /api/v1/integrations/<id>/approval` `{ r9Svc }` | token, `integrations:approve` | native approval; `r9Svc` is 64 lower-case hex characters |
+| `POST /api/v1/stations/reports` | token, `station.report` | a Station's report |
+| `GET /api/v1/stations/changes?cursor=` | token, `station.report` | the Station's change feed |
 
-The last four are on the versioned API, so apps call
-`<origin>/api/v1/integrations`, `/api/v1/integrations/<id>/approval`,
-`/api/v1/stations/reports` and `/api/v1/stations/changes`. Everything else
-on this list is browser-only.
+Apps and Stations that send an access token use `/api/v1/` only: a bearer
+token on the unversioned `/api/...` path gets 404 naming the `/api/v1` path.
+Browser routes use `/api/...` with the cookie and do not accept tokens, except
+that the browser may also read `GET /api/v1/integrations`.
 
 Create takes a name of 1 to 80 characters, scopes from `agent.view`,
 `agent.prompt`, `agent.approve`, `agent.interrupt` and `agent.terminal` (each at
@@ -604,12 +605,12 @@ owner approves it in Astation, which sends the approval with an
 `integrations:approve` token for the owner. An account that is neither an
 integration's owner nor its Station's owner gets 404 for it. Limits per minute:
 Station registration 10 and integration creation 20 per account, read tokens 30
-per account, Station reports 600 and feed reads 120 per Station.
+per account, Station challenges 10 per hour per account, Station reports 600 and feed reads 120 per Station.
 
 Common error codes: `not_found` (404), `forbidden` (403), `invalid_state` and
 `expired` (409, the action does not fit the current state), `revoked` (409),
 `origin_taken` and `duplicate_key` (409, from Auth), `challenge` (400, expired or
-used), `proof` (422), `unavailable` (503, Auth unreachable). Field mistakes are
+used), `proof` (422), `station` (403, the report client is not a registered Station), `exchange` (403, Auth refused the read token), `unavailable` (503, Auth unreachable); too many challenges or requests are 429. Field mistakes are
 400 with `name`, `scopes`, `quota`, `expiry`, `jwk`, `private_key`, `account`,
 `report_key`, `r9_svc`, `reason`, `state`, `report` or `cursor`.
 
@@ -625,8 +626,8 @@ used), `proof` (422), `unavailable` (503, Auth unreachable). Field mistakes are
 | `revoking` | revoked at Auth; the Station has not confirmed | the Station reports `revoked` |
 | `revoked` | final | nothing |
 
-The Portal never sets `ready` itself. A pause is allowed from any state before
-`revoking`; a report received while paused updates the state to return to.
+The Portal never sets `ready` itself. Pause is allowed from `awaiting_approval`, `provisioning`,
+`waiting_for_host` and `ready` (not when expired); a report received while paused updates the state to return to.
 Revoking, removing a Station and unsharing a Station all set the affected
 integrations to `revoking` (an integration still awaiting approval goes straight
 to `revoked`; so does one found missing at Auth when the lists are reconciled). Expiry
@@ -637,7 +638,7 @@ or have their quota changed.
 ### For Station Builders
 
 **Proof of control.** To register, the Station's owner asks for a check on the
-Station's origin (`https://host`, no path, port or IP address). The Portal issues
+Station's origin: `https://host` with a dotted host name, optionally a port (not 0), and no path, user name, query, fragment or IP address. The Portal issues
 a random value valid 10 minutes, once. The Station must serve exactly that value
 at `<origin>/.well-known/agora-build-station`. The Portal fetches it over HTTPS
 only: no redirects, a 5-second timeout, a body of at most 1024 bytes, status 200,
