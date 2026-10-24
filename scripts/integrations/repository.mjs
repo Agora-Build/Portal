@@ -83,6 +83,11 @@ export function createRepository(db) {
       return rows[0] ? { origin: rows[0].origin, value: rows[0].value } : null;
     },
 
+    async challengesSince(accountId, since, client) {
+      const { rows } = await run(client, "SELECT count(*)::int AS n FROM station_challenges WHERE account_id = $1 AND created_at > $2", [accountId, when(since)]);
+      return rows[0].n;
+    },
+
     async insertStation({ id, origin, ownerAccount, reportClientId, verifiedAt }, client) {
       await run(client, "INSERT INTO stations (id, origin, owner_account, report_client_id, status, verified_at) VALUES ($1, $2, $3, $4, 'active', $5) ON CONFLICT (id) DO NOTHING", [id, origin, ownerAccount, reportClientId, when(verifiedAt)]);
     },

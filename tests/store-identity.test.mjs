@@ -439,6 +439,21 @@ test("actor resolves an account session, a guest profile session, or nothing", a
   assert.deepEqual(await store.actor(joined.token), { kind: null });
 });
 
+test("sessionIdToken answers the account session's ID token, and null for guests, unknown or ended sessions", async () => {
+  const store = createStore(seed, file(), { log: silent });
+  assert.equal(await store.sessionIdToken(""), null);
+  assert.equal(await store.sessionIdToken(undefined), null);
+  assert.equal(await store.sessionIdToken("unknown"), null);
+  const guest = await store.join(profile("Guest two"));
+  assert.equal(await store.sessionIdToken(guest.token), null);
+  const { token } = await store.signIn({ sub: sub(11), sid: "s", name: "Ida", idToken: "ida-id-token" });
+  assert.equal(await store.sessionIdToken(token), "ida-id-token");
+  const bare = await store.signIn({ sub: sub(12), sid: "s2", name: "Jo" });
+  assert.equal(await store.sessionIdToken(bare.token), null);
+  await store.endSession(token);
+  assert.equal(await store.sessionIdToken(token), null);
+});
+
 test("removing a public profile keeps the account signed in and deletes the profile's rooms", async () => {
   const store = createStore(seed, file(), { log: silent });
   const { token } = await store.signIn({ sub: sub(11), sid: "s", name: "Ida", idToken: "t" });

@@ -32,6 +32,23 @@ test("challenges are single-use, owned and expiring", async (t) => {
   assert.equal(await repo.takeChallenge(old, "ab1", later(2000)), null);
 });
 
+test("challengesSince counts an account's challenges created since a time, used or not", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  const since = new Date(Date.now() - 3600000);
+  assert.equal(await repo.challengesSince("ab1", since), 0);
+  const used = randomUUID();
+  await repo.createChallenge({ id: used, accountId: "ab1", origin: "https://a.example", value: "v1", expiresAt: new Date(Date.now() + 600000) });
+  await repo.takeChallenge(used, "ab1", Date.now());
+  await repo.createChallenge({ id: randomUUID(), accountId: "ab1", origin: "https://b.example", value: "v2", expiresAt: new Date(Date.now() + 600000) });
+  await repo.createChallenge({ id: randomUUID(), accountId: "ab2", origin: "https://a.example", value: "v3", expiresAt: new Date(Date.now() + 600000) });
+  const old = randomUUID();
+  await repo.createChallenge({ id: old, accountId: "ab1", origin: "https://c.example", value: "v4", expiresAt: new Date(Date.now() + 600000) });
+  await db.pool.query("UPDATE station_challenges SET created_at = $2 WHERE id = $1", [old, new Date(Date.now() - 2 * 3600000)]);
+  assert.equal(await repo.challengesSince("ab1", since), 2);
+  assert.equal(await repo.challengesSince("ab2", since), 1);
+});
+
 test("stations: insert is idempotent, lookups, roles and removal", async (t) => {
   const { repo } = await setup(t);
   if (!repo) return;
