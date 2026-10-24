@@ -167,14 +167,27 @@ test("revoke: awaiting_approval becomes revoked, ready becomes revoking, and a s
   assert.equal(s.authCalls("changeIntegration") + s.authCalls("addKey"), calls);
 });
 
-test("the Station owner may pause and revoke a member's integration; a stranger is refused by Auth", async (t) => {
+test("the Station owner may pause and revoke a member's integration; a stranger cannot find it", async (t) => {
   const s = await setup(t);
   if (!s) return;
   await s.service.share(OWNER, s.station.id, MEMBER);
   const { id } = await s.create(MEMBER);
   await s.service.approve(MEMBER, id, { r9Svc: R9 });
-  await assert.rejects(s.service.pause(STRANGER, id), refused(403, "forbidden"));
-  await assert.rejects(s.service.revoke(STRANGER, id), refused(403, "forbidden"));
+  const calls = s.manage.calls.length;
+  const events = (await s.events()).length;
+  for (const call of [
+    () => s.service.pause(STRANGER, id), () => s.service.revoke(STRANGER, id), () => s.service.resume(STRANGER, id),
+    () => s.service.renew(STRANGER, id, { expiresInDays: 10 }), () => s.service.settings(STRANGER, id, { quotaPerSecond: 5 }),
+    () => s.service.rotateKey(STRANGER, id, { publicJwk: publicJwk() }), () => s.service.approve(STRANGER, id, { r9Svc: R9 }),
+    () => s.service.history(STRANGER, id)
+  ]) {
+    await assert.rejects(call(), (error) => refused(404, "not_found")(error) && error.message === "This Station or integration was not found.");
+  }
+  await s.service.pause(MEMBER, id);
+  await assert.rejects(s.service.pause(STRANGER, id), refused(404, "not_found"), "not a 409 that would reveal the state");
+  await s.service.resume(MEMBER, id);
+  assert.equal(s.manage.calls.length, calls + 2, "a stranger's request never reaches Auth");
+  assert.equal((await s.events()).length, events + 2);
   assert.equal((await s.repository.integration(id)).state, "provisioning");
   assert.equal(s.record(id).status, "active");
   const paused = await s.service.pause(OWNER, id);
@@ -183,11 +196,21 @@ test("the Station owner may pause and revoke a member's integration; a stranger 
   for (const call of [() => s.service.renew(OWNER, id, { expiresInDays: 10 }), () => s.service.settings(OWNER, id, { quotaPerSecond: 5 }), () => s.service.rotateKey(OWNER, id, { publicJwk: publicJwk() })]) {
     await assert.rejects(call(), refused(403, "forbidden"));
   }
-  await assert.rejects(s.service.resume(STRANGER, id), refused(404, "not_found"));
   assert.equal((await s.service.revoke(OWNER, id)).state, "revoking");
   assert.deepEqual((await s.events()).slice(-2).map((event) => [event.kind, event.actor, event.account_id, event.reason]), [
     ["integration_paused", OWNER, MEMBER, "station_owner"], ["integration_revoked", OWNER, MEMBER, "station_owner"]
   ]);
+});
+
+test("a refusal by Auth itself is mapped and leaves Portal unchanged", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const { id } = await s.create();
+  s.manage.failNext.changeIntegration = { status: 403, code: "forbidden" };
+  await assert.rejects(s.service.pause(OWNER, id), refused(403, "forbidden"));
+  assert.equal(s.authCalls("changeIntegration"), 1);
+  assert.equal((await s.repository.integration(id)).state, "awaiting_approval");
+  assert.equal((await s.events("integration_paused")).length, 0);
 });
 
 test("renew takes 1 to 90 days, and renewing an expired integration makes it current again", async (t) => {

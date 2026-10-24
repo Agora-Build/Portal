@@ -202,11 +202,18 @@ export function createIntegrationService({
     return { row, role: station?.ownerAccount === accountId ? "station_owner" : null };
   }
 
+  // An account that neither owns the integration nor its Station gets the same 404 as for an unknown ID, before any
+  // state check, so nothing about the integration is revealed.
+  async function visible(accountId, id) {
+    const found = await access(accountId, id);
+    if (!found.role) throw notFound();
+    return found;
+  }
+
   // For changes only the integration's owner may make; a Station owner sees the integration, so it is told why.
   async function owned(accountId, id) {
-    const { row, role } = await access(accountId, id);
+    const { row, role } = await visible(accountId, id);
     if (role === "station_owner") throw failure(403, "Only the integration's owner can do this.", "forbidden");
-    if (!role) throw notFound();
     return row;
   }
 
@@ -229,20 +236,18 @@ export function createIntegrationService({
     return result.row;
   }
 
-  // pause and revoke: the integration's owner or its Station's owner. Anyone else is left to Auth, which refuses them.
+  // pause and revoke: the integration's owner or its Station's owner; anyone else is told nothing about it.
   async function stop(accountId, id, event) {
-    const { row, role } = await access(accountId, id);
+    const { row, role } = await visible(accountId, id);
     step(row, event, now());
-    if (role && event === "revoke" && STOPPED.includes(row.state)) return viewOf(row, role);
+    if (event === "revoke" && STOPPED.includes(row.state)) return viewOf(row, role);
     await viaAuth(() => manage.changeIntegration(id, { status: event === "pause" ? "paused" : "revoked" }, accountId));
-    // Auth allowed it, so Auth counts this account the Station's owner even if Portal has not caught up.
-    const by = role ?? "station_owner";
     const kind = event === "pause" ? "integration_paused" : "integration_revoked";
     const updated = await commit(id, (current) => {
       if (event === "revoke" && STOPPED.includes(current.state)) return null;
-      return { fields: step(current, event, now()), event: { actor: accountId, kind, reason: by === "owner" ? "owner" : "station_owner" } };
+      return { fields: step(current, event, now()), event: { actor: accountId, kind, reason: role } };
     });
-    return viewOf(updated, by);
+    return viewOf(updated, role);
   }
 
   // Brings Portal's integrations in line with Auth's list of the account's own. Auth is authoritative, so following it
@@ -258,7 +263,7 @@ export function createIntegrationService({
         }
         touched = await db.transaction(async (client) => {
           const expiresAt = entry.expiresAt ?? new Date(now() + 30 * DAY).toISOString();
-          if (!(await repository.insertIntegration({ id, ownerAccount: entry.owner, stationId: entry.stationId, kind: "custom_app", name: entry.name, scopes: entry.scopes, quotaPerSecond: entry.quotaPerSecond, expiresAt }, client))) return false;
+          if (!(await repository.insertIntegration({ id, ownerAccount: entry.owner, stationId: entry.stationId, kind: "custom_app", name: entry.name, scopes: entry.scopes, quotaPerSecond: entry.quotaPerSecond ?? 200, expiresAt }, client))) return false;
           await repository.appendEvent({ stationId: entry.stationId, integrationId: id, accountId: entry.owner, actor: "system", kind: "integration_reconciled", state: "awaiting_approval" }, client);
           return true;
         });
@@ -268,7 +273,7 @@ export function createIntegrationService({
         const row = await repository.integrationForUpdate(id, client);
         const fields = {};
         if (entry.expiresAt && new Date(entry.expiresAt).getTime() !== new Date(row.expiresAt).getTime()) fields.expiresAt = entry.expiresAt;
-        if (entry.quotaPerSecond !== row.quotaPerSecond) fields.quotaPerSecond = entry.quotaPerSecond;
+        if (entry.quotaPerSecond !== undefined && entry.quotaPerSecond !== row.quotaPerSecond) fields.quotaPerSecond = entry.quotaPerSecond;
         if ((entry.r9Svc ?? null) !== row.r9Svc) fields.r9Svc = entry.r9Svc ?? null;
         let event = null;
         if (entry.status === "revoked" && !STOPPED.includes(row.state)) event = ["revoke", "integration_revoked"];
@@ -434,6 +439,7 @@ export function createIntegrationService({
       if (typeof r9Svc !== "string" || !R9_SVC.test(r9Svc)) throw failure(400, "Send the R9 service fingerprint as 64 lower-case hex characters.", "r9_svc");
       step(row, "approve", now());
       await viaAuth(() => manage.changeIntegration(id, { r9Svc }, accountId));
+      // A pause committed in between fails the re-check after Auth stored r9Svc; the owner approves again after resuming.
       const updated = await commit(id, (current) => ({
         fields: { ...step(current, "approve", now()), r9Svc, approvedBy: accountId, approvedAt: now() },
         event: { actor: accountId, kind: "integration_approved" }
@@ -464,6 +470,7 @@ export function createIntegrationService({
       return viewOf(updated, "owner");
     },
 
+    // Allowed on an expired integration, as Auth allows it: the owner may tune it before renewing.
     async settings(accountId, id, { quotaPerSecond } = {}) {
       const row = await owned(accountId, id);
       quota(quotaPerSecond);
@@ -476,6 +483,7 @@ export function createIntegrationService({
       return viewOf(updated, "owner");
     },
 
+    // Allowed on an expired integration, as Auth allows it: the owner may rotate before renewing.
     async rotateKey(accountId, id, { publicJwk } = {}) {
       const row = await owned(accountId, id);
       publicKey(publicJwk);
@@ -489,8 +497,7 @@ export function createIntegrationService({
     },
 
     async history(accountId, id) {
-      const { row, role } = await access(accountId, id);
-      if (!role) throw notFound();
+      const { row } = await visible(accountId, id);
       const events = await repository.eventsFor(row.id);
       return { events: events.map(({ at, kind, state, reason, actor }) => ({ at, kind, state, reason, actor: actor === accountId ? "you" : actor })) };
     }
