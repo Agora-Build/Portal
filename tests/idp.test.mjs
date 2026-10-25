@@ -500,3 +500,40 @@ test("a trailing slash on AUTH_ISSUER is stripped, so tokens from the IdP's exac
   assert.equal(await idp.available(), true);
   assert.match((await idp.verifyAccessToken(await fake.issueAccessToken())).sub, /^ab[0-9A-HJKMNP-TV-Z]{26}$/);
 });
+
+const EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange";
+const ACCESS_TYPE = "urn:ietf:params:oauth:token-type:access_token";
+test("exchangeForStation trades an ID token for a station.read token with the client's Basic credentials", async () => {
+  const { fake, idp } = await setup();
+  let seen;
+  fake.tokenResponse(({ body }) => { seen = body; return { access_token: "station-read-token", issued_token_type: ACCESS_TYPE, token_type: "Bearer", expires_in: 300 }; });
+  assert.deepEqual(await idp.exchangeForStation("the-id-token", "https://station.example"), { accessToken: "station-read-token", expiresIn: 300 });
+  assert.equal(seen.get("grant_type"), EXCHANGE);
+  assert.equal(seen.get("subject_token"), "the-id-token");
+  assert.equal(seen.get("subject_token_type"), "urn:ietf:params:oauth:token-type:id_token");
+  assert.equal(seen.get("resource"), "https://station.example");
+  assert.equal(seen.get("scope"), "station.read");
+});
+test("exchangeForStation reports Auth's refusal as 401 with its code, and an unreachable IdP as 503", async () => {
+  const { fake, idp } = await setup();
+  fake.tokenResponse(() => Response.json({ error: "invalid_target" }, { status: 400 }));
+  await assert.rejects(idp.exchangeForStation("t", "https://station.example"), (error) => error instanceof TokenError && error.status === 401 && error.reason === "invalid_target");
+  fake.tokenResponse(() => new Response("oops", { status: 502 }));
+  await assert.rejects(idp.exchangeForStation("t", "https://station.example"), (error) => error instanceof TokenError && error.status === 503);
+  fake.tokenResponse(() => { throw new TypeError("fetch failed"); });
+  await assert.rejects(idp.exchangeForStation("t", "https://station.example"), (error) => error instanceof TokenError && error.status === 503);
+  const down = await setup();
+  down.fake.setDown(true);
+  await rejectsToken(down.idp.exchangeForStation("t", "https://station.example"), 503);
+});
+test("exchangeForStation refuses a success that is not an access token", async () => {
+  const { fake, idp } = await setup();
+  for (const reply of [
+    { access_token: "x", issued_token_type: "urn:ietf:params:oauth:token-type:refresh_token", expires_in: 300 },
+    { issued_token_type: ACCESS_TYPE, expires_in: 300 },
+    { access_token: "", issued_token_type: ACCESS_TYPE, expires_in: 300 }
+  ]) {
+    fake.tokenResponse(() => reply);
+    await assert.rejects(idp.exchangeForStation("t", "https://station.example"), (error) => error instanceof TokenError && error.status === 401 && error.reason === "response");
+  }
+});

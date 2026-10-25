@@ -7,7 +7,7 @@
   <title>Account, membership & credits | Agora Build</title>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
-  <script type="module" src="/script.js"></script><script type="module" src="/account.js"></script>
+  <script type="module" src="/script.js"></script><script type="module" src="/account.js"></script><script type="module" src="/integrations.js"></script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
@@ -27,7 +27,27 @@
       <section class="membership-section" aria-labelledby="membership-title"><div class="section-heading"><div><p class="kicker">03 / MEMBERSHIP</p><h2 id="membership-title">Choose your working room.</h2></div><button id="manage-billing" class="inline-link" type="button" hidden>Manage subscription &amp; invoices &#8599;</button></div><p id="subscription-status" class="section-description">Basic starts with your account. Premium subscriptions are managed here.</p><div id="plan-list" class="plan-list"></div><p class="form-note">Plan names and Vox entitlements match Vox. Cross-app entitlement access begins when each app adopts Agora.Build identity. Credits are purchased separately unless an allowance is shown.</p></section>
       <section id="credit-packs" class="membership-section" aria-labelledby="packs-title"><div class="section-heading"><div><p class="kicker">04 / PURCHASE</p><h2 id="packs-title">Fuel the next session.</h2></div></div><div id="pack-list" class="pack-list"></div><p id="purchase-status" class="form-note" role="status"></p></section>
       <section class="membership-section" aria-labelledby="connections-title"><div class="section-heading"><div><p class="kicker">05 / CONNECTIONS</p><h2 id="connections-title">Bring your tools with you.</h2></div></div><div class="account-card"><div class="connection-heading"><div><h3>Agora Console</h3><p id="agora-status">Sign in to connect your Agora projects.</p></div><div class="account-actions"><button id="connect-agora" class="button button-secondary" type="button" hidden>Connect Agora Console</button><button id="agora-details" class="button" type="button" aria-haspopup="dialog" hidden>Console details</button><button id="disconnect-agora" class="inline-link" type="button" hidden>Disconnect</button></div></div><p class="form-note">Connecting Agora Console is separate from signing in. Certificates are revealed only when you request them.</p></div></section>
-      <section class="membership-section" aria-labelledby="statement-title"><div class="section-heading"><div><p class="kicker">06 / STATEMENT</p><h2 id="statement-title">Every credit has a trail.</h2></div></div><div id="credit-statement" class="statement-list"></div><button id="more-statement" class="inline-link" type="button" hidden>Load earlier transactions</button></section>
+      <section id="stations" class="membership-section" aria-labelledby="stations-title" hidden><div class="section-heading"><div><p class="kicker">06 / STATIONS</p><h2 id="stations-title">Your relays and Stations.</h2></div><button id="station-add" class="button button-secondary" type="button" aria-controls="station-form" aria-expanded="false">Add Station</button></div><p class="section-description">A Station is a relay you run for your agents. Register it once by proving you control its address, then share it with other accounts.</p><p id="stations-stale" class="form-note integration-stale" role="status"></p>
+        <form id="station-form" class="account-card stack-form station-form" aria-labelledby="station-form-title" novalidate hidden>
+          <h3 id="station-form-title">Add a Station</h3>
+          <label>Station address<input name="origin" type="url" required maxlength="253" autocomplete="off" spellcheck="false" placeholder="https://station.example.com"></label>
+          <div id="station-challenge" class="station-challenge" hidden><p>Serve this exact value as the whole response body, over HTTPS without redirects, at <code id="station-challenge-url" class="mono"></code></p><code id="station-challenge-value" class="project-secret"></code><div class="account-actions"><button id="station-challenge-copy" class="inline-link" type="button">Copy value</button></div><p id="station-challenge-expiry" class="form-note"></p><label>Station report public key <span class="optional">JWK JSON</span><textarea name="reportKey" rows="5" spellcheck="false" autocomplete="off" placeholder='{ "kty": "EC", "crv": "P-256", "x": "…", "y": "…" }'></textarea></label></div>
+          <p id="station-status" class="form-note" role="status"></p>
+          <div class="dialog-actions"><button id="station-submit" class="button" type="submit">Get the check value</button><button id="station-cancel" class="inline-link" type="button">Cancel</button></div>
+        </form>
+        <div id="station-list" class="station-list"></div></section>
+      <section id="integrations" class="membership-section" aria-labelledby="integrations-title" hidden><div class="section-heading"><div><p class="kicker">07 / INTEGRATIONS</p><h2 id="integrations-title">Apps that act for you.</h2></div><button id="integration-add" class="button button-secondary" type="button" aria-controls="integration-form" aria-expanded="false">Create integration</button></div><p class="section-description">An integration lets one of your apps reach your agents through one Station, with the scopes you choose, until it expires. Approve each new integration in Astation.</p><p id="integrations-stale" class="form-note integration-stale" role="status"></p>
+        <form id="integration-form" class="account-card stack-form integration-form" aria-labelledby="integration-form-title" novalidate hidden>
+          <h3 id="integration-form-title">Create an integration</h3>
+          <div class="form-row"><label>Name<input name="name" required maxlength="80" autocomplete="off" placeholder="My release bot"></label><label>Station<select name="stationId" required></select></label></div>
+          <fieldset class="token-choice scope-choice"><legend>Scopes</legend><label><input type="checkbox" name="scope" value="agent.view" checked disabled> agent.view <span class="optional">always included</span></label><label><input type="checkbox" name="scope" value="agent.prompt"> agent.prompt</label><label><input type="checkbox" name="scope" value="agent.approve"> agent.approve</label><label><input type="checkbox" name="scope" value="agent.interrupt"> agent.interrupt</label><label><input type="checkbox" name="scope" value="agent.terminal"> agent.terminal</label></fieldset>
+          <div class="form-row"><label>Quota <span class="optional">token requests per second</span><input name="quotaPerSecond" type="number" min="1" max="10000" step="1" value="200" required></label><label>Expires after <span class="optional">days, up to 90</span><input name="expiresInDays" type="number" min="1" max="90" step="1" value="30" required></label></div>
+          <div id="integration-key" class="key-field"></div>
+          <p id="integration-status" class="form-note" role="status"></p>
+          <div class="dialog-actions"><button id="integration-submit" class="button" type="submit">Create integration</button><button id="integration-cancel" class="inline-link" type="button">Cancel</button></div>
+        </form>
+        <div id="integration-list" class="integration-list"></div></section>
+      <section class="membership-section" aria-labelledby="statement-title"><div class="section-heading"><div><p class="kicker">08 / STATEMENT</p><h2 id="statement-title">Every credit has a trail.</h2></div></div><div id="credit-statement" class="statement-list"></div><button id="more-statement" class="inline-link" type="button" hidden>Load earlier transactions</button></section>
     </main>
     <footer class="site-footer"><span>The frontier is a shared workspace.</span><a href="https://github.com/Agora-Build" target="_blank" rel="noopener noreferrer">Open minds. Open doors. <span aria-hidden="true">&#8599;</span></a></footer>
   </div>
@@ -73,6 +93,18 @@
       <p class="form-note">Signed on agora.build with Atem's atem-core, the library Astation uses. The App Certificate stays on the server. Tokens aren't stored, and clear when you change the form or close this window.</p>
     </form>
     <p class="form-note">A certificate is fetched only when you choose Show, hides again after 30 seconds or when this window closes, and is never stored by this page.</p>
+  </dialog>
+  <dialog id="integration-confirm" aria-labelledby="integration-confirm-title">
+    <div class="dialog-head"><span class="kicker">PLEASE CONFIRM</span><button class="close-button" type="button" data-close aria-label="Close confirmation">&times;</button></div>
+    <h2 id="integration-confirm-title"></h2>
+    <p id="integration-confirm-text" class="dialog-intro"></p>
+    <form method="dialog" class="dialog-actions"><button id="integration-confirm-ok" class="button" value="confirm">Confirm</button><button class="inline-link" value="cancel">Keep it</button></form>
+  </dialog>
+  <dialog id="integration-history" aria-labelledby="integration-history-title">
+    <div class="dialog-head"><span class="kicker">INTEGRATION HISTORY</span><button class="close-button" type="button" data-close aria-label="Close integration history">&times;</button></div>
+    <h2 id="integration-history-title"></h2>
+    <p id="integration-history-status" class="dialog-intro" role="status"></p>
+    <ol id="integration-events" class="statement-list event-list"></ol>
   </dialog>
   <dialog id="person-dialog" aria-labelledby="person-title"><div class="dialog-head"><span class="kicker">BUILDER PROFILE</span><button class="close-button" type="button" data-close aria-label="Close builder profile">&times;</button></div><div id="profile-content"></div></dialog>
   <div id="toast" role="status" aria-live="polite"></div>

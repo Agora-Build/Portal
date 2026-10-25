@@ -19,12 +19,13 @@ import { createPostgresPersistence } from "./persistence.mjs";
 import { createSignaling, signalingConfig } from "./spaces/signaling.mjs";
 import { createSpaces, loadWorlds } from "./spaces/service.mjs";
 import { handleSpaces } from "./spaces/routes.mjs";
+import { handleIntegrations, integrationPath, integrationsFromEnv, readyIntegrations } from "./integrations/routes.mjs";
 import { loadThemes } from "./spaces/themes.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 // Vendored browser SDKs are served from node_modules in development and from dist/assets after a build.
 const vendor = { "assets/agora-rtc.js": createRequire(import.meta.url).resolve("agora-rtc-sdk-ng"), "assets/agora-rtm.js": createRequire(import.meta.url).resolve("agora-rtm-sdk") };
-const publicFiles = new Set(["index.html", "explore.html", "marketplaces.html", "radar.html", "account.html", "account.js", "stoa.html", "stoa.js", "world/map.js", "world/kinds.js", "world/themes.js", "world/camera.js", "world/motion.js", "world/renderer-canvas.js", "world/engine.js", "world/sdk.js", "world/rtc-client.js", "stoa/panel.js", "stoa/stage.js", "stoa/call.js", "stoa/decor.js", "stoa/place.js", "stoa/lease.js", "stoa/spaces.js", "world/protocol.js", "world/crypto.js", "world/signaling.js", "world/presence.js", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "marketplaces.js", "radar.js", "assets/agora-rtc.js", "assets/agora-rtm.js", "assets/favicon.svg", "assets/guohai.jpg"]);
+const publicFiles = new Set(["index.html", "explore.html", "marketplaces.html", "radar.html", "account.html", "account.js", "integrations.js", "stoa.html", "stoa.js", "world/map.js", "world/kinds.js", "world/themes.js", "world/camera.js", "world/motion.js", "world/renderer-canvas.js", "world/engine.js", "world/sdk.js", "world/rtc-client.js", "stoa/panel.js", "stoa/stage.js", "stoa/call.js", "stoa/decor.js", "stoa/place.js", "stoa/lease.js", "stoa/spaces.js", "world/protocol.js", "world/crypto.js", "world/signaling.js", "world/presence.js", "styles.css", "script.js", "people.js", "activity.js", "explore.js", "marketplaces.js", "radar.js", "assets/agora-rtc.js", "assets/agora-rtm.js", "assets/favicon.svg", "assets/guohai.jpg"]);
 const types = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".jpg": "image/jpeg" };
 
 function json(response, status, body, headers = {}) {
@@ -66,14 +67,16 @@ const publicRoutes = new Set(["GET /api/people", "GET /api/activity", "GET /api/
 // versioned API (https://agora.build/api/v1/...): v1 may gain fields but never loses or renames any; a breaking change
 // becomes /api/v2/. The browser calls the same handlers at /api/..., which carry no version and accept no tokens here.
 export const API_V1 = "/api/v1/";
-const bearerRoutes = new Set(["GET /api/me", "GET /api/credits/balance", "GET /api/credits/statement", "POST /api/marketplaces/chat", "POST /api/marketplaces/tts", "GET /api/connections", "GET /api/connections/agora/projects", "POST /api/connections/agora/certificate", "POST /api/connections/agora/token", "DELETE /api/connections/agora", "POST /api/platform/credits/reserve", "POST /api/platform/credits/settle"]);
+const bearerRoutes = new Set(["GET /api/me", "GET /api/credits/balance", "GET /api/credits/statement", "POST /api/marketplaces/chat", "POST /api/marketplaces/tts", "GET /api/connections", "GET /api/connections/agora/projects", "POST /api/connections/agora/certificate", "POST /api/connections/agora/token", "DELETE /api/connections/agora", "POST /api/platform/credits/reserve", "POST /api/platform/credits/settle", "GET /api/integrations", "POST /api/stations/reports", "GET /api/stations/changes"]);
+const bearerPatterns = [/^POST \/api\/integrations\/[A-Za-z0-9_-]{1,64}\/approval$/];
+const isBearerRoute = (route) => bearerRoutes.has(route) || bearerPatterns.some((pattern) => pattern.test(route));
 // Routes that exist for the browser session only; a bearer token there gets 403, and on any other path 404.
 const browserRoutes = new Set(["GET /api/billing/account", "POST /api/billing/checkout", "POST /api/billing/manage", "POST /api/profile", "PUT /api/profile", "DELETE /api/profile", "GET /api/radar", "POST /api/radar", "POST /api/auth/logout", "POST /api/signaling/token"]);
 // Over https the session cookie was renamed from house_session to __Host-house_session. Until this date a guest's
 // legacy cookie (a guest browser-profile session, never an account session) is accepted once and re-issued under the
 // new name; after it, the legacy cookie is ignored. Accounts' sessions started empty with this change, so none exist.
 export const LEGACY_GUEST_COOKIE_UNTIL = Date.parse("2027-01-31T00:00:00Z");
-const browserRoute = (route, path) => browserRoutes.has(route) || path === "/api/spaces" || path.startsWith("/api/spaces/") || path.startsWith("/api/worlds/");
+const browserRoute = (route, path) => browserRoutes.has(route) || path === "/api/spaces" || path.startsWith("/api/spaces/") || path.startsWith("/api/worlds/") || integrationPath(path);
 // The auth.agora.build client from the environment, or null (logged once, by setting name) when its settings are missing or invalid.
 
 // PLATFORM_ADMINS lists auth.agora.build account IDs (ab…). Anything else, such as an old acct_… ID, is ignored and
@@ -123,6 +126,9 @@ export function createAppServer(directory = root, options = {}) {
   const themes = options.themes || loadThemes(directory);
   const signaling = options.signaling || createSignaling(signalingConfig());
   const spaces = options.spaces || createSpaces({ store, worlds, signaling, calls, secret: options.channelSecret ?? signalingConfig().secret, admins: platformAdmins(process.env.PLATFORM_ADMINS, log), plazaCapacity: options.plazaCapacity });
+  // Stations and integrations: a ready service (tests), null (off), or built from DATABASE_URL; without it every
+  // integration route answers 503. integrationOptions ({ stationFetch, pushFetch }) are for the end-to-end tests.
+  const integrations = "integrations" in options ? (options.integrations && readyIntegrations(options.integrations)) : integrationsFromEnv(process.env, { ...options.integrationOptions, idp, log });
   const windows = new Map();
   const scanning = new Set();
   const radarHours = Math.max(1, Number(process.env.RADAR_INTERVAL_HOURS) || 24);
@@ -159,7 +165,7 @@ export function createAppServer(directory = root, options = {}) {
       // /api/v1/<route> is the versioned app API: only the bearer routes exist there, served by the /api/<route> handlers.
       const versioned = requestUrl.pathname.startsWith(API_V1);
       const path = versioned ? "/api/" + requestUrl.pathname.slice(API_V1.length) : requestUrl.pathname;
-      if (versioned && !bearerRoutes.has(request.method + " " + path)) throw new AppError(404, "This API was not found. See https://github.com/Agora-Build/Portal/blob/main/docs/platform.md for the /api/v1 routes.");
+      if (versioned && !isBearerRoute(request.method + " " + path)) throw new AppError(404, "This API was not found. See https://github.com/Agora-Build/Portal/blob/main/docs/platform.md for the /api/v1 routes.");
       const bearer = request.headers.authorization?.startsWith("Bearer ") ? request.headers.authorization.slice(7).trim() : "";
       const secure = siteUrl.startsWith("https:") || Boolean(request.socket.encrypted);
       const sessionName = secure ? "__Host-house_session" : "house_session";
@@ -286,10 +292,10 @@ export function createAppServer(directory = root, options = {}) {
         }
         const token = caller ? "" : browserToken;
         const route = request.method + " " + path;
-        if (caller && !publicRoutes.has(route) && !bearerRoutes.has(route)) throw browserRoute(route, path) ? browserOnly() : new AppError(404, "This page or service was not found.");
-        if (caller && !versioned && bearerRoutes.has(route)) throw new AppError(404, "Access tokens use the versioned API: " + API_V1 + path.slice("/api/".length) + ".");
+        if (caller && !publicRoutes.has(route) && !isBearerRoute(route)) throw browserRoute(route, path) ? browserOnly() : new AppError(404, "This page or service was not found.");
+        if (caller && !versioned && isBearerRoute(route)) throw new AppError(404, "Access tokens use the versioned API: " + API_V1 + path.slice("/api/".length) + ".");
         // Only after the route gate, so a token that reaches a 404, browser-only or public route creates nothing.
-        if (caller && bearerRoutes.has(route)) caller.account = await store.ensureAccount(caller.sub);
+        if (caller && isBearerRoute(route)) caller.account = await store.ensureAccount(caller.sub);
         const scoped = (scope) => { if (!caller.scopes.includes(scope)) throw insufficientScope(scope); return caller.sub; };
         const member = async () => {
           const person = await store.me(token);
@@ -311,7 +317,7 @@ export function createAppServer(directory = root, options = {}) {
         else if (path === "/api/me" && request.method === "GET") {
           // The email is shown only to the browser session; bearer callers get the account without it.
           if (caller) { const { email, ...account } = caller.account; json(response, 200, { profile: await store.accountProfile(caller.sub), account }); }
-          else json(response, 200, await store.session(token));
+          else json(response, 200, { ...await store.session(token), integrationsAvailable: Boolean(integrations) });
         }
         else if (path === "/api/auth/config" && request.method === "GET") json(response, 200, { issuer: idp?.config.issuer || null, accountUrl: idp?.config.accountUrl || null });
         else if (path === "/api/billing/catalog" && request.method === "GET") json(response, 200, await billing.catalog());
@@ -416,7 +422,11 @@ export function createAppServer(directory = root, options = {}) {
           allowance(request);
           json(response, 200, { result: await scan(person) });
         } else if (path === "/api/rooms" || path.startsWith("/api/rooms/")) throw new AppError(410, "Meeting rooms are now Stoa spaces. Start one from the Stoa.");
-        else {
+        else if (integrationPath(path)) {
+          const handled = await handleIntegrations({ path, method: request.method, url: requestUrl, read: () => body(request), service: integrations && await integrations.ready(), caller, scoped, invalidToken, portalUser, idToken: () => store.sessionIdToken(token), limit });
+          if (!handled) throw new AppError(404, "This page or service was not found.");
+          json(response, handled.status, handled.body);
+        } else {
           const handled = await handleSpaces({ path, method: request.method, url: requestUrl, token, read: () => body(request), spaces, worlds, themes, limit, ip: clientAddress(request) });
           if (!handled) throw new AppError(404, "This page or service was not found.");
           json(response, handled.status, handled.body);
@@ -470,6 +480,7 @@ export function createAppServer(directory = root, options = {}) {
   const spaceSweep = setInterval(() => { spaces.sweep().catch(() => {}); }, 15000);
   spaceSweep.unref();
   server.on("close", () => clearInterval(spaceSweep));
+  server.on("close", () => { integrations?.close().catch(() => {}); });
   return server;
 }
 

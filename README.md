@@ -28,7 +28,7 @@ docker build -t portal .
 docker run -p 3002:3002 --env-file .env -v portal-data:/app/.data portal
 ```
 
-Without `DATABASE_URL`, state is stored in `/app/.data`. Mount a volume there so it survives restarts.
+Stations and integrations (the account page's Stations and integrations sections and their API) also need `DATABASE_URL`, plus `AUTH_ISSUER` and `PORTAL_CLIENT_SECRET`; see [Stations and integrations](docs/platform.md#stations-and-integrations). Without `DATABASE_URL`, state is stored in `/app/.data`. Mount a volume there so it survives restarts.
 
 ## Pages and data
 

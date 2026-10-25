@@ -29,6 +29,16 @@ jobs:
       contents: read
       packages: write
 
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: portal-ci-only
+          POSTGRES_DB: agora_portal_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -40,6 +50,8 @@ jobs:
           cache: npm
 
       - name: Run tests
+        env:
+          PORTAL_TEST_DATABASE_URL: postgres://postgres:portal-ci-only@localhost:5432/agora_portal_test
         run: |
           npm ci
           npm test

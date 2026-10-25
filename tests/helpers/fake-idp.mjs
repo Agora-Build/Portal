@@ -129,7 +129,7 @@ export async function createFakeIdp({ issuer = "https://auth.example", clientId 
         const authorization = new Headers(options.headers).get("authorization") || "";
         const [id, secret] = authorization.startsWith("Basic ") ? Buffer.from(authorization.slice(6), "base64").toString().split(":").map(decodeURIComponent) : [body.get("client_id"), body.get("client_secret")];
         if (id !== clientId || (clientSecret !== undefined && secret !== clientSecret)) return fail("invalid_client", 401);
-        if (body.get("grant_type") !== "authorization_code") return fail("unsupported_grant_type");
+        if (!customToken && body.get("grant_type") !== "authorization_code") return fail("unsupported_grant_type");
         const grant = codes.get(body.get("code"));
         codes.delete(body.get("code"));
         if (customToken) {

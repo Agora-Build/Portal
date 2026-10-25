@@ -235,6 +235,11 @@ export function createStore(seedFile, storageFile, { now = Date.now, persistence
       if (person) return { kind: "guest", profile: publicProfile(person) };
       return { kind: null };
     },
+    // The ID token kept with this cookie's account session; null for guests, unknown or expired sessions.
+    async sessionIdToken(token) {
+      if (!token) return null;
+      return sessionFor(await read(), token)?.idToken || null;
+    },
     async session(token) {
       const state = await read();
       const person = personFor(state, token);

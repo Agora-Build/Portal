@@ -1,0 +1,398 @@
+// The Stations and integrations HTTP routes (browser and /api/v1), against a real service on the test database, the
+// stand-in IdP and an in-memory Auth /manage/v1.
+import { after, before, test } from "node:test";
+import assert from "node:assert/strict";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import { createAppServer } from "../scripts/serve.mjs";
+import { createStore } from "../scripts/store.mjs";
+import { createModelClient, modelConfig } from "../scripts/models.mjs";
+import { agoraConfig, createAgoraCalls } from "../scripts/calls.mjs";
+import { createSignaling, signalingConfig } from "../scripts/spaces/signaling.mjs";
+import { createIdp } from "../scripts/idp.mjs";
+import { createRepository } from "../scripts/integrations/repository.mjs";
+import { createIntegrationService } from "../scripts/integrations/service.mjs";
+import { createIntegrationStack, integrationsFromEnv } from "../scripts/integrations/routes.mjs";
+import { accountId, createFakeIdp } from "./helpers/fake-idp.mjs";
+import { fakeManage } from "./helpers/fake-manage.mjs";
+import { testDatabase } from "./helpers/test-db.mjs";
+
+const root = new URL("../", import.meta.url).pathname;
+const issuer = "https://auth.example";
+const clientSecret = "portal-route-test-secret-".padEnd(48, "x");
+const siteUrl = "http://localhost:3080";
+const env = { AGORA_APP_ID: "a".repeat(32), AGORA_APP_CERTIFICATE: "b".repeat(32), SPACES_SIGNALING_SECRET: "s".repeat(32) };
+const R9 = "a".repeat(64);
+const UNAVAILABLE = "Stations and integrations need the Portal database.";
+const profile = (name = "Route tester") => ({ name, bio: "Building voice agents with Rust.", intent: "Build a language practice voice agent with natural interruptions.", lookingFor: "Audio engineers", skills: ["Rust", "Voice AI"], location: "Remote", contact: "https://example.com/builder", monitor: false });
+const publicJwk = () => generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey.export({ format: "jwk" });
+let temporary;
+before(async () => { temporary = await mkdtemp(resolve(tmpdir(), "integrations-routes-")); });
+after(() => rm(temporary, { recursive: true, force: true }));
+
+// DATABASE_URL is unset for each test (and restored afterwards), so no server builds a stack from the environment.
+function withoutDatabaseUrl(t) {
+  const saved = process.env.DATABASE_URL;
+  delete process.env.DATABASE_URL;
+  t.after(() => { if (saved !== undefined) process.env.DATABASE_URL = saved; });
+}
+
+const close = (instance) => new Promise((done) => { instance.close(done); instance.closeIdleConnections(); });
+async function start(t, options = {}) {
+  withoutDatabaseUrl(t);
+  const fake = await createFakeIdp({ issuer, clientId: "portal", clientSecret });
+  const idp = createIdp({ issuer, clientId: "portal", clientSecret, siteUrl, request: fake.request });
+  const store = createStore(resolve(root, "data/people.json"), resolve(temporary, randomBytes(8).toString("hex") + ".json"), { log: () => {} });
+  const logs = [];
+  const instance = createAppServer(root, {
+    monitor: false, store, idp, siteUrl, billingClients: null, log: (line) => logs.push(line), models: createModelClient(modelConfig({})),
+    calls: createAgoraCalls(agoraConfig(env)), signaling: createSignaling(signalingConfig(env)), channelSecret: env.SPACES_SIGNALING_SECRET,
+    ...("integrations" in options ? { integrations: options.integrations } : {})
+  });
+  await new Promise((done) => instance.listen(0, "127.0.0.1", done));
+  t.after(() => close(instance));
+  return { fake, idp, store, logs, base: "http://127.0.0.1:" + instance.address().port };
+}
+
+// A real service on the test database; null (and the test skipped) without PORTAL_TEST_DATABASE_URL.
+async function stack(t) {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
+  const manage = fakeManage();
+  const served = { status: 200, body: "" };
+  const stationFetch = { async get() { return { ...served }; } };
+  const pushes = [];
+  const pushFetch = { async post(url, body) { pushes.push({ url, body }); return { status: 202 }; } };
+  const exchanges = [];
+  const exchange = async (idToken, origin) => { exchanges.push({ idToken, origin }); return { accessToken: "station-read-token", expiresIn: 300 }; };
+  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, pushFetch, exchange, log: () => {} });
+  t.after(() => service._pushesIdle());
+  return { db, manage, served, service, exchanges, pushes };
+}
+
+const call = (base, path, { cookie, bearer, method = "GET", data, headers = {} } = {}) => fetch(base + path, {
+  method, redirect: "manual",
+  headers: { ...(cookie ? { Cookie: cookie } : {}), ...(bearer ? { Authorization: "Bearer " + bearer } : {}), ...(data !== undefined ? { "Content-Type": "application/json" } : {}), ...headers },
+  ...(data !== undefined ? { body: JSON.stringify(data) } : {})
+});
+const pair = (line) => line.split(";")[0];
+const cookieNamed = (response, name) => response.headers.getSetCookie().find((line) => line.startsWith(name + "="));
+
+// Signs in through /auth/login → the stand-in IdP → /auth/callback, as a browser would; returns the session cookie.
+async function signIn(app, sub = accountId()) {
+  const login = await call(app.base, "/auth/login?returnTo=%2Faccount%2F");
+  const transaction = cookieNamed(login, "portal_auth");
+  const callback = new URL(app.fake.authorize(login.headers.get("location"), { sub }));
+  const back = await call(app.base, callback.pathname + callback.search, { cookie: pair(transaction) });
+  return { sub, cookie: pair(cookieNamed(back, "house_session")) };
+}
+const assertScope = (response, scope) => {
+  assert.equal(response.status, 403, "expected insufficient_scope for " + scope);
+  assert.match(response.headers.get("www-authenticate"), new RegExp('^Bearer error="insufficient_scope", scope="' + scope.replace(".", "\\.") + '"'));
+};
+
+// Registers a Station for the signed-in account through the browser routes.
+async function registerStation(app, integrations, cookie, origin = "https://one.example") {
+  const challenge = await call(app.base, "/api/stations/challenges", { cookie, method: "POST", data: { origin } });
+  assert.equal(challenge.status, 201);
+  const issued = await challenge.json();
+  integrations.served.body = issued.value;
+  const registered = await call(app.base, "/api/stations", { cookie, method: "POST", data: { challengeId: issued.challengeId, reportKey: publicJwk() } });
+  assert.equal(registered.status, 201);
+  return { issued, station: await registered.json() };
+}
+async function createIntegration(app, cookie, stationId) {
+  const created = await call(app.base, "/api/integrations", { cookie, method: "POST", data: { stationId, name: "My app", scopes: ["agent.view"], publicJwk: publicJwk() } });
+  assert.equal(created.status, 201);
+  return created.json();
+}
+
+test("without the Portal database every Stations and integrations route answers 503", async (t) => {
+  const app = await start(t);
+  const { cookie } = await signIn(app);
+  for (const [path, options] of [["/api/stations", { cookie }], ["/api/stations", {}], ["/api/v1/integrations", {}], ["/api/integrations/abc/events", { cookie }], ["/api/stations/challenges", { cookie, method: "POST", data: { origin: "https://one.example" } }]]) {
+    const response = await call(app.base, path, options);
+    assert.equal(response.status, 503, path);
+    assert.deepEqual(await response.json(), { error: UNAVAILABLE });
+  }
+  const bearer = await app.fake.issueAccessToken({ scope: "integrations:read" });
+  assert.equal((await call(app.base, "/api/v1/integrations", { bearer })).status, 503);
+  assert.equal((await (await call(app.base, "/api/me", { cookie })).json()).integrationsAvailable, false);
+});
+
+test("missing Auth settings leave the integrations unavailable, logged once by setting name", () => {
+  const logs = [];
+  assert.equal(integrationsFromEnv({ DATABASE_URL: "postgres://user@127.0.0.1:1/none" }, { idp: null, log: (line) => logs.push(line) }), null);
+  assert.deepEqual(logs, ["Stations and integrations are unavailable: set AUTH_ISSUER, PORTAL_CLIENT_SECRET."]);
+  logs.length = 0;
+  assert.equal(integrationsFromEnv({ DATABASE_URL: "postgres://user@127.0.0.1:1/none", AUTH_ISSUER: issuer, PORTAL_CLIENT_SECRET: "short" }, { idp: null, log: (line) => logs.push(line) }), null);
+  assert.deepEqual(logs, ["Stations and integrations are unavailable: PORTAL_CLIENT_SECRET must be at least 32 characters."]);
+  logs.length = 0;
+  assert.equal(integrationsFromEnv({ AUTH_ISSUER: issuer, PORTAL_CLIENT_SECRET: clientSecret }, { idp: null, log: (line) => logs.push(line) }), null, "no DATABASE_URL, no stack");
+  assert.deepEqual(logs, []);
+});
+
+test("the stack migrates once before the first request, answers 503 and retries after a failure, and closes its pool", async () => {
+  const calls = [];
+  let failMigrate = true;
+  const db = {
+    async migrate() { calls.push("migrate"); if (failMigrate) { failMigrate = false; throw Object.assign(new Error("down"), { code: "ECONNREFUSED" }); } return []; },
+    async ensureEventPartitions() { calls.push("partitions"); return []; },
+    async close() { calls.push("close"); }
+  };
+  const logs = [];
+  const integrations = createIntegrationStack({ db, manage: fakeManage(), idp: null, log: (line) => logs.push(line) });
+  await assert.rejects(integrations.ready(), (error) => error.status === 503);
+  assert.deepEqual(logs, ["Portal database is not ready: ECONNREFUSED."]);
+  const [first, second] = await Promise.all([integrations.ready(), integrations.ready()]);
+  assert.equal(first, second);
+  assert.equal(typeof first.stations, "function");
+  await integrations.ready();
+  assert.deepEqual(calls, ["migrate", "migrate", "partitions"], "memoised after the first success");
+  await integrations.close();
+  assert.equal(calls.at(-1), "close");
+});
+
+// The end-to-end harness injects its own Station fetches; without them the stack keeps the real, guarded fetch.
+test("the stack uses injected Station fetches for proof and pushes, and the real network fetch by default", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
+  const owner = accountId();
+  const register = async (service, origin) => {
+    const issued = await service.createChallenge(owner, origin);
+    return { issued, result: await service.registerStation(owner, { challengeId: issued.challengeId, reportKey: publicJwk() }).catch((error) => error) };
+  };
+
+  const logs = [];
+  const fallback = createIntegrationStack({ db, manage: fakeManage(), idp: null, log: (line) => logs.push(line) });
+  const refused = (await register(fallback.service, "https://station.invalid")).result;
+  assert.equal(refused.status, 422, "the default proof fetch goes to the network, which cannot reach station.invalid");
+  assert.equal(refused.details.reason, "network");
+
+  const fetched = [];
+  const pushed = [];
+  const stationFetch = { async get(url) { fetched.push(url); return { status: 200, body: served }; } };
+  const pushFetch = { async post(url, body) { pushed.push({ url, body }); return { status: 202 }; } };
+  let served = "";
+  const injected = integrationsFromEnv({ DATABASE_URL: "postgres://unused@127.0.0.1:1/none", AUTH_ISSUER: issuer, PORTAL_CLIENT_SECRET: clientSecret }, { idp: null, log: () => {}, stationFetch, pushFetch });
+  assert.ok(injected, "integrationsFromEnv accepts the injected fetches");
+  await injected.close();
+  const stack = createIntegrationStack({ db, manage: fakeManage(), idp: null, log: () => {}, stationFetch, pushFetch });
+  const issued = await stack.service.createChallenge(owner, "https://two.example");
+  served = issued.value;
+  const station = await stack.service.registerStation(owner, { challengeId: issued.challengeId, reportKey: publicJwk() });
+  assert.deepEqual(fetched, ["https://two.example/.well-known/agora-build-station"]);
+  await stack.service.share(owner, station.id, accountId());
+  await stack.service._pushesIdle();
+  assert.deepEqual(pushed.map((entry) => entry.url), ["https://two.example/agora-build/v1/changes"]);
+});
+
+test("a browser account registers, shares and removes a Station and manages an integration", async (t) => {
+  const integrations = await stack(t);
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service });
+  const owner = await signIn(app);
+  const friend = await signIn(app);
+  assert.equal((await (await call(app.base, "/api/me", { cookie: owner.cookie })).json()).integrationsAvailable, true);
+  const { issued, station } = await registerStation(app, integrations, owner.cookie);
+  assert.equal(issued.url, "https://one.example/.well-known/agora-build-station");
+  assert.equal(station.origin, "https://one.example");
+  const listed = await (await call(app.base, "/api/stations", { cookie: owner.cookie })).json();
+  assert.deepEqual(listed.stations.map((entry) => entry.id), [station.id]);
+  assert.equal(listed.stale, false);
+
+  const shared = await call(app.base, "/api/stations/" + station.id + "/members/" + friend.sub, { cookie: owner.cookie, method: "PUT" });
+  assert.deepEqual([shared.status, await shared.json()], [200, { shared: true }]);
+  const members = await (await call(app.base, "/api/stations/" + station.id + "/members", { cookie: owner.cookie })).json();
+  assert.deepEqual(members.members.map((entry) => entry.account), [friend.sub]);
+  assert.equal(members.owner, owner.sub);
+  assert.deepEqual((await (await call(app.base, "/api/stations", { cookie: friend.cookie })).json()).stations.map((entry) => entry.id), [station.id]);
+  const unshared = await call(app.base, "/api/stations/" + station.id + "/members/" + friend.sub, { cookie: owner.cookie, method: "DELETE" });
+  assert.deepEqual([unshared.status, await unshared.json()], [200, { unshared: true }]);
+
+  const integration = await createIntegration(app, owner.cookie, station.id);
+  assert.equal(integration.state, "awaiting_approval");
+  const mine = await (await call(app.base, "/api/integrations", { cookie: owner.cookie })).json();
+  assert.deepEqual(mine.integrations.map((entry) => entry.id), [integration.id]);
+  const action = (name, data) => call(app.base, "/api/integrations/" + integration.id + "/" + name, { cookie: owner.cookie, method: "POST", data });
+  const paused = await action("pause");
+  assert.deepEqual([paused.status, (await paused.json()).state], [200, "paused"]);
+  assert.equal((await (await action("resume")).json()).state, "awaiting_approval");
+  const renewed = await action("renew", { expiresInDays: 60 });
+  assert.equal(renewed.status, 200);
+  assert.ok(Date.parse((await renewed.json()).expiresAt) > Date.now() + 59 * 86400000);
+  assert.equal((await (await action("settings", { quotaPerSecond: 50 })).json()).quotaPerSecond, 50);
+  const rotated = await action("keys", { publicJwk: publicJwk() });
+  assert.equal(rotated.status, 201);
+  assert.ok((await rotated.json()).kid);
+  const history = await (await call(app.base, "/api/integrations/" + integration.id + "/events", { cookie: owner.cookie })).json();
+  assert.ok(history.events.some((event) => event.kind === "integration_created" && event.actor === "you"));
+  assert.equal((await (await action("revoke")).json()).state, "revoked", "never provisioned, so revoked at once");
+
+  const removed = await call(app.base, "/api/stations/" + station.id, { cookie: owner.cookie, method: "DELETE" });
+  assert.deepEqual([removed.status, await removed.json()], [200, { removed: true }]);
+  assert.deepEqual((await (await call(app.base, "/api/stations", { cookie: owner.cookie })).json()).stations, []);
+});
+
+test("browser routes refuse guests, other sites, bearer tokens and malformed IDs", async (t) => {
+  const integrations = await stack(t);
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service });
+  const visitor = pair(cookieNamed(await call(app.base, "/api/profile", { method: "POST", data: profile() }), "house_session"));
+  assert.equal((await call(app.base, "/api/stations", { cookie: visitor })).status, 401);
+  assert.equal((await call(app.base, "/api/stations")).status, 401);
+  const { cookie } = await signIn(app);
+  const crossOrigin = await call(app.base, "/api/stations/challenges", { cookie, method: "POST", data: { origin: "https://one.example" }, headers: { Origin: "https://evil.example" } });
+  assert.equal(crossOrigin.status, 403);
+  const bearer = await app.fake.issueAccessToken({ scope: "integrations:read integrations:approve" });
+  for (const [path, method] of [["/api/stations", "GET"], ["/api/stations/challenges", "POST"], ["/api/integrations/abc/pause", "POST"], ["/api/stations/abc/read-token", "POST"]]) {
+    const response = await call(app.base, path, { bearer, method });
+    assert.equal(response.status, 403, path);
+    assert.match((await response.json()).error, /browser session/);
+  }
+  assert.equal((await call(app.base, "/api/v1/stations", { bearer })).status, 404, "no v1 route for the browser list");
+  for (const path of ["/api/stations/bad.id/members", "/api/stations/" + "a".repeat(65) + "/members", "/api/stations/abc/members/not-an-account", "/api/integrations/bad.id/events", "/api/stations/abc/unknown"]) {
+    assert.equal((await call(app.base, path, { cookie })).status, 404, path);
+  }
+});
+
+test("a stranger's Station routes answer 404 and a member's owner-only ones 403, both without asking Auth", async (t) => {
+  const integrations = await stack(t);
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service });
+  const owner = await signIn(app);
+  const member = await signIn(app);
+  const stranger = await signIn(app);
+  const { station } = await registerStation(app, integrations, owner.cookie);
+  assert.equal((await call(app.base, "/api/stations/" + station.id + "/members/" + member.sub, { cookie: owner.cookie, method: "PUT" })).status, 200);
+  const calls = integrations.manage.calls.length;
+  const base = "/api/stations/" + station.id;
+  for (const id of [station.id, "st-unknown"]) {
+    for (const [path, method] of [["/members", "GET"], ["/members/" + stranger.sub, "PUT"], ["/members/" + member.sub, "DELETE"], ["", "DELETE"]]) {
+      const response = await call(app.base, "/api/stations/" + id + path, { cookie: stranger.cookie, method });
+      assert.deepEqual([response.status, (await response.json()).error], [404, "This Station or integration was not found."], method + " " + id + path);
+    }
+  }
+  for (const [path, method] of [["/members/" + stranger.sub, "PUT"], ["/members/" + owner.sub, "DELETE"], ["", "DELETE"]]) {
+    const response = await call(app.base, base + path, { cookie: member.cookie, method });
+    assert.deepEqual([response.status, (await response.json()).code], [403, "forbidden"], method + path);
+  }
+  assert.equal(integrations.manage.calls.length, calls, "Auth was not called");
+  assert.equal((await call(app.base, base + "/members", { cookie: member.cookie })).status, 200, "a member may list the members");
+});
+
+test("routes that call Auth are limited per account: lists 60 a minute, changes 30", async (t) => {
+  const integrations = await stack(t);
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service });
+  const busy = await signIn(app);
+  const other = await signIn(app);
+  const limited = async (path, options, max) => {
+    for (let index = 0; index < max; index += 1) assert.notEqual((await call(app.base, path, options)).status, 429, path + " #" + (index + 1));
+    const over = await call(app.base, path, options);
+    assert.deepEqual([over.status, (await over.json()).error], [429, "A few too many requests. Please try again in a moment."], path);
+  };
+  await limited("/api/stations", { cookie: busy.cookie }, 60);
+  await limited("/api/stations/st-unknown/members", { cookie: busy.cookie }, 60);
+  await limited("/api/integrations", { cookie: busy.cookie }, 60);
+  const calls = integrations.manage.calls.length;
+  assert.equal((await call(app.base, "/api/v1/integrations", { bearer: await app.fake.issueAccessToken({ sub: busy.sub, scope: "integrations:read" }) })).status, 429, "the v1 list shares the account's budget");
+  assert.equal(integrations.manage.calls.length, calls, "a limited request does not reach Auth");
+  // Changes share one budget across Station and integration routes.
+  for (let index = 0; index < 10; index += 1) assert.equal((await call(app.base, "/api/stations/st-unknown", { cookie: busy.cookie, method: "DELETE" })).status, 404);
+  for (let index = 0; index < 10; index += 1) assert.equal((await call(app.base, "/api/stations/st-unknown/members/" + other.sub, { cookie: busy.cookie, method: "PUT" })).status, 404);
+  await limited("/api/integrations/i-unknown/pause", { cookie: busy.cookie, method: "POST" }, 10);
+  const approver = await app.fake.issueAccessToken({ sub: busy.sub, scope: "integrations:approve" });
+  assert.equal((await call(app.base, "/api/v1/integrations/i-unknown/approval", { bearer: approver, method: "POST", data: { r9Svc: R9 } })).status, 429);
+  assert.equal((await call(app.base, "/api/stations", { cookie: other.cookie })).status, 200, "another account is not limited");
+  assert.equal((await call(app.base, "/api/integrations/i-unknown/revoke", { cookie: other.cookie, method: "POST" })).status, 404);
+});
+
+test("the v1 integration list and approval take scoped access tokens", async (t) => {
+  const integrations = await stack(t);
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service });
+  const owner = await signIn(app);
+  const { station } = await registerStation(app, integrations, owner.cookie);
+  const integration = await createIntegration(app, owner.cookie, station.id);
+
+  const reader = await app.fake.issueAccessToken({ sub: owner.sub, client_id: "astation", scope: "integrations:read" });
+  const listed = await call(app.base, "/api/v1/integrations", { bearer: reader });
+  assert.equal(listed.status, 200);
+  assert.deepEqual((await listed.json()).integrations.map((entry) => entry.id), [integration.id]);
+  assertScope(await call(app.base, "/api/v1/integrations", { bearer: await app.fake.issueAccessToken({ sub: owner.sub, scope: "credits" }) }), "integrations:read");
+  const unversioned = await call(app.base, "/api/integrations", { bearer: reader });
+  assert.equal(unversioned.status, 404);
+  assert.match((await unversioned.json()).error, /\/api\/v1\/integrations/);
+
+  const approvalPath = "/api/v1/integrations/" + integration.id + "/approval";
+  assertScope(await call(app.base, approvalPath, { bearer: reader, method: "POST", data: { r9Svc: R9 } }), "integrations:approve");
+  assert.equal((await call(app.base, "/api/integrations/" + integration.id + "/approval", { cookie: owner.cookie, method: "POST", data: { r9Svc: R9 } })).status, 401, "approval needs an access token");
+  const approver = await app.fake.issueAccessToken({ sub: owner.sub, client_id: "astation", scope: "integrations:approve" });
+  const approved = await call(app.base, approvalPath, { bearer: approver, method: "POST", data: { r9Svc: R9 } });
+  assert.equal(approved.status, 200);
+  assert.equal((await approved.json()).state, "provisioning");
+  assert.equal((await call(app.base, "/api/v1/integrations/bad.id/approval", { bearer: approver, method: "POST", data: { r9Svc: R9 } })).status, 404);
+});
+
+test("Station reports and the change feed take only the Station's station.report token", async (t) => {
+  const integrations = await stack(t);
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service });
+  const owner = await signIn(app);
+  const { station } = await registerStation(app, integrations, owner.cookie);
+  const integration = await createIntegration(app, owner.cookie, station.id);
+  await integrations.service.approve(owner.sub, integration.id, { r9Svc: R9 });
+
+  const report = (bearer, data = { integrationId: integration.id, state: "waiting_for_host" }, prefix = "/api/v1/") => call(app.base, prefix + "stations/reports", { bearer, method: "POST", data });
+  const stationToken = await app.fake.issueAccessToken({ sub: owner.sub, client_id: station.reportClientId, scope: "station.report" });
+  assert.match(station.reportClientId, /^s-/);
+  const reported = await report(stationToken);
+  assert.equal(reported.status, 200);
+  const view = await reported.json();
+  assert.equal(view.state, "waiting_for_host");
+  assert.equal(view.role, undefined);
+
+  const otherClient = await report(await app.fake.issueAccessToken({ sub: owner.sub, client_id: "astation", scope: "station.report" }));
+  assert.deepEqual([otherClient.status, (await otherClient.json()).error], [403, "This token is not a Station report token."]);
+  const unknownStation = await report(await app.fake.issueAccessToken({ sub: owner.sub, client_id: "s-unknown", scope: "station.report" }));
+  assert.equal(unknownStation.status, 403);
+  assertScope(await report(await app.fake.issueAccessToken({ sub: owner.sub, client_id: station.reportClientId, scope: "credits" })), "station.report");
+  const unversioned = await report(stationToken, undefined, "/api/");
+  assert.equal(unversioned.status, 404);
+  assert.match((await unversioned.json()).error, /\/api\/v1\/stations\/reports/);
+  assert.equal((await call(app.base, "/api/v1/stations/reports", { cookie: owner.cookie, method: "POST", data: {} })).status, 401, "a browser session cannot report");
+
+  const feed = await call(app.base, "/api/v1/stations/changes?cursor=0", { bearer: stationToken });
+  assert.equal(feed.status, 200);
+  const changes = await feed.json();
+  assert.deepEqual(changes.integrations.map((entry) => entry.id), [integration.id]);
+  assert.ok(changes.changes.some((change) => change.kind === "integration_reported"));
+  const next = await (await call(app.base, "/api/v1/stations/changes?cursor=" + changes.cursor, { bearer: stationToken })).json();
+  assert.deepEqual([next.changes, next.cursor, next.integrations], [[], changes.cursor, undefined]);
+  assert.equal((await call(app.base, "/api/v1/stations/changes?cursor=-1", { bearer: stationToken })).status, 400);
+  assertScope(await call(app.base, "/api/v1/stations/changes", { bearer: await app.fake.issueAccessToken({ client_id: station.reportClientId, scope: "credits" }) }), "station.report");
+  const unversionedFeed = await call(app.base, "/api/stations/changes", { bearer: stationToken });
+  assert.equal(unversionedFeed.status, 404);
+});
+
+test("a read token for a Station comes from exchanging the session's ID token", async (t) => {
+  const integrations = await stack(t);
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service });
+  const owner = await signIn(app);
+  const stranger = await signIn(app);
+  const { station } = await registerStation(app, integrations, owner.cookie);
+  const read = await call(app.base, "/api/stations/" + station.id + "/read-token", { cookie: owner.cookie, method: "POST" });
+  assert.equal(read.status, 200);
+  assert.deepEqual(await read.json(), { accessToken: "station-read-token", expiresIn: 300, origin: "https://one.example" });
+  assert.equal(integrations.exchanges.length, 1);
+  assert.equal(integrations.exchanges[0].origin, "https://one.example");
+  assert.equal(integrations.exchanges[0].idToken.split(".").length, 3, "the session's ID token");
+  assert.equal((await call(app.base, "/api/stations/" + station.id + "/read-token", { cookie: stranger.cookie, method: "POST" })).status, 404);
+  const bearer = await app.fake.issueAccessToken({ sub: owner.sub, scope: "credits" });
+  const me = await (await call(app.base, "/api/v1/me", { bearer })).json();
+  assert.equal("integrationsAvailable" in me, false, "the bearer /api/me shape is unchanged");
+});
