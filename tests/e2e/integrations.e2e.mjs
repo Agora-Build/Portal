@@ -243,6 +243,9 @@ describe("Stations and integrations against the real auth.agora.build", { skip: 
     assert.deepEqual(created.body.scopes, SCOPES);
     state.integration = created.body;
     assert.ok(await eventually(() => station.nudges.length > before), "the Station is nudged about the new integration");
+    // Before approval the Station can bind the integration to its owner only through its authenticated feed.
+    const snapshot = await feed(0, state.reportToken);
+    assert.equal(snapshot.body.integrations.find((entry) => entry.id === state.integration.id)?.ownerAccount, state.ownerId, "the feed names the integration's owner");
 
     // Auth issues no integration token before a native manager approves it (its R9 service fingerprint recorded).
     const refused = await integrationToken();

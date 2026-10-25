@@ -373,6 +373,9 @@ test("Station reports and the change feed take only the Station's station.report
   const next = await (await call(app.base, "/api/v1/stations/changes?cursor=" + changes.cursor, { bearer: stationToken })).json();
   assert.deepEqual([next.changes, next.cursor, next.integrations], [[], changes.cursor, undefined]);
   assert.equal((await call(app.base, "/api/v1/stations/changes?cursor=-1", { bearer: stationToken })).status, 400);
+  const ahead = await call(app.base, "/api/v1/stations/changes?cursor=" + (changes.cursor + 1), { bearer: stationToken });
+  assert.equal(ahead.status, 409);
+  assert.equal((await ahead.json()).code, "cursor_ahead");
   assertScope(await call(app.base, "/api/v1/stations/changes", { bearer: await app.fake.issueAccessToken({ client_id: station.reportClientId, scope: "credits" }) }), "station.report");
   const unversionedFeed = await call(app.base, "/api/stations/changes", { bearer: stationToken });
   assert.equal(unversionedFeed.status, 404);

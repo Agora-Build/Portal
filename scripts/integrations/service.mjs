@@ -134,9 +134,10 @@ function feedCursor(value) {
   return cursor;
 }
 
-// What a Station needs to act on an integration; the state is the effective one, so it may be "expired".
+// What a Station needs to act on an integration; the state is the effective one, so it may be "expired". ownerAccount
+// lets the Station bind an integration to its owner before approval, when the integration itself has no token yet.
 function feedIntegration(row, at) {
-  return { state: effectiveState(row, at), scopes: row.scopes, r9Svc: row.r9Svc, expiresAt: row.expiresAt, quotaPerSecond: row.quotaPerSecond };
+  return { ownerAccount: row.ownerAccount, state: effectiveState(row, at), scopes: row.scopes, r9Svc: row.r9Svc, expiresAt: row.expiresAt, quotaPerSecond: row.quotaPerSecond };
 }
 
 export function createIntegrationService({
@@ -686,6 +687,9 @@ export function createIntegrationService({
     async changes(clientId, cursorInput) {
       const station = await reportingStation(clientId);
       const cursor = feedCursor(cursorInput);
+      // A cursor this Station's history never reached (the Portal's database was restored from an older backup) can't
+      // be served from: the Station must start again from cursor 0, whose snapshot is the current state.
+      if (cursor > 0 && cursor > await repository.latestCursor(station.id)) throw failure(409, "This cursor is ahead of the Portal's history. Read the feed again from cursor 0.", "cursor_ahead");
       const events = await repository.changesSince(station.id, cursor, FEED_LIMIT);
       const rows = await repository.integrationsOnStation(station.id);
       const at = now();
