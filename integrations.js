@@ -52,7 +52,16 @@ function confirmAction(title, text, action) {
   document.querySelector("#integration-confirm-ok").textContent = action;
   confirmDialog.returnValue = "";
   confirmDialog.showModal();
-  return new Promise((done) => confirmDialog.addEventListener("close", () => done(confirmDialog.returnValue === "confirm"), { once: true }));
+  // A close event from the previous dialog (Escape fires it a moment later) can arrive after this one opened; only a
+  // close that leaves the dialog shut answers this question.
+  return new Promise((done) => {
+    const closed = () => {
+      if (confirmDialog.open) return;
+      confirmDialog.removeEventListener("close", closed);
+      done(confirmDialog.returnValue === "confirm");
+    };
+    confirmDialog.addEventListener("close", closed);
+  });
 }
 // Runs an action from a button: disabled while it runs, its failure shown in `output` (or a toast). Focus the button
 // had comes back to it afterwards, or, when its row was re-rendered meanwhile, to the same control of the new row.
@@ -69,7 +78,7 @@ async function act(button, output, run) {
   }
 }
 function restoreFocus(button, row) {
-  if (button.isConnected) { button.focus(); return; }
+  if (button.isConnected && button.getClientRects().length) { button.focus(); return; }
   const next = row && [...document.querySelectorAll("[data-row]")].find((node) => node.dataset.row === row);
   const controls = next ? [...next.querySelectorAll(".agora-project-actions button")] : [];
   (controls.find((control) => control.textContent === button.textContent) || controls[0])?.focus();
@@ -82,6 +91,8 @@ function toggleForm(form, opener, open) {
   form.hidden = !open;
   opener.setAttribute("aria-expanded", String(open));
   if (open) form.querySelector("input, select, textarea")?.focus();
+  // Closing a form that held focus (Cancel, or a successful submit) hands focus back to the button that opened it.
+  else if (form.contains(document.activeElement) || document.activeElement === document.body) opener.focus();
 }
 
 // The app key: generated here (the private JWK is offered as one download, then dropped) or pasted as a public JWK.

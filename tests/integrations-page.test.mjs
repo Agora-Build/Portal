@@ -92,3 +92,10 @@ test("a failed Station check drops the used value so the form asks for a new one
   assert.match(script, /if \(error\.code !== "report_key"\) \{ resetChallenge\(\{ keepKey: true \}\);/);
   assert.match(script, /Get a new check value and try again\./);
 });
+
+test("closing a form that held focus hands it back to the button that opened it", async () => {
+  const script = await read("integrations.js");
+  assert.match(script, /else if \(form\.contains\(document\.activeElement\) \|\| document\.activeElement === document\.body\) opener\.focus\(\);/);
+  // A hidden button is still connected; focus goes back to it only when it is rendered.
+  assert.match(script, /button\.isConnected && button\.getClientRects\(\)\.length/);
+});

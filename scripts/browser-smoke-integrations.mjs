@@ -260,6 +260,7 @@ async function flow(viewport, index) {
       await item(page, ".station-item", stub.origin).waitFor({ timeout: 8000 });
       check(await page.locator("#station-list .station-item").count() === 2, tag + "Verify and register adds the second Station to the list");
       check((await page.locator("#station-add").getAttribute("aria-expanded")) === "false", tag + "the form closes after registering");
+      check(await page.evaluate(() => document.activeElement?.id) === "station-add", tag + "focus returns to Add Station after registering");
     });
 
     await step(tag + "create integration with a generated key", async () => {
@@ -287,6 +288,13 @@ async function flow(viewport, index) {
       check(JSON.stringify(body.scopes) === JSON.stringify(SCOPES), tag + "the request carries the chosen scopes");
       check((await badgeOf(page, "Smoke app")) === "Awaiting approval in Astation", tag + "the new integration awaits approval");
       check(await form.isHidden() && await form.locator(".key-download a").count() === 0, tag + "the form closes and the key link is gone");
+      check(await page.evaluate(() => document.activeElement?.id) === "integration-add", tag + "focus returns to Create integration after creating");
+      await page.locator("#integration-add").press("Enter");
+      await form.waitFor({ state: "visible" });
+      await form.getByRole("button", { name: "Cancel" }).focus();
+      await page.keyboard.press("Enter");
+      await form.waitFor({ state: "hidden" });
+      check(await page.evaluate(() => document.activeElement?.id) === "integration-add", tag + "Cancel closes the form and focus returns to Create integration");
     });
 
     await step(tag + "actions", async () => {
