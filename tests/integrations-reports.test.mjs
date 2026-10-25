@@ -203,11 +203,11 @@ test("the feed lists only this Station's changes with current snapshots, and a f
   assert.deepEqual(Object.keys(approvedChange).sort(), ["at", "id", "integration", "integrationId", "kind", "reason", "state"]);
   assert.equal(approvedChange.state, "provisioning");
   const row = await s.repository.integration(mine);
-  assert.deepEqual(approvedChange.integration, { state: "ready", scopes: ["agent.view"], r9Svc: R9, expiresAt: row.expiresAt, quotaPerSecond: 200 });
+  assert.deepEqual(approvedChange.integration, { ownerAccount: OWNER, state: "ready", scopes: ["agent.view"], r9Svc: R9, expiresAt: row.expiresAt, quotaPerSecond: 200 });
   assert.equal(Object.hasOwn(feed.changes[0], "integration"), false);
   assert.deepEqual(feed.integrations, [
-    { id: mine, state: "ready", scopes: ["agent.view"], r9Svc: R9, expiresAt: row.expiresAt, quotaPerSecond: 200 },
-    { id: theirs, state: "revoked", scopes: ["agent.view"], r9Svc: null, expiresAt: (await s.repository.integration(theirs)).expiresAt, quotaPerSecond: 200 }
+    { id: mine, ownerAccount: OWNER, state: "ready", scopes: ["agent.view"], r9Svc: R9, expiresAt: row.expiresAt, quotaPerSecond: 200 },
+    { id: theirs, ownerAccount: MEMBER, state: "revoked", scopes: ["agent.view"], r9Svc: null, expiresAt: (await s.repository.integration(theirs)).expiresAt, quotaPerSecond: 200 }
   ]);
 
   const later = await s.service.changes(client, String(feed.cursor));
@@ -238,6 +238,28 @@ test("the feed pages by 500 and refuses a bad cursor", async (t) => {
   for (const cursor of [-1, 1.5, "abc", "-1", "1e3", "1".repeat(16), "", null, undefined, Number.MAX_SAFE_INTEGER + 1, " 1"]) {
     await assert.rejects(s.service.changes(client, cursor), refused(400, "cursor"), JSON.stringify(cursor));
   }
+});
+
+test("a cursor ahead of this Station's history (a restored Portal database) is 409 cursor_ahead; cursor 0 recovers", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const id = await s.approved();
+  const latest = await s.repository.latestCursor(s.station.id);
+  assert.ok(latest > 0);
+  await assert.rejects(s.service.changes(client, latest + 1), refused(409, "cursor_ahead"));
+  await assert.rejects(s.service.changes(client, String(latest + 1000)), refused(409, "cursor_ahead"));
+  // The latest cursor itself is fine, and so is a cursor with gaps left by other Stations' events.
+  assert.deepEqual((await s.service.changes(client, latest)).changes, []);
+  const other = await s.register(OTHER, "https://two.example");
+  await s.approved(OTHER, other.id);
+  assert.ok((await s.repository.latestCursor(other.id)) > latest, "event ids are global");
+  assert.deepEqual((await s.service.changes(client, latest)).changes, []);
+  await assert.rejects(s.service.changes(client, await s.repository.latestCursor(other.id)), refused(409, "cursor_ahead"), "another Station's cursor is ahead of this Station's history");
+  // Starting again from 0 gives the current snapshot, owners included.
+  const fresh = await s.service.changes(client, 0);
+  assert.deepEqual(fresh.integrations.map((entry) => [entry.id, entry.ownerAccount]), [[id, OWNER]]);
+  assert.equal(fresh.cursor, latest);
 });
 
 test("notify posts the latest cursor to the Station and coalesces rapid calls", async (t) => {

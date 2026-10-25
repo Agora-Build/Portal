@@ -700,8 +700,21 @@ every integration on the Station. Start at 0, then poll every minute with the
 returned `cursor` (it stays the same when nothing changed). A page holds at most
 500 changes, oldest first; if it is full, ask again at once. Each change is
 `{ id, at, integrationId, kind, state, reason }` plus, for integration changes,
-`integration`: `{ state, scopes, r9Svc, expiresAt, quotaPerSecond }` as they
-stand now (state may be `expired`). `kind` is one of `integration_created`,
+`integration`: `{ ownerAccount, state, scopes, r9Svc, expiresAt, quotaPerSecond }`
+as they stand now (state may be `expired`); each entry of the `integrations`
+snapshot is the same object with its `id`. `ownerAccount` (`ab…`) is how a
+Station binds a pending integration to its owner before approval, when the
+integration has no token yet; trust it only from this authenticated feed.
+The current values in `integration` and `integrations` take precedence over a
+change's historical `state`.
+
+**Cursors.** A cursor is a whole number (send it as given). Event IDs are
+global and increase in commit order, so one Station's IDs have gaps; never
+treat them as a count. A cursor beyond this Station's latest event (for example
+after the Portal's database was restored from an older backup) is refused with
+409 `cursor_ahead`: read the feed again from `cursor=0`, whose snapshot is the
+current state, including pauses and revocations, and continue from there. The
+cursor in a push nudge is only a hint; never store it. `kind` is one of `integration_created`,
 `integration_approved`, `integration_paused`, `integration_resumed`,
 `integration_revoked`, `integration_renewed`, `integration_settings_changed`,
 `integration_key_added`, `integration_reported` (the Station's own reports),
