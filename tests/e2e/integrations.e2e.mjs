@@ -233,7 +233,7 @@ describe("Stations and integrations against the real auth.agora.build", { skip: 
     assertNothingSecretLogged();
   });
 
-  test("3. an integration gets a client-credentials token for the Station; the Portal refuses it", async () => {
+  test("3. a new integration awaits approval, and Auth refuses it a token until then", async () => {
     state.integrationKeys = await integrationKey();
     const before = station.nudges.length;
     const created = await json(await state.owner.browser.api("/api/integrations", { method: "POST", json: { stationId: state.station.id, name: "E2E app", scopes: SCOPES, publicJwk: state.integrationKeys.publicJwk } }));
@@ -244,20 +244,9 @@ describe("Stations and integrations against the real auth.agora.build", { skip: 
     state.integration = created.body;
     assert.ok(await eventually(() => station.nudges.length > before), "the Station is nudged about the new integration");
 
-    const issued = await integrationToken();
-    assert.equal(issued.status, 200, "Auth issues the integration token: " + issued.body.error);
-    const token = issued.body.access_token;
-    const claims = decodeJwt(token);
-    assert.deepEqual([claims.sub, claims.client_id, claims.aud, claims.scope], [state.ownerId, state.integration.id, station.origin, SCOPES.join(" ")]);
-    assert.equal(claims.r9_svc, undefined, "no R9 service key has been approved yet");
-    // A8: a Station accepts an integration token only with the R9 service key it holds for it; there is none yet.
-    assert.deepEqual(await station.refusal(token, { scope: "agent.view", r9Svc: r9Fingerprint() }), { status: 401, error: "invalid_token" });
-    assert.deepEqual(await station.refusal(token, { scope: "agent.view" }), { status: 401, error: "invalid_token" });
-
-    const atPortal = await bearer(stack, "/api/v1/integrations", token);
-    assert.equal(atPortal.status, 401, "a Station token is not a Portal token (wrong audience)");
-    assert.match(atPortal.headers.get("www-authenticate"), /invalid_token/);
-    assert.equal((await feed(0, token)).status, 401);
+    // Auth issues no integration token before a native manager approves it (its R9 service fingerprint recorded).
+    const refused = await integrationToken();
+    assert.deepEqual([refused.status, refused.body.error, refused.body.access_token], [400, "unauthorized_client", undefined], "Auth refuses an integration token before approval");
     assertNothingSecretLogged();
   });
 
@@ -280,6 +269,11 @@ describe("Stations and integrations against the real auth.agora.build", { skip: 
     assert.deepEqual(await station.verify(token, { scope: "agent.prompt", r9Svc: state.r9Svc }), { sub: state.ownerId, clientId: state.integration.id, scopes: SCOPES });
     assert.deepEqual(await station.refusal(token, { scope: "agent.prompt", r9Svc: r9Fingerprint() }), { status: 401, error: "invalid_token" }, "another R9 key fails");
     assert.deepEqual(await station.refusal(token, { scope: "agent.terminal", r9Svc: state.r9Svc }), { status: 403, error: "insufficient_scope" }, "a scope that was not granted");
+    assert.deepEqual(decodeJwt(token).sub, state.ownerId);
+    const atPortal = await bearer(stack, "/api/v1/integrations", token);
+    assert.equal(atPortal.status, 401, "a Station token is not a Portal token (wrong audience)");
+    assert.match(atPortal.headers.get("www-authenticate"), /invalid_token/);
+    assert.equal((await feed(0, token)).status, 401);
 
     const noScope = await json(await bearer(stack, "/api/v1/integrations/" + state.integration.id + "/approval", state.reportToken, { method: "POST", json: { r9Svc: state.r9Svc } }));
     assert.equal(noScope.status, 403, "a report token cannot approve");

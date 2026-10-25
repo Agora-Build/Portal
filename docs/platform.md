@@ -600,8 +600,8 @@ Create takes a name of 1 to 80 characters, scopes from `agent.view`,
 `agent.prompt`, `agent.approve`, `agent.interrupt` and `agent.terminal` (each at
 most once; `agent.view` is always added), a public JWK (a private member is
 refused), a quota of 1 to 10000 token requests per second (default 200) and an
-expiry of 1 to 90 days (default 30). A new integration waits for approval; the
-owner approves it in Astation, which sends the approval with an
+expiry of 1 to 90 days (default 30). A new integration waits for approval, and
+Auth issues it no token until then; the owner approves it in Astation, which sends the approval with an
 `integrations:approve` token for the owner. An account that is neither an
 integration's owner nor its Station's owner gets 404 for it; likewise an account
 that neither owns a Station nor is a current member of it gets 404 for every
@@ -617,12 +617,10 @@ account ID exists; account IDs are random ULIDs, so this is accepted rather
 than guessed at. Station challenges are 10 per hour per account; Station reports
 600 and feed reads 120 per minute per Station.
 
-All of the Portal's management calls to Auth (`/manage/v1`) come from the
-Portal's own address, so they share Auth's per-address limit on that API (600
-a minute). Auth should be configured to exempt the Portal's `manage` client
-from that limit or raise it for the Portal (an Auth-side change); until then
-the per-account limits above keep one account from using up the budget, but
-many accounts together still can, and Auth's 429 then shows as 503
+Auth limits its management API per management client (6,000 calls a minute
+for the Portal's `manage` client), not per address, so the Portal's own
+address is not a shared bottleneck; the per-account limits above keep one
+account from using a large share of it. If Auth answers 429, it shows as 503
 `unavailable` (lists are served stale).
 
 Common error codes: `not_found` (404), `forbidden` (403), `invalid_state` and
