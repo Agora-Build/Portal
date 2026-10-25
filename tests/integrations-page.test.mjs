@@ -75,3 +75,20 @@ test("the build copies integrations.js and the server lists it as public", async
   assert.match(await read("scripts/serve.mjs"), /"account\.js", "integrations\.js"/);
   assert.match(await read("tests/server.test.mjs"), /"account\.js", "integrations\.js"/);
 });
+
+test("confirmations ask before the action runs, so the opener stays enabled and gets focus back", async () => {
+  const script = await read("integrations.js");
+  // A button disabled while its <dialog> is open can't take focus back when the dialog closes (Escape or Keep it).
+  assert.doesNotMatch(script, /act\([^\n]*\n?\s*if \(!await confirmAction/);
+  assert.equal((script.match(/confirmed\(\w+, output, \[/g) || []).length, 4, "Remove member, Remove Station, Leave and Revoke confirm first");
+  // After the rows re-render, focus that was on the action's button moves to the same control of the new row.
+  assert.match(script, /data-row/);
+  assert.match(script, /function restoreFocus\(button, row\)/);
+});
+
+test("a failed Station check drops the used value so the form asks for a new one", async () => {
+  const script = await read("integrations.js");
+  // The Portal spends the check value before it fetches the proof; only a refused report key leaves it unused.
+  assert.match(script, /if \(error\.code !== "report_key"\) \{ resetChallenge\(\{ keepKey: true \}\);/);
+  assert.match(script, /Get a new check value and try again\./);
+});

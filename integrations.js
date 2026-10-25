@@ -54,13 +54,29 @@ function confirmAction(title, text, action) {
   confirmDialog.showModal();
   return new Promise((done) => confirmDialog.addEventListener("close", () => done(confirmDialog.returnValue === "confirm"), { once: true }));
 }
-// Runs an action from a button: disabled while it runs, its failure shown in `output` (or a toast).
+// Runs an action from a button: disabled while it runs, its failure shown in `output` (or a toast). Focus the button
+// had comes back to it afterwards, or, when its row was re-rendered meanwhile, to the same control of the new row.
 async function act(button, output, run) {
+  const focused = document.activeElement === button;
+  const row = button.closest("[data-row]")?.dataset.row;
   button.disabled = true;
   if (output) output.textContent = "";
   try { await run(); }
   catch (error) { if (output) output.textContent = error.message; else notify(error.message); }
-  finally { button.disabled = false; }
+  finally {
+    button.disabled = false;
+    if (focused && (!document.activeElement || document.activeElement === document.body)) restoreFocus(button, row);
+  }
+}
+function restoreFocus(button, row) {
+  if (button.isConnected) { button.focus(); return; }
+  const next = row && [...document.querySelectorAll("[data-row]")].find((node) => node.dataset.row === row);
+  const controls = next ? [...next.querySelectorAll(".agora-project-actions button")] : [];
+  (controls.find((control) => control.textContent === button.textContent) || controls[0])?.focus();
+}
+// Asks first, then runs the action, so the opener stays enabled while the dialog is open and takes focus back.
+async function confirmed(button, output, question, run) {
+  if (await confirmAction(...question)) await act(button, output, run);
 }
 function toggleForm(form, opener, open) {
   form.hidden = !open;
@@ -147,8 +163,7 @@ function membersPanel(station) {
       const { members } = await request("/api/stations/" + segment(station.id) + "/members");
       list.replaceChildren(...members.map((member) => {
         const remove = el("button", { class: "inline-link", type: "button", text: "Remove", "aria-label": "Remove " + member.account });
-        remove.addEventListener("click", () => act(remove, output, async () => {
-          if (!await confirmAction("Remove this member?", member.account + " loses this Station, and their integrations on it are revoked.", "Remove member")) return;
+        remove.addEventListener("click", () => confirmed(remove, output, ["Remove this member?", member.account + " loses this Station, and their integrations on it are revoked.", "Remove member"], async () => {
           await request("/api/stations/" + segment(station.id) + "/members/" + segment(member.account), { method: "DELETE" });
           notify("Member removed.");
           await Promise.all([load(), loadIntegrations()]);
@@ -182,8 +197,7 @@ function stationRow(station) {
   actions.append(details);
   if (owner) {
     const remove = el("button", { class: "inline-link", type: "button", text: "Remove Station", "aria-haspopup": "dialog" });
-    remove.addEventListener("click", () => act(remove, output, async () => {
-      if (!await confirmAction("Remove " + station.origin + "?", "Every integration on this Station is revoked and its members lose access. This can't be undone.", "Remove Station")) return;
+    remove.addEventListener("click", () => confirmed(remove, output, ["Remove " + station.origin + "?", "Every integration on this Station is revoked and its members lose access. This can't be undone.", "Remove Station"], async () => {
       await request("/api/stations/" + segment(station.id), { method: "DELETE" });
       notify("Station removed.");
       await loadAll();
@@ -191,8 +205,7 @@ function stationRow(station) {
     actions.append(remove);
   } else {
     const leave = el("button", { class: "inline-link", type: "button", text: "Leave", "aria-haspopup": "dialog" });
-    leave.addEventListener("click", () => act(leave, output, async () => {
-      if (!await confirmAction("Leave " + station.origin + "?", "You lose this Station, and your integrations on it are revoked.", "Leave Station")) return;
+    leave.addEventListener("click", () => confirmed(leave, output, ["Leave " + station.origin + "?", "You lose this Station, and your integrations on it are revoked.", "Leave Station"], async () => {
       await request("/api/stations/" + segment(station.id) + "/members/" + segment(me.account.id), { method: "DELETE" });
       notify("You left the Station.");
       await loadAll();
@@ -200,7 +213,7 @@ function stationRow(station) {
     actions.append(leave);
   }
   const facts = [owner ? "You own it" : "Shared with you", station.createdAt ? "Added " + date(station.createdAt) : "", station.status && station.status !== "active" ? words(station.status) : ""].filter(Boolean).join(" · ");
-  return el("article", { class: "account-card station-item" }, [
+  return el("article", { class: "account-card station-item", "data-row": station.id }, [
     el("h3", { class: "mono", text: station.origin }),
     el("p", { class: "muted", text: facts }),
     actions,
@@ -227,13 +240,13 @@ async function loadStations(current = version) {
 
 // Add Station: the origin gets a single-use value to serve, then the Station's report key registers it.
 const stationStatus = document.querySelector("#station-status");
-function resetChallenge() {
+function resetChallenge({ keepKey = false } = {}) {
   challenge = null;
   document.querySelector("#station-challenge").hidden = true;
   document.querySelector("#station-challenge-value").textContent = "";
   document.querySelector("#station-challenge-url").textContent = "";
   document.querySelector("#station-challenge-expiry").textContent = "";
-  stationForm.elements.reportKey.value = "";
+  if (!keepKey) stationForm.elements.reportKey.value = "";
   document.querySelector("#station-submit").textContent = "Get the check value";
 }
 function closeStationForm() { resetChallenge(); stationForm.elements.origin.value = ""; stationStatus.textContent = ""; toggleForm(stationForm, document.querySelector("#station-add"), false); }
@@ -263,7 +276,11 @@ stationForm.addEventListener("submit", (event) => {
   if (!reportKey || typeof reportKey !== "object" || Array.isArray(reportKey)) { stationStatus.textContent = "Paste the Station's report public key as JWK JSON."; return; }
   act(submit, stationStatus, async () => {
     try { await request("/api/stations", { method: "POST", body: { challengeId: challenge.challengeId, reportKey } }); }
-    catch (error) { if (error.code === "challenge") resetChallenge(); throw error; }
+    // The Portal spends the value before it fetches the proof; only a refused report key leaves it unused.
+    catch (error) {
+      if (error.code !== "report_key") { resetChallenge({ keepKey: true }); if (error.code !== "challenge") error.message += " Get a new check value and try again."; }
+      throw error;
+    }
     closeStationForm();
     notify("Station registered.");
     await loadAll();
@@ -387,10 +404,7 @@ function integrationRow(integration) {
   }
   if (!STOPPED.includes(state)) {
     const revoke = el("button", { class: "inline-link", type: "button", text: "Revoke", "aria-haspopup": "dialog" });
-    revoke.addEventListener("click", () => act(revoke, output, async () => {
-      if (!await confirmAction("Revoke " + integration.name + "?", "The app loses access through this integration for good. This can't be undone.", "Revoke integration")) return;
-      await change("revoke");
-    }));
+    revoke.addEventListener("click", () => confirmed(revoke, output, ["Revoke " + integration.name + "?", "The app loses access through this integration for good. This can't be undone.", "Revoke integration"], () => change("revoke")));
     actions.append(revoke);
   }
   const history = el("button", { class: "inline-link", type: "button", text: "History", "aria-haspopup": "dialog" });
@@ -406,7 +420,7 @@ function integrationRow(integration) {
   }
   const badge = el("span", { class: "state-badge state-badge--" + String(state).replace(/[^a-z_]/g, "").replace(/_/g, "-"), text: stateLabel(state) });
   const fact = (term, value) => value ? [el("dt", { text: term }), el("dd", { text: value })] : [];
-  return el("article", { class: "account-card integration-item" }, [
+  return el("article", { class: "account-card integration-item", "data-row": integration.id }, [
     el("div", { class: "integration-heading" }, [el("h3", { text: integration.name }), badge]),
     ...(owner ? [] : [el("p", { class: "muted", text: "Another account's integration on your Station. You can pause or revoke it." })]),
     el("dl", { class: "integration-facts" }, [
