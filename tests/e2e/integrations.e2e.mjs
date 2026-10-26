@@ -9,7 +9,7 @@ import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { decodeJwt, exportJWK, generateKeyPair, SignJWT } from "jose";
-import { API, authRepo, bearer, eventually, integrationsSkipReason, interactionUid, loadAuth, person, portalSignIn, skipReason, startStack, STATION_HOST, stationTls } from "./harness.mjs";
+import { API, authRepo, bearer, createBrowser, eventually, integrationsSkipReason, interactionUid, loadAuth, person, portalSignIn, skipReason, startStack, STATION_HOST, stationTls } from "./harness.mjs";
 
 const skip = (await skipReason()) ?? (await integrationsSkipReason());
 if (skip) console.log("# Skipping the Stations and integrations end-to-end suite: " + skip + ".");
@@ -56,22 +56,38 @@ async function clientCredentials({ clientId, privateKey, resource, scope }) {
   return { status: response.status, body: remember(await response.json()) };
 }
 
-// The native "astation" app: device authorization approved by the person in their browser, then one token poll.
-async function astationTokens(browser, user) {
-  const astation = await lib.relyingParty(stack.idp, "astation");
-  const device = await lib.oidc.initiateDeviceAuthorization(astation, { scope: "openid integrations:read integrations:approve", resource: API });
+// The native "astation" app's device flow for any scope and resource, with real HTTP: the device authorization request,
+// the person's approval in `browser`, then one token poll. Returns where Auth answered ("device_authorization",
+// "approval" or "token") with its status and error, and the tokens when it issued them.
+// Each device has its own address (Auth limits device authorizations per address, as it does device code entry per
+// browser address).
+let nextDevice = 0;
+async function astationGrant(browser, user, { scope, resource }) {
+  const device = { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json", "X-Forwarded-For": "203.0.113." + (1 + (nextDevice++ % 250)) };
+  const started = await fetch(stack.issuer + "/device/auth", { method: "POST", headers: device, body: new URLSearchParams({ client_id: "astation", scope, resource }).toString() });
+  const codes = await started.json();
+  if (started.status !== 200) return { stage: "device_authorization", status: started.status, error: codes.error };
   const entry = await browser.request("/device");
-  const confirm = await browser.request("/device", { form: { xsrf: lib.xsrfOf(entry.text), user_code: device.user_code } });
+  const confirm = await browser.request("/device", { form: { xsrf: lib.xsrfOf(entry.text), user_code: codes.user_code } });
   assert.match(confirm.text, /Approve Astation\?/);
-  let page = await browser.follow("/device", { form: { xsrf: lib.xsrfOf(confirm.text), user_code: device.user_code, confirm: "yes" } });
+  let page = await browser.follow("/device", { form: { xsrf: lib.xsrfOf(confirm.text), user_code: codes.user_code, confirm: "yes" } });
   if (/Continue with GitHub/.test(page.text)) {
     const start = await browser.request("/interaction/" + interactionUid(page.url) + "/upstream/github", { form: {} });
     page = await browser.follow(stack.idp.fake.approve(start.location, user));
   }
-  assert.match(page.text, /signed in to Astation on your device/);
-  const response = await fetch(stack.issuer + "/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:device_code", device_code: device.device_code, client_id: "astation" }).toString() });
-  assert.equal(response.status, 200, "the first poll after approval gets the tokens");
-  return remember(await response.json());
+  // When Auth refuses at approval, the person sees an error page and the device still learns why at its next poll.
+  const approved = /signed in to Astation on your device/.test(page.text);
+  const approval = approved ? { status: page.status } : { status: page.status, page: /<title>([^<]*)</.exec(page.text)?.[1] ?? null, notice: /Something went wrong[^<]*|That code is not right[^<]*|This request cannot continue/.exec(page.text)?.[0] ?? null };
+  const response = await fetch(stack.issuer + "/token", { method: "POST", headers: device, body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:device_code", device_code: codes.device_code, client_id: "astation" }).toString() });
+  const body = remember(await response.json());
+  return { stage: approved ? "token" : "token after refused approval", status: response.status, error: body.error, approval, body };
+}
+
+// Astation's Portal approval tokens (integrations:read and integrations:approve for the Portal API).
+async function astationTokens(browser, user) {
+  const grant = await astationGrant(browser, user, { scope: "openid integrations:read integrations:approve", resource: API });
+  assert.deepEqual([grant.stage, grant.status], ["token", 200], "the first poll after approval gets the tokens");
+  return grant.body;
 }
 
 // Auth's own answer to the Portal's token exchange (RFC 8693) for `browser`'s person: an ID token for the Portal client
@@ -269,6 +285,7 @@ describe("Stations and integrations against the real auth.agora.build", { skip: 
     assert.equal(issued.status, 200);
     const token = issued.body.access_token;
     assert.equal(decodeJwt(token).r9_svc, state.r9Svc);
+    assert.ok(decodeJwt(token).exp - decodeJwt(token).iat <= 300, "an integration token lasts at most 5 minutes");
     assert.deepEqual(await station.verify(token, { scope: "agent.prompt", r9Svc: state.r9Svc }), { sub: state.ownerId, clientId: state.integration.id, scopes: SCOPES });
     assert.deepEqual(await station.refusal(token, { scope: "agent.prompt", r9Svc: r9Fingerprint() }), { status: 401, error: "invalid_token" }, "another R9 key fails");
     assert.deepEqual(await station.refusal(token, { scope: "agent.terminal", r9Svc: state.r9Svc }), { status: 403, error: "insufficient_scope" }, "a scope that was not granted");
@@ -379,6 +396,107 @@ describe("Stations and integrations against the real auth.agora.build", { skip: 
     const refused = await exchangeAtAuth(state.second.browser);
     assert.ok(refused.status >= 400 && !refused.body.access_token, "Auth refuses the exchange for a former member");
     t.diagnostic("Auth's answer to an exchange for a former member: " + JSON.stringify({ status: refused.status, error: refused.body.error }) + ".");
+    assertNothingSecretLogged();
+  });
+
+  // Portal issue #18: Astation provisions a custom (registered) Station with an astation.remote token whose audience is
+  // that Station's exact origin. The four token kinds stay apart:
+  // - native Station provisioning: client astation, sub = the owner (or a member), scope astation.remote only,
+  //   aud = the exact registered origin, 15 minutes, auth_time, no r9_svc and no sid (this flow);
+  // - native Portal approval: client astation, integrations:read and integrations:approve, aud = the Portal API only
+  //   (flows 2 and 4);
+  // - Station report client (s-...): station.report, aud = the Portal API only, never a Station (flows 2 and 5);
+  // - hosted integration (i-...): aud = its Station, sub = its owner, r9_svc, at most 300 seconds (flow 4).
+  test("9. Astation gets astation.remote for an owned custom Station's exact origin; every other case is refused", async (t) => {
+    const owner = person(7101, "Ada");
+    const bo = person(7102, "Bo");
+    const custom = { scope: "openid astation.remote", resource: station.origin };
+    // Every grant signs in afresh in a new browser, as a person approving a device would. Auth's answers are recorded
+    // (never a token) and printed at the end.
+    const answers = {};
+    const outcome = ({ stage, status, error, approval, body }) => ({ stage, status, error, ...(approval?.page ? { approval } : {}), issued: Boolean(body?.access_token) });
+
+    // 1. The owner: 200, a token the Station's reference verifier accepts for astation.remote.
+    const issued = await astationGrant(createBrowser(stack), owner, custom);
+    assert.deepEqual([issued.stage, issued.status], ["token", 200], "Auth issues the owner astation.remote: " + issued.error);
+    const remote = issued.body.access_token;
+    assert.deepEqual(await station.verify(remote, { scope: "astation.remote" }), { sub: state.ownerId, clientId: "astation", scopes: ["astation.remote"] });
+    const claims = decodeJwt(remote);
+    assert.equal(claims.aud, station.origin, "aud is exactly the registered origin");
+    assert.equal(claims.sub, state.ownerId);
+    assert.equal(claims.client_id, "astation");
+    assert.deepEqual(claims.scope.split(" "), ["astation.remote"], "nothing from integrations:* or agent.*");
+    assert.equal(claims.r9_svc, undefined, "no r9_svc on a person's token");
+    assert.equal(claims.sid, undefined, "no sid");
+    assert.ok(Number.isInteger(claims.auth_time) && claims.auth_time <= claims.iat, "auth_time is the sign-in time");
+    assert.ok(claims.exp - claims.iat <= 900, "at most 15 minutes");
+    assert.equal(issued.body.scope?.includes("integrations:"), false);
+    answers.lifetime = claims.exp - claims.iat;
+
+    // 2a. Another person's Station: Bo is neither owner nor member. Auth accepts the device authorization (it does not
+    // know the person yet), refuses at approval (Bo sees Auth's generic device error page, 400) and answers the device's
+    // next poll with invalid_target.
+    const refusedAtApproval = { stage: "token after refused approval", status: 400, error: "invalid_target", approval: { status: 400, page: "Connect a device | Agora Build", notice: "Something went wrong. Start again on your device." }, issued: false };
+    answers.stranger = outcome(await astationGrant(createBrowser(stack), bo, custom));
+    assert.deepEqual(answers.stranger, refusedAtApproval, "a stranger gets invalid_target");
+    // Shared, Bo is a member and gets his own token; unshared, the next new grant is refused again.
+    const shared = await json(await state.owner.browser.api("/api/stations/" + state.station.id + "/members/" + state.secondId, { method: "PUT" }));
+    assert.deepEqual([shared.status, shared.body], [200, { shared: true }]);
+    const asMember = await astationGrant(createBrowser(stack), bo, custom);
+    assert.deepEqual([asMember.stage, asMember.status], ["token", 200], "a member gets astation.remote: " + asMember.error);
+    assert.deepEqual(await station.verify(asMember.body.access_token, { scope: "astation.remote" }), { sub: state.secondId, clientId: "astation", scopes: ["astation.remote"] });
+    const unshared = await json(await state.owner.browser.api("/api/stations/" + state.station.id + "/members/" + state.secondId, { method: "DELETE" }));
+    assert.deepEqual([unshared.status, unshared.body], [200, { unshared: true }]);
+    answers.formerMember = outcome(await astationGrant(createBrowser(stack), bo, custom));
+    assert.deepEqual(answers.formerMember, refusedAtApproval, "a former member gets invalid_target on the next new grant");
+
+    // 2b. Wrong resources: not registered, a trailing slash, another port. Auth refuses them at once, at the device
+    // authorization request (exact string match on the registered origin).
+    const port = Number(new URL(station.origin).port);
+    for (const [name, resource] of [["unregistered", "https://unregistered.station.test"], ["trailingSlash", station.origin + "/"], ["otherPort", "https://" + STATION_HOST + ":" + (port === 65535 ? port - 1 : port + 1)]]) {
+      answers[name] = outcome(await astationGrant(createBrowser(stack), owner, { scope: custom.scope, resource }));
+      assert.deepEqual(answers[name], { stage: "device_authorization", status: 400, error: "invalid_target", issued: false }, name);
+    }
+
+    // 2c. Scope mix-ups. Auth does not refuse a scope the resource does not carry: it issues a token for the resource
+    // with no scope claim at all (contract finding), which the Station and the Portal then refuse at the scope check.
+    // A Portal scope asked of the Station:
+    const portalScopeAtStation = await astationGrant(createBrowser(stack), owner, { scope: "openid integrations:approve", resource: station.origin });
+    const mixedAtStation = decodeJwt(portalScopeAtStation.body.access_token);
+    answers.portalScopeAtStation = { ...outcome(portalScopeAtStation), aud: mixedAtStation.aud, tokenScope: mixedAtStation.scope ?? null, grantedScope: portalScopeAtStation.body.scope };
+    assert.deepEqual([portalScopeAtStation.stage, portalScopeAtStation.status, portalScopeAtStation.body.scope], ["token", 200, ""]);
+    assert.deepEqual([mixedAtStation.aud, mixedAtStation.scope, mixedAtStation.client_id], [station.origin, undefined, "astation"], "a Station token without integrations:approve (and without any scope)");
+    assert.deepEqual(await station.refusal(portalScopeAtStation.body.access_token, { scope: "astation.remote" }), { status: 403, error: "insufficient_scope" }, "the Station refuses it for astation.remote");
+    assert.equal((await bearer(stack, "/api/v1/integrations", portalScopeAtStation.body.access_token)).status, 401, "and the Portal refuses it (wrong audience)");
+    // astation.remote asked of the Portal API:
+    const remoteAtPortal = await astationGrant(createBrowser(stack), owner, { scope: "openid astation.remote", resource: API });
+    const mixedAtPortal = decodeJwt(remoteAtPortal.body.access_token);
+    answers.remoteAtPortal = { ...outcome(remoteAtPortal), aud: mixedAtPortal.aud, tokenScope: mixedAtPortal.scope ?? null, grantedScope: remoteAtPortal.body.scope };
+    assert.deepEqual([remoteAtPortal.stage, remoteAtPortal.status, remoteAtPortal.body.scope], ["token", 200, ""]);
+    assert.deepEqual([mixedAtPortal.aud, mixedAtPortal.scope, mixedAtPortal.client_id], [API, undefined, "astation"], "a Portal token without astation.remote (and without any scope)");
+    const scopelessAtPortal = await bearer(stack, "/api/v1/integrations", remoteAtPortal.body.access_token);
+    answers.remoteAtPortal.portal = scopelessAtPortal.status;
+    assert.equal(scopelessAtPortal.status, 403, "the Portal refuses a scopeless token");
+    assert.match(scopelessAtPortal.headers.get("www-authenticate"), /insufficient_scope/);
+    assert.deepEqual(await station.refusal(remoteAtPortal.body.access_token, { scope: "astation.remote" }), { status: 401, error: "invalid_token" }, "and the Station refuses it (wrong audience)");
+    // The custom-Station token at the Portal API: wrong audience.
+    const atPortal = await bearer(stack, "/api/v1/integrations", remote);
+    assert.equal(atPortal.status, 401, "the Portal refuses a Station token");
+    assert.match(atPortal.headers.get("www-authenticate"), /invalid_token/);
+    // A Portal integrations:read token at the Station: wrong audience.
+    const approval = await astationTokens(createBrowser(stack), owner);
+    assert.equal((await bearer(stack, "/api/v1/integrations", approval.access_token)).status, 200, "the approval token works at the Portal");
+    for (const scope of ["astation.remote", "integrations:read"]) assert.deepEqual(await station.refusal(approval.access_token, { scope }), { status: 401, error: "invalid_token" }, "the Station refuses a Portal token");
+
+    // 2d. The Station's own report client gets no astation.remote, for its Station or the Portal.
+    const reportRemote = await station.reportToken({ resource: station.origin, scope: "astation.remote" });
+    answers.reportClientRemote = { status: reportRemote.status, error: reportRemote.body.error, issued: Boolean(reportRemote.body.access_token) };
+    assert.deepEqual(answers.reportClientRemote, { status: 400, error: "invalid_target", issued: false });
+    const reportRemoteAtPortal = await station.reportToken({ resource: API, scope: "astation.remote" });
+    answers.reportClientRemoteAtPortal = { status: reportRemoteAtPortal.status, error: reportRemoteAtPortal.body.error, issued: Boolean(reportRemoteAtPortal.body.access_token) };
+    assert.deepEqual(answers.reportClientRemoteAtPortal, { status: 400, error: "invalid_scope", issued: false }, "no astation.remote at the Portal either");
+
+    t.diagnostic("Auth's answers: " + JSON.stringify(answers) + ".");
     assertNothingSecretLogged();
   });
 });
