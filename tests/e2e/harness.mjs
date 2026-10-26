@@ -136,7 +136,8 @@ function createFront() {
 // Auth's clients document (its testClients() format) for one Portal: §3.6 of the Portal spec plus the apps the
 // flows need. Secrets are named by setting; the values are random per run and stay in this process.
 // With `integrations` the Portal client may manage Stations and exchange ID tokens for station.read, the API carries the
-// Station report and approval scopes, and a native "astation" app (device flow) may list and approve integrations.
+// Station report and approval scopes, and a native "astation" app (device flow) may list and approve integrations and
+// may ask an owned or shared registered Station for astation.remote (its stationScopes; the Portal API never carries it).
 function clientsDocument(site, { integrations = false } = {}) {
   const document = {
     resources: [
@@ -154,7 +155,7 @@ function clientsDocument(site, { integrations = false } = {}) {
   if (!integrations) return document;
   document.resources[0].scopes.push("station.report", "integrations:read", "integrations:approve");
   Object.assign(document.clients[0], { manage: true, exchange: true, stationScopes: ["station.read"] });
-  document.clients.push({ id: "astation", name: "Astation", type: "native", firstParty: true, grants: ["device_code"], scopes: ["openid", "integrations:read", "integrations:approve"], resources: [API] });
+  document.clients.push({ id: "astation", name: "Astation", type: "native", firstParty: true, grants: ["device_code"], scopes: ["openid", "integrations:read", "integrations:approve"], resources: [API], stationScopes: ["astation.remote"] });
   return document;
 }
 
