@@ -81,19 +81,19 @@ deletion, Station AI.
 | P2 | A Station's own report token on any other route gets **403** "A Station's own report token can only send reports and read the change feed." (checked before the route gates and before `ensureAccount`) | The token is valid, only used for the wrong purpose; 403 says so without creating anything |
 | P3 | Migration 002 mirrors Auth's columns (`built_in`, `access`, `integrations_enabled`, `name` 1–60) with a CHECK tying `built_in` to a NULL owner and `any_account`; no admins column | Same shape as Auth's `005_built_in_stations.sql`; the Portal's admins are `PLATFORM_ADMINS`, not stored data |
 | P4 | Station-level events of a built-in Station (`station_reconciled`, a `station_removed` from `retireStale`) use `account_id` = `actor` = `"system"` | `integration_events.account_id` is NOT NULL and the Station has no owner; `system` is already an actor value |
-| P5 | Reconcile inserts a built-in Station from any account's listing, updates its `name` and `integrations_enabled` on every listing, and **never** removes it or revokes anything when a listing lacks it (logged). It is retired in the Portal only when Auth lists another Station at its origin (the existing `retireStale`) | Spec §3.3.2 item 5; Auth also refuses to start when a seeded built-in entry is missing (fail closed), so absence is never a normal signal |
+| P5 | Reconcile (and the built-in sync, P17) inserts a built-in Station from Auth's listing, updates its `name` and `integrations_enabled` each time, and **never** removes it or revokes anything when a listing lacks it (logged). It is retired in the Portal only when Auth lists another Station at its origin (the existing `retireStale`). **Accepted by controller ruling (2026-10-30).** | Spec §3.3.2 item 5; Auth also refuses to start when a seeded built-in entry is missing (fail closed), so absence is never a normal signal |
 | P6 | Stations get role `built_in`; an admin's view of another account's integration there gets role `station_admin` (recorded as the event reason) | Distinct from `station_owner`, so the page and the history say "admin", not "your Station" |
 | P7 | The Portal also refuses Leave (`DELETE …/members/<self>`) and `GET …/members` with 409 `built_in` | Auth answers 409 `built_in` to every member route (Auth plan R12) |
 | P8 | The built-in origin is refused already at `POST /api/stations/challenges` (and again at registration, before the proof fetch) | No challenge budget spent and no fetch to Agora.Build's server |
 | P9 | Built-in Station views carry no `reportClientId` | It is not secret but only the owner sees a report client today; operators read it from Auth's database (Task 9) |
 | P10 | The route resolves the account's plan (`effectivePlan` over the Portal store) and passes `{ plan }` to `createIntegration`; an unknown plan counts as Basic. The 403 adds `limit` next to `code` | The service stays storage-agnostic and testable; `limit` lets a client show the number without parsing |
-| P11 | Creations by one account on one built-in Station run one at a time in the Portal process, so two racing requests cannot both pass the count; across replicas the limit is soft (bounded by the per-account creation limit of 20 a minute) | Holding a database lock across Auth's HTTP call is worse; the Portal runs one instance today |
+| P11 | Creations by one account on one built-in Station run one at a time in the Portal process, so two racing requests cannot both pass the count; across replicas the limit is soft (bounded by the per-account creation limit of 20 a minute), documented in `docs/platform.md`. **Accepted by controller ruling (2026-10-30).** | Holding a database lock across Auth's HTTP call is worse; the Portal runs one instance today |
 | P12 | The Portal refuses creation while its copy of `integrations_enabled` is false, and maps Auth's own `409 not_supported` the same way (a setting turned off since the last listing) | Spec: "offers the built-in Station only while integrations are enabled", Auth stays the authority |
 | P13 | Admins' listing reads every other account's integration on built-in Stations from the Portal's rows, unpaged | Auth has no per-Station listing (Auth plan C5); YAGNI until the list is large |
 | P14 | Account page: the built-in row shows its name, a "Built in" badge, its origin, whether integrations are available, and Details only; the selector labels it "Agora Station (built in)" and leaves it out while off | Spec item 5 ("marked Built in, with Details, without Remove or Share") |
 | P15 | `tests/helpers/fake-manage.mjs` gains `seedBuiltIn()`; no built-in Station unless a test seeds one | Existing tests keep their expectations |
 | P16 | The e2e built-in flows get their own file and a stack option `builtIn: { admin }`. The harness picks the stub's `https://station.test:<port>` before Auth starts, signs the admin in at Auth through the sample app, restarts Auth on the same database with `admins: [<that account>]`, and starts the Portal with `PLATFORM_ADMINS` set to it (the real environment path). Turning integrations on is a second Auth instance on the same database, as Auth's own tests do | The admin's account ID only exists after a sign-in; the existing flows and their single-Station assertions stay untouched |
-| P17 | No account-less sync of built-in Stations: the Portal learns of one from the first listing by any account; a report or feed read before that answers `403 station`. The rollout signs in once before handing the `s-` ID to Astation | Auth's listing needs an account; startup sync would tie the Portal's start to Auth |
+| P17 | **Controller ruling (2026-10-30): the Portal syncs built-in Stations itself.** `service.syncBuiltIn()` calls Auth's `GET /manage/v1/stations?account=<first PLATFORM_ADMINS account>` and runs only the built-in part of reconcile (insert, name, integrations setting; never remove on absence). The integration stack runs it once when it becomes ready (the lazy `ready()`; the first request waits for it, bounded by the management client's 10-second timeout, and it never fails `ready()`), then hourly on an unref'd timer cleared by `close()`. No admins, or Auth unavailable: logged by reason only, retried at the next interval. Ordinary listings still sync as before | A built-in Station's report client is then known without anyone signing in; its first feed poll itself triggers `ready()`. `403 station` stays only for report clients the Portal genuinely does not know |
 
 ---
 
@@ -106,7 +106,7 @@ deletion, Station AI.
 | `migrations/002_built_in_stations.sql` (new) | Nullable owner, `built_in`, `access`, `integrations_enabled`, `name`, CHECK, indexes |
 | `scripts/integrations/repository.mjs` | Built-in fields; `stationsFor` with role `built_in`; `builtInStations`, `updateBuiltInStation`, `countLiveIntegrations` |
 | `scripts/integrations/service.mjs` | Reconcile, views and refusals for built-in Stations; integrations gate, plan limits, admins |
-| `scripts/integrations/routes.mjs` | `admins` through the stack; `planOf` into creation |
+| `scripts/integrations/routes.mjs` | `admins` through the stack; built-in sync at `ready()` and hourly; `planOf` into creation |
 | `scripts/plans.mjs` | `builtInIntegrationLimit(plan)` |
 | `integrations.js`, `account.html`, `styles.css` | Built-in row, selector, admin note, copy |
 | `tests/helpers/fake-manage.mjs` | Built-in Stations as Auth answers them |
@@ -419,6 +419,9 @@ git commit -m "Store built-in Stations without an owner and list them for every 
   - Errors: `409 built_in` "The built-in Station is always there: it can't be removed, shared or left."; `409
     origin_taken` "This is the built-in Station. Every account already has it."; Auth's `409 not_supported` maps to
     "Integrations aren't available on the built-in Station yet."
+  - `createIntegrationService({ …, admins = [] })` (the Agora.Build admins, `PLATFORM_ADMINS`; Task 4 also uses them
+    for rights) and `service.syncBuiltIn() → Promise<boolean>`: lists Stations at Auth as `admins[0]`, runs the
+    built-in part of reconcile, never throws; `false` (logged by reason) when there is no admin or the sync failed.
   - `fakeManage()` gains `seedBuiltIn({ id = "stbuiltin", origin = "https://station.agora.test", name = "Agora Station",
     integrations = false, admins = [], reportClientId = BUILT_IN_REPORT_CLIENT })` → the record (mutable: tests set
     `.integrations`, `.name`, `.status`), and exports `BUILT_IN_REPORT_CLIENT` (`"s-" + "0".repeat(24) + "bs"`).
@@ -597,8 +600,10 @@ export function fakeManage({ now = Date.now } = {}) {
   Run: `npm test` (with `PORTAL_TEST_DATABASE_URL`)
   Expected: PASS — no test seeds a built-in Station yet, so nothing changes.
 
-- [ ] **Step 3: Write the failing service tests.** In `tests/integrations-stations.test.mjs`, add to the `cases` of
-  the `fromManage` test:
+- [ ] **Step 3: Write the failing service tests.** In `tests/integrations-stations.test.mjs`, change the helper to
+  `async function setup(t, { wrap = (repository) => repository, admins = [] } = {})`, add `const logs = [];`, pass
+  `admins` and `log: (line) => logs.push(line)` to `createIntegrationService`, and return `logs` with the rest. Add to
+  the `cases` of the `fromManage` test:
 
 ```js
     [409, "built_in", 409, "built_in", "The built-in Station is always there: it can't be removed, shared or left."],
@@ -695,6 +700,51 @@ test("a new built-in Station at the same origin retires the old one in Portal, w
   assert.equal((await s.repository.station("stold")).status, "removed");
   assert.equal((await s.repository.integration("i-old")).state, "revoked");
   assert.deepEqual((await s.events("station_removed")).map((row) => [row.station_id, row.account_id, row.reason]), [["stold", "system", "reconciled"]]);
+});
+
+const ADMIN = "ab" + "0".repeat(25) + "4";
+
+test("syncBuiltIn brings the built-in Stations in as the first admin, follows their settings and adds nothing else", async (t) => {
+  const s = await setup(t, { admins: [ADMIN, OWNER] });
+  if (!s) return;
+  const built = s.manage.seedBuiltIn();
+  await s.manage.registerStation({ origin: "https://admins.example", owner: ADMIN, reportKey: REPORT_KEY, actor: ADMIN });
+  assert.equal(await s.service.syncBuiltIn(), true);
+  assert.deepEqual((await s.repository.builtInStations()).map((station) => [station.id, station.reportClientId, station.integrationsEnabled]), [[built.id, built.reportClientId, false]]);
+  assert.equal((await s.db.pool.query("SELECT count(*)::int AS n FROM stations WHERE NOT built_in")).rows[0].n, 0, "the admin's own Stations are left to its own listing");
+  assert.equal((await s.repository.stationByReportClient(built.reportClientId)).id, built.id, "its report client is known without anyone signing in");
+  built.integrations = true;
+  assert.equal(await s.service.syncBuiltIn(), true);
+  assert.equal((await s.repository.station(built.id)).integrationsEnabled, true);
+  assert.equal((await s.events("station_reconciled")).length, 1, "inserted once");
+});
+
+test("syncBuiltIn without admins asks nothing, and with Auth down changes nothing; both are logged by reason", async (t) => {
+  const none = await setup(t);
+  if (!none) return;
+  none.manage.seedBuiltIn();
+  assert.equal(await none.service.syncBuiltIn(), false);
+  assert.equal(none.manage.calls.includes("stations"), false);
+  assert.ok(none.logs.includes("Built-in Station sync skipped: no PLATFORM_ADMINS."));
+  const s = await setup(t, { admins: [ADMIN] });
+  s.manage.seedBuiltIn();
+  s.manage.down = true;
+  assert.equal(await s.service.syncBuiltIn(), false);
+  assert.ok(s.logs.includes("Built-in Station sync failed: unavailable."));
+  assert.deepEqual(await s.repository.builtInStations(), []);
+});
+
+test("a sync whose listing lacks a built-in Station removes nothing and revokes nothing", async (t) => {
+  const s = await setup(t, { admins: [ADMIN] });
+  if (!s) return;
+  const built = s.manage.seedBuiltIn();
+  await s.service.syncBuiltIn();
+  await seedIntegration(s.repository, "i-kept", built.id, OWNER, "ready");
+  s.manage.records.splice(s.manage.records.indexOf(built), 1);
+  assert.equal(await s.service.syncBuiltIn(), true);
+  assert.equal((await s.repository.station(built.id)).status, "active");
+  assert.equal((await s.repository.integration("i-kept")).state, "ready");
+  assert.ok(s.logs.includes("Built-in Station absent from Auth's listing: left as it is."));
 });
 ```
 
@@ -799,7 +849,34 @@ function stationView(station, role) {
   }
 ```
 
-  In the returned methods:
+  The factory options gain `admins = []` (after `notify`). Add to the returned methods:
+
+```js
+    // The built-in Stations as Auth lists them to the first Agora.Build admin (any account sees them), so their report
+    // clients are known before anyone signs in. Only the built-in part of reconcile runs: nothing is removed or revoked
+    // on absence. Never throws; returns whether it synced. Run by the stack at ready() and hourly.
+    async syncBuiltIn() {
+      const account = admins[0];
+      if (!account) {
+        log("Built-in Station sync skipped: no PLATFORM_ADMINS.");
+        return false;
+      }
+      try {
+        const listed = (await manage.stations(account)).filter((entry) => entry.builtIn);
+        const known = new Set(listed.map((entry) => entry.id));
+        for (const station of await repository.builtInStations()) {
+          if (!known.has(station.id)) log("Built-in Station absent from Auth's listing: left as it is.");
+        }
+        for (const entry of listed) await reconcileBuiltIn(entry);
+        return true;
+      } catch (error) {
+        log("Built-in Station sync failed: " + (error instanceof ManageError ? error.code : error.code || "error") + ".");
+        return false;
+      }
+    },
+```
+
+  In the returned methods also:
   - `createChallenge`: after `const origin = stationOrigin(originInput);` add `await notBuiltInOrigin(origin);`.
   - `registerStation`: after `const { origin, value } = challenge;` add `await notBuiltInOrigin(origin);`.
   - `members`: first line becomes `notBuiltIn(await usable(accountId, stationId));`.
@@ -813,7 +890,7 @@ function stationView(station, role) {
 
 ```bash
 git add tests/helpers/fake-manage.mjs scripts/integrations/service.mjs tests/integrations-stations.test.mjs
-git commit -m "List the built-in Station for every account and refuse removing, sharing and registering it" -m "🤖 Built with SMT <smt@agora.build>"
+git commit -m "List and sync the built-in Station for every account and refuse removing, sharing and registering it" -m "🤖 Built with SMT <smt@agora.build>"
 ```
 
 ---
@@ -836,7 +913,8 @@ git commit -m "List the built-in Station for every account and refuse removing, 
     Refusals: `409 not_supported` (built-in, off), `403 plan_limit` with `details.limit`.
   - Integration views for admins: `role: "station_admin"`; admins may `pause` and `revoke` (event `reason`
     `station_admin`), every owner-only action answers 403 `forbidden`, `approve` 404.
-  - `createIntegrationStack({ db, manage, idp, log, stationFetch, pushFetch, admins = [] })`;
+  - `createIntegrationStack({ db, manage, idp, log, stationFetch, pushFetch, admins = [] })` (runs
+    `service.syncBuiltIn()` inside the first successful `ready()` and hourly; `close()` clears the timer);
     `integrationsFromEnv(env, { idp, log, stationFetch, pushFetch, admins })`;
     `handleIntegrations({ …, planOf = async () => "basic" })`.
 
@@ -1001,7 +1079,26 @@ test("the stack hands the platform admins to the service", async (t) => {
   assert.deepEqual((await integrations.service.integrations(admin)).integrations.map((entry) => [entry.id, entry.role]), [[created.id, "station_admin"]]);
   await integrations.service._pushesIdle();
 });
+
+test("the stack syncs the built-in Stations from Auth once when it becomes ready, as the first platform admin", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
+  const admin = accountId();
+  const manage = fakeManage();
+  const built = manage.seedBuiltIn({ admins: [admin] });
+  const integrations = createIntegrationStack({ db, manage, idp: null, log: () => {}, admins: [admin] });
+  const listings = () => manage.calls.filter((name) => name === "stations").length;
+  assert.equal(listings(), 0, "nothing before the first request");
+  await integrations.ready();
+  assert.equal(listings(), 1);
+  assert.deepEqual((await db.pool.query("SELECT id, built_in, report_client_id FROM stations")).rows, [{ id: built.id, built_in: true, report_client_id: built.reportClientId }]);
+  await integrations.ready();
+  assert.equal(listings(), 1, "memoised with ready()");
+});
 ```
+
+  The existing test "the stack migrates once…" keeps passing: without admins the sync only logs, after the log
+  assertion it makes.
 
 - [ ] **Step 2: Run them to verify they fail.**
   Run: `node --test tests/platform.test.mjs tests/integrations-service.test.mjs tests/integrations-routes.test.mjs` (with `PORTAL_TEST_DATABASE_URL`)
@@ -1020,7 +1117,7 @@ export function builtInIntegrationLimit(plan) {
 
 - [ ] **Step 4: Implement the service.** In `scripts/integrations/service.mjs`:
   - import `import { builtInIntegrationLimit } from "../plans.mjs";`
-  - the options gain `admins = []` (after `notify`).
+  - the `admins` option exists since Task 3.
   - inside the factory, after `pushes`:
 
 ```js
@@ -1106,7 +1203,19 @@ export function builtInIntegrationLimit(plan) {
 
 - [ ] **Step 5: Wire it.** `scripts/integrations/routes.mjs`:
   - `createIntegrationStack({ db, manage, idp, log, stationFetch = createStationFetch(), pushFetch, admins = [] })`
-    passes `admins` to `createIntegrationService({ …, admins })`.
+    passes `admins` to `createIntegrationService({ …, admins })`, and syncs the built-in Stations (P17). Next to
+    `PARTITION_INTERVAL` add `const BUILT_IN_SYNC_INTERVAL = 3600000;`; after the `partitions` interval:
+
+```js
+  // The built-in Stations, synced from Auth once the stack is ready and then hourly (P17); a failed sync is logged by
+  // syncBuiltIn and tried again at the next interval.
+  const builtInSync = setInterval(() => { if (prepared) service.syncBuiltIn(); }, BUILT_IN_SYNC_INTERVAL);
+  builtInSync.unref();
+```
+
+    in `ready()`, after `prepared = true;` add `await service.syncBuiltIn();` (it never throws, so `ready()` cannot fail
+    because of it), and `close` becomes
+    `close: async () => { clearInterval(partitions); clearInterval(builtInSync); await db.close(); }`.
   - `integrationsFromEnv(env, { idp, log, stationFetch, pushFetch, admins })` passes `admins` to `createIntegrationStack`.
   - `handleIntegrations({ …, limit, planOf = async () => "basic" })`; the creation line becomes
     `return { status: 201, body: await service.createIntegration(accountId, await read(), { plan: await planOf(accountId) }) };`
@@ -1134,7 +1243,7 @@ export function builtInIntegrationLimit(plan) {
 
 ```bash
 git add scripts/plans.mjs scripts/integrations/service.mjs scripts/integrations/routes.mjs scripts/serve.mjs tests/platform.test.mjs tests/integrations-service.test.mjs tests/integrations-routes.test.mjs
-git commit -m "Gate integrations on the built-in Station, limit them by plan and let admins pause or revoke them" -m "🤖 Built with SMT <smt@agora.build>"
+git commit -m "Gate integrations on the built-in Station, limit them by plan, let admins pause or revoke them, and sync it at startup" -m "🤖 Built with SMT <smt@agora.build>"
 ```
 
 ---
@@ -1149,21 +1258,31 @@ git commit -m "Gate integrations on the built-in Station, limit them by plan and
 - Consumes: Task 1 (`caller.station` tokens reach the report routes), Tasks 2–4 (built-in rows and integrations).
 - Produces: nothing new; it proves `POST /api/v1/stations/reports` and `GET /api/v1/stations/changes` work for the
   built-in Station's own report token, that its feed lists every integration on it (each with `ownerAccount`) and only
-  those, that push hints go to its origin, and that a report before the Portal knows the Station answers `403 station`.
+  those, that push hints go to its origin, that after the startup sync (Task 3 `syncBuiltIn`, run by the stack in
+  Task 4) its report token is accepted before anyone has signed in, and that only a report client the Portal genuinely
+  does not know answers `403 station`.
 
 - [ ] **Step 1: Write the test.** Import `BUILT_IN_REPORT_CLIENT` from `./helpers/fake-manage.mjs` and append to
   `tests/integrations-routes.test.mjs`:
 
 ```js
 test("the built-in Station's own report token reports and reads a feed of every integration on it, and only those", async (t) => {
-  const integrations = await stack(t);
+  const admin = accountId();
+  const integrations = await stack(t, { admins: [admin] });
   if (!integrations) return;
-  const built = integrations.manage.seedBuiltIn({ integrations: true });
+  const built = integrations.manage.seedBuiltIn({ integrations: true, admins: [admin] });
   const app = await start(t, { integrations: integrations.service });
   const token = await app.fake.issueAccessToken({ sub: BUILT_IN_REPORT_CLIENT, client_id: BUILT_IN_REPORT_CLIENT, scope: "station.report" });
-  // Until an account's listing has brought it into the Portal, the Station is unknown here.
-  const early = await call(app.base, "/api/v1/stations/changes?cursor=0", { bearer: token });
-  assert.deepEqual([early.status, (await early.json()).code], [403, "station"]);
+  // A report client the Portal does not know is refused.
+  const strangerClient = "s-" + "0".repeat(24) + "bz";
+  const stranger = await call(app.base, "/api/v1/stations/changes?cursor=0", { bearer: await app.fake.issueAccessToken({ sub: strangerClient, client_id: strangerClient, scope: "station.report" }) });
+  assert.deepEqual([stranger.status, (await stranger.json()).code], [403, "station"]);
+  // The startup sync (the stack runs it at ready(); this test injects the service, so it runs it as the stack would)
+  // makes the built-in Station known before anyone has signed in.
+  assert.equal(await integrations.service.syncBuiltIn(), true);
+  const first = await call(app.base, "/api/v1/stations/changes?cursor=0", { bearer: token });
+  assert.equal(first.status, 200);
+  assert.deepEqual((await first.json()).integrations, []);
   const ada = await signIn(app);
   const bo = await signIn(app);
   const custom = (await registerStation(app, integrations, ada.cookie)).station;
@@ -1699,7 +1818,7 @@ remove it through any page or API.
   state except `revoked` and not expired. At the limit creation answers 403 `{ "error": "Your plan allows N integrations
   on the built-in Station. Revoke one, upgrade, or use your own Station.", "code": "plan_limit", "limit": N }`. After a
   downgrade existing integrations keep working; new ones wait until the account is under its limit. Custom Stations
-  have no cap. One account's creations on it are taken one at a time per Portal process.
+  have no cap.
 - **Admins** are the accounts in `PLATFORM_ADMINS`, which must equal the Station's `admins` in Auth's clients file.
   They see every other account's integration on it (`role` `station_admin`) and may pause or revoke them, nothing
   else; the history records reason `station_admin`.
@@ -1707,8 +1826,16 @@ remove it through any page or API.
   no owner): the Portal accepts such a token only when `client_id` equals `sub`, `sub` is `s-` and 26 lower-case
   Crockford base32 characters, and the scope includes `station.report`. It reaches only the two report routes (403
   elsewhere) and is never a Portal account. Its feed lists every integration on it, each with `ownerAccount`, and
-  nothing else; push hints go to its origin. The Portal learns of the Station from Auth's listing the first time any
-  account lists its Stations; a report before that answers 403 `station`.
+  nothing else; push hints go to its origin.
+- **Sync.** The Portal learns of built-in Stations from Auth itself: when the Stations and integrations stack becomes
+  ready (the first request to one of their routes, which waits for it) and then hourly, it lists Stations at Auth as
+  the first account in `PLATFORM_ADMINS` (which must exist at Auth) and adds or updates the built-in ones, never
+  removing one. Without `PLATFORM_ADMINS`, or with Auth unreachable, the log says so by reason and the next hour
+  tries again; every account's own listing also syncs them. A report client the Portal does not know answers 403
+  `station`.
+- **Limits across replicas.** The plan limit is checked one creation at a time per account in each Portal process;
+  with several Portal instances two simultaneous creations could pass it by one (accepted, bounded by the creation
+  rate limit).
 ```
 
   - Routes table: `GET /api/stations` → "the account's Stations (`role` `built_in`, `owner` or `member`)";
@@ -1785,7 +1912,8 @@ git commit -m "Document the built-in Station and check it in the browser smoke" 
   (Task 3), integrations offered only while on (Tasks 4, 6, e2e 4), plan limits with revoked and expired not counted,
   custom never capped, downgrade (Task 4, e2e 6), admins' rights only pause/revoke (Task 4, e2e 7), feed lists only its
   own integrations with `ownerAccount` (Task 5, e2e 5), push to its origin (Task 5, e2e 4), `s-` report token (Task 1,
-  e2e 3), two accounts against the real Auth (e2e).
+  e2e 3), the built-in Station known from the startup and hourly sync without any sign-in and never removed on
+  absence (Tasks 3, 4, 5), two accounts against the real Auth (e2e).
 
 - [ ] **Step 3: Dev rollout (the owner runs this, after both branches are reviewed; Auth and Portal go together).**
   The new Auth refuses to start with the old clients file and the old Auth refuses the new one, and the built-in
@@ -1829,8 +1957,12 @@ git commit -m "Document the built-in Station and check it in the browser smoke" 
      check for `https://station-dev.agora.build` answer 409 (`built_in`, `origin_taken`); the Station selector does not
      offer it (`integrations: false`). In the Portal database:
      `SELECT id, built_in, integrations_enabled, report_client_id FROM stations WHERE origin = 'https://station-dev.agora.build'`
-     shows one active built-in row (the first listing created it; P17). `docker logs portal-local` shows no
-     `Portal database is not ready` line (migration 002 ran).
+     shows one active built-in row. It is created by the startup sync (P17) without anyone signing in: right after
+     the restart, `curl -s -o /dev/null -w '%{http_code}\n' https://dev.agora.build/api/v1/stations/changes` answers
+     401 and makes the stack ready, which syncs; the row then exists before any sign-in (check this first, then do
+     the two-account checks above as verification). `docker logs portal-local` shows no `Portal database is not
+     ready` and no `Built-in Station sync skipped` or `sync failed` line (a `skipped` line means `PLATFORM_ADMINS` is
+     empty; `failed: invalid_request` means its first account does not exist at Auth yet).
   8. Read the stable report client ID:
      `docker exec portal-postgres psql -U portal -d auth -c "SELECT report_client_id FROM stations WHERE origin = 'https://station-dev.agora.build' AND status = 'active'"`.
   9. Hand it to Astation on Portal #21 (`gh issue comment 21 --repo Agora-Build/Portal`), with: the origin
@@ -1863,7 +1995,7 @@ git commit -m "Document the built-in Station and check it in the browser smoke" 
 | X5 | Spec item 4 gives admins "listing its integrations"; Auth has no per-Station listing (Auth plan C5), and Auth's Station listing does not return `admins` | The Portal lists from its own rows (P13) and uses `PLATFORM_ADMINS`; if Auth's `admins` and `PLATFORM_ADMINS` differ, the Portal shows controls Auth refuses (shown as "Only the Station owner can do this."). The rollout keeps them equal |
 | X6 | Spec §3.3.2.1: keep `integrations: false` until Astation's checks pass, yet create a disposable integration on the built-in Station | As ruled for Auth (Auth plan C3): dev keeps `false` until Astation asks, then the owner flips it; the Portal follows each listing |
 | X7 | Spec "every state except `revoked`" also counts `revoking` and `paused` integrations | Followed literally; documented in `docs/platform.md` |
-| X8 | Auth retires a built-in Station only with an explicit `retired: true` entry and then stops listing it; the spec forbids treating absence as removal | P5: the Portal keeps the row and logs; it is retired in the Portal only when Auth lists a new Station at the same origin (otherwise an operator marks it removed) |
-| X9 | The Portal knows a built-in Station only after some account lists its Stations (Auth's listing needs an account); the Station may poll first | P17: a report or feed read before that is 403 `station`; the rollout lists once before the handoff |
-| X10 | Spec: the Portal "refuses at the plan's limit"; a single count before Auth's call can be raced, and the Portal may later run several instances | P11: serialized per account and Station in one process; soft across replicas |
+| X8 | Auth retires a built-in Station only with an explicit `retired: true` entry and then stops listing it; the spec forbids treating absence as removal | P5: the Portal keeps the row and logs; it is retired in the Portal only when Auth lists a new Station at the same origin (otherwise an operator marks it removed). **Accepted (controller ruling, 2026-10-30)** |
+| X9 | Auth's listing needs an account, so without its own sync the Portal would know a built-in Station only after someone lists Stations, and the Station's first polls would be 403 | **Ruled (controller, 2026-10-30):** P17, the Portal syncs as the first `PLATFORM_ADMINS` account at `ready()` and hourly (Tasks 3 and 4); `403 station` only for report clients the Portal does not know; the rollout needs no sign-in before the handoff |
+| X10 | Spec: the Portal "refuses at the plan's limit"; a single count before Auth's call can be raced, and the Portal may later run several instances | P11: serialized per account and Station in one process; soft across replicas, documented. **Accepted (controller ruling, 2026-10-30)** |
 | X11 | The old e2e flows assert one Station per listing | The built-in Station is opt-in in the harness (`builtIn`), so they stay as they are (P16) |
