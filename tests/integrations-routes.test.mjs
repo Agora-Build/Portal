@@ -381,6 +381,24 @@ test("Station reports and the change feed take only the Station's station.report
   assert.equal(unversionedFeed.status, 404);
 });
 
+const STATION_CLIENT = "s-" + "0".repeat(24) + "bs";
+const REPORT_TOKEN_ONLY = "A Station's own report token can only send reports and read the change feed.";
+
+test("a Station report client's own token reaches only the report routes and never becomes an account", async (t) => {
+  const app = await start(t, { integrations: null });
+  const token = await app.fake.issueAccessToken({ sub: STATION_CLIENT, client_id: STATION_CLIENT, scope: "station.report" });
+  // Without the Portal database the report routes answer 503: the token got through the gates to the route itself.
+  const reports = await call(app.base, "/api/v1/stations/reports", { bearer: token, method: "POST", data: {} });
+  assert.deepEqual([reports.status, (await reports.json()).error], [503, UNAVAILABLE]);
+  assert.equal((await call(app.base, "/api/v1/stations/changes?cursor=0", { bearer: token })).status, 503);
+  for (const [method, path] of [["GET", "/api/v1/me"], ["GET", "/api/v1/integrations"], ["GET", "/api/v1/credits/balance"], ["GET", "/api/people"], ["GET", "/api/auth/config"], ["GET", "/api/billing/account"], ["GET", "/api/stations"]]) {
+    const response = await call(app.base, path, { bearer: token, method });
+    assert.deepEqual([response.status, (await response.json()).error], [403, REPORT_TOKEN_ONLY], method + " " + path);
+  }
+  assert.equal((await call(app.base, "/api/stations/reports", { bearer: token, method: "POST", data: {} })).status, 404, "the unversioned path still names /api/v1");
+  assert.equal((await app.store.snapshot()).accounts.some((account) => account.id === STATION_CLIENT), false, "no Portal account for the report client");
+});
+
 test("a read token for a Station comes from exchanging the session's ID token", async (t) => {
   const integrations = await stack(t);
   if (!integrations) return;

@@ -70,6 +70,10 @@ export const API_V1 = "/api/v1/";
 const bearerRoutes = new Set(["GET /api/me", "GET /api/credits/balance", "GET /api/credits/statement", "POST /api/marketplaces/chat", "POST /api/marketplaces/tts", "GET /api/connections", "GET /api/connections/agora/projects", "POST /api/connections/agora/certificate", "POST /api/connections/agora/token", "DELETE /api/connections/agora", "POST /api/platform/credits/reserve", "POST /api/platform/credits/settle", "GET /api/integrations", "POST /api/stations/reports", "GET /api/stations/changes"]);
 const bearerPatterns = [/^POST \/api\/integrations\/[A-Za-z0-9_-]{1,64}\/approval$/];
 const isBearerRoute = (route) => bearerRoutes.has(route) || bearerPatterns.some((pattern) => pattern.test(route));
+// A Station's own report token (sub = its s- report client; a built-in Station has no owner) is not an account: it
+// reaches these two routes only, and no Portal account is made for it.
+const stationReportRoutes = new Set(["POST /api/stations/reports", "GET /api/stations/changes"]);
+const reportTokenOnly = () => new AppError(403, "A Station's own report token can only send reports and read the change feed.");
 // Routes that exist for the browser session only; a bearer token there gets 403, and on any other path 404.
 const browserRoutes = new Set(["GET /api/billing/account", "POST /api/billing/checkout", "POST /api/billing/manage", "POST /api/profile", "PUT /api/profile", "DELETE /api/profile", "GET /api/radar", "POST /api/radar", "POST /api/auth/logout", "POST /api/signaling/token"]);
 // Over https the session cookie was renamed from house_session to __Host-house_session. Until this date a guest's
@@ -292,10 +296,12 @@ export function createAppServer(directory = root, options = {}) {
         }
         const token = caller ? "" : browserToken;
         const route = request.method + " " + path;
+        if (caller?.station && !stationReportRoutes.has(route)) throw reportTokenOnly();
         if (caller && !publicRoutes.has(route) && !isBearerRoute(route)) throw browserRoute(route, path) ? browserOnly() : new AppError(404, "This page or service was not found.");
         if (caller && !versioned && isBearerRoute(route)) throw new AppError(404, "Access tokens use the versioned API: " + API_V1 + path.slice("/api/".length) + ".");
-        // Only after the route gate, so a token that reaches a 404, browser-only or public route creates nothing.
-        if (caller && isBearerRoute(route)) caller.account = await store.ensureAccount(caller.sub);
+        // Only after the route gate, so a token that reaches a 404, browser-only or public route creates nothing; a
+        // Station's own report token never makes an account.
+        if (caller && !caller.station && isBearerRoute(route)) caller.account = await store.ensureAccount(caller.sub);
         const scoped = (scope) => { if (!caller.scopes.includes(scope)) throw insufficientScope(scope); return caller.sub; };
         const member = async () => {
           const person = await store.me(token);
