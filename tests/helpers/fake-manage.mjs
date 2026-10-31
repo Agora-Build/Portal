@@ -19,7 +19,7 @@ export function fakeManage({ now = Date.now } = {}) {
   const uses = (station, account) => station.builtIn || station.owner === account || station.members.some((member) => member.account === account);
   const notBuiltIn = (station) => { if (station.builtIn) fail(409, "built_in"); return station; };
   const listedStation = ({ id, origin, owner, status, reportClientId, createdAt, builtIn, access, integrations: enabled, name }) => ({ id, origin, owner, status, reportClientId, createdAt, builtIn, access, integrations: enabled, name });
-  const listed = ({ keys, ...integration }) => ({ ...integration, scopes: [...integration.scopes] });
+  const listed = ({ keys, ...integration }) => ({ ...integration, scopes: [...integration.scopes], pausedBy: integration.status === "paused" ? integration.pausedBy ?? null : null });
   const checkKey = (publicJwk) => {
     if (!publicJwk || typeof publicJwk !== "object") fail(400, "jwk");
     if (PRIVATE_MEMBERS.some((member) => Object.hasOwn(publicJwk, member))) fail(400, "private_key");
@@ -155,6 +155,9 @@ export function fakeManage({ now = Date.now } = {}) {
       const stationRights = station.builtIn ? [] : [station.owner];
       const mayStop = (status === "paused" || status === "revoked") && !others;
       if (integration.owner !== actor && !(mayStop && stationRights.includes(actor))) fail(403, "forbidden");
+      // An admin's pause locks (Auth D26 R28): resuming it is 409 admin_paused for anyone but an admin, with or without
+      // other fields; only Auth's admin client lifts it.
+      if (status === "active" && integration.status === "paused" && integration.pausedBy === "admin") fail(409, "admin_paused");
       if (integration.status === "revoked") {
         if (status === "revoked" && !others) return listed(integration);
         fail(409, "revoked");
@@ -163,7 +166,11 @@ export function fakeManage({ now = Date.now } = {}) {
       if (r9Svc !== undefined && r9Svc !== null && !/^[0-9a-f]{64}$/.test(r9Svc)) fail(400, "invalid_request");
       if (quotaPerSecond !== undefined && !(Number.isInteger(quotaPerSecond) && quotaPerSecond >= 1 && quotaPerSecond <= 10000)) fail(400, "invalid_request");
       const expiry = expiresAt === undefined ? undefined : checkExpiry(expiresAt);
-      if (status !== undefined) integration.status = status;
+      // Who paused it (Auth D26 R27): its owner or its custom Station's owner; pausing an admin's pause changes nothing.
+      if (status !== undefined && status !== integration.status) {
+        integration.status = status;
+        integration.pausedBy = status === "paused" ? (integration.owner === actor ? "owner" : "station") : null;
+      }
       if (r9Svc !== undefined) integration.r9Svc = r9Svc;
       if (quotaPerSecond !== undefined) integration.quotaPerSecond = quotaPerSecond;
       if (expiry !== undefined) integration.expiresAt = expiry;

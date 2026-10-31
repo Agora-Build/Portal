@@ -26,9 +26,10 @@ async function setup(t, { wrap = (repository) => repository } = {}) {
   const notified = [];
   const logs = [];
   let counter = 0;
+  let asked = 0;
   const service = createIntegrationService({
     repository: wrap(repository), db, manage, stationFetch, exchange: async () => ({}), now: () => clock.now, log: (line) => logs.push(line),
-    challengeValue: () => "proof-value-" + (++counter), notify: (stationId) => notified.push(stationId)
+    challengeValue: () => "proof-value-" + (++counter), notify: (stationId) => notified.push(stationId), authChanged: () => { asked += 1; }
   });
   async function register(accountId = OWNER, origin = "https://one.example") {
     const challenge = await service.createChallenge(accountId, origin);
@@ -40,7 +41,7 @@ async function setup(t, { wrap = (repository) => repository } = {}) {
   const events = async (kind) => (await db.pool.query("SELECT * FROM integration_events WHERE integration_id IS NOT NULL" + (kind ? " AND kind = $1" : "") + " ORDER BY id", kind ? [kind] : [])).rows;
   const authCalls = (name) => manage.calls.filter((call) => call === name).length;
   const record = (id) => manage.integrationRecords.find((entry) => entry.clientId === id);
-  return { db, repository, manage, clock, service, station, register, create, events, authCalls, record, notified, logs };
+  return { db, repository, manage, clock, service, station, register, create, events, authCalls, record, notified, logs, authAsked: () => asked };
 }
 
 const refused = (status, code) => (error) => {
@@ -60,7 +61,7 @@ test("createIntegration adds agent.view, uses the defaults and records the creat
   assert.equal(auth.expiresAt, new Date(s.clock.now + 30 * DAY).toISOString());
   assert.deepEqual(view, {
     id: auth.clientId, kind: "custom_app", name: "My app", stationId: s.station.id, stationOrigin: "https://one.example",
-    scopes: ["agent.view", "agent.prompt"], state: "awaiting_approval", pausedFrom: null, r9Svc: null, quotaPerSecond: 200,
+    scopes: ["agent.view", "agent.prompt"], state: "awaiting_approval", pausedFrom: null, pausedBy: null, r9Svc: null, quotaPerSecond: 200,
     expiresAt: auth.expiresAt, approvedAt: null, lastError: null, createdAt: view.createdAt, role: "owner"
   });
   const [event] = await s.events("integration_created");
@@ -545,4 +546,95 @@ test("an Agora.Build admin is just another account in the Portal: their own inte
   // Auth refuses the Portal acting for an admin on someone else's integration (Auth D26 R12).
   await assert.rejects(s.manage.changeIntegration(theirs.id, { status: "paused" }, ADMIN), (error) => error.status === 403 && error.code === "forbidden");
   assert.equal(s.record(theirs.id).status, "active");
+});
+
+const ADMIN_PAUSED = "Agora.Build paused this integration. Only Agora.Build can resume it.";
+const OWNER_DISABLED = "Agora.Build disabled this integration's owner account. It resumes when the account is enabled again.";
+
+test("a pause records who paused it, as Auth answers; resuming or revoking clears it", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await s.service.share(OWNER, s.station.id, MEMBER);
+  const { id } = await s.create(MEMBER);
+  await s.service.approve(MEMBER, id, { r9Svc: R9 });
+  assert.equal((await s.service.pause(MEMBER, id)).pausedBy, "owner");
+  assert.deepEqual([s.record(id).pausedBy, (await s.repository.integration(id)).pausedBy], ["owner", "owner"]);
+  assert.equal((await s.service.resume(MEMBER, id)).pausedBy, null);
+  assert.equal((await s.repository.integration(id)).pausedBy, null);
+  assert.equal((await s.service.pause(OWNER, id)).pausedBy, "station", "the custom Station's owner");
+  assert.equal((await s.service.revoke(OWNER, id)).pausedBy, null);
+  assert.equal((await s.repository.integration(id)).pausedBy, null);
+});
+
+test("an admin's pause locks: Resume is 409 admin_paused without asking Auth, and Auth's own 409 reads the same and asks for Auth's feed", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const { id } = await s.create();
+  await s.service.approve(OWNER, id, { r9Svc: R9 });
+  await s.repository.updateIntegration(id, { state: "ready" });
+  // An admin paused it at Auth; the owner's listing follows it.
+  Object.assign(s.record(id), { status: "paused", pausedBy: "admin" });
+  const view = (await s.service.integrations(OWNER)).integrations.find((entry) => entry.id === id);
+  assert.deepEqual([view.state, view.pausedFrom, view.pausedBy], ["paused", "ready", "admin"]);
+  const calls = s.authCalls("changeIntegration");
+  await assert.rejects(s.service.resume(OWNER, id), (error) => refused(409, "admin_paused")(error) && error.message === ADMIN_PAUSED);
+  assert.equal(s.authCalls("changeIntegration"), calls, "Auth is not asked");
+  assert.equal(s.authAsked(), 0);
+  // The Portal has not heard yet: Auth refuses with its own 409, which reads the same and asks for a read of its feed.
+  await s.repository.updateIntegration(id, { pausedBy: "owner" });
+  await assert.rejects(s.service.resume(OWNER, id), (error) => refused(409, "admin_paused")(error) && error.message === ADMIN_PAUSED);
+  assert.equal(s.authCalls("changeIntegration"), calls + 1);
+  assert.equal(s.authAsked(), 1);
+  assert.equal((await s.repository.integration(id)).state, "paused", "nothing changed in the Portal");
+  // The quota stays the owner's, and revoking is never locked.
+  assert.equal((await s.service.settings(OWNER, id, { quotaPerSecond: 9 })).quotaPerSecond, 9);
+  assert.equal((await s.service.revoke(OWNER, id)).state, "revoking");
+});
+
+test("pausing an integration Auth already holds in an admin's pause keeps it the admin's", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const { id } = await s.create();
+  // Paused by an admin at Auth; the Portal has not heard and still shows it awaiting approval.
+  Object.assign(s.record(id), { status: "paused", pausedBy: "admin" });
+  const paused = await s.service.pause(OWNER, id);
+  assert.deepEqual([paused.state, paused.pausedBy, s.record(id).pausedBy], ["paused", "admin", "admin"]);
+  await assert.rejects(s.service.resume(OWNER, id), refused(409, "admin_paused"));
+});
+
+test("an owner's listing follows who paused an integration at Auth, recorded like other settings", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const { id } = await s.create();
+  await s.service.pause(OWNER, id);
+  s.record(id).pausedBy = "admin"; // an admin turned the owner's pause into theirs
+  const view = (await s.service.integrations(OWNER)).integrations.find((entry) => entry.id === id);
+  assert.deepEqual([view.state, view.pausedBy], ["paused", "admin"]);
+  const [event] = await s.events("integration_reconciled");
+  assert.deepEqual([event.integration_id, event.actor, event.state, event.details], [id, "system", "paused", { changed: ["pausedBy"], pausedBy: "admin" }]);
+  await s.service.integrations(OWNER);
+  assert.equal((await s.events("integration_reconciled")).length, 1, "nothing more to record");
+});
+
+test("while Agora.Build has its owner's account disabled, an integration shows as paused by Agora.Build and cannot be resumed", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await s.service.share(OWNER, s.station.id, MEMBER);
+  const { id } = await s.create(MEMBER);
+  await s.repository.updateIntegration(id, { state: "ready", ownerDisabledAt: s.clock.now });
+  const seen = (await s.service.integrations(OWNER)).integrations.find((entry) => entry.id === id);
+  assert.deepEqual([seen.state, seen.pausedBy, seen.role], ["paused", "admin", "station_owner"]);
+  assert.equal((await s.repository.integration(id)).state, "ready", "the row keeps its own state");
+  // Resume is refused before Auth is asked (it would otherwise be refused as a resume of an integration that is not paused).
+  const calls = s.authCalls("changeIntegration");
+  await assert.rejects(s.service.resume(MEMBER, id), (error) => refused(409, "owner_disabled")(error) && error.message === OWNER_DISABLED);
+  assert.equal(s.authCalls("changeIntegration"), calls, "Auth is not asked");
+  assert.equal(s.authAsked(), 0);
+  // Before the admin-pause check: the owner's own disabled account is the cause named, even on an admin-paused row.
+  await s.repository.updateIntegration(id, { state: "paused", resumeState: "ready", pausedBy: "admin" });
+  await assert.rejects(s.service.resume(MEMBER, id), refused(409, "owner_disabled"));
+  // Once the account is enabled again the admin pause on its own is what remains.
+  await s.repository.updateIntegration(id, { ownerDisabledAt: null });
+  await assert.rejects(s.service.resume(MEMBER, id), refused(409, "admin_paused"));
+  assert.equal(s.authCalls("changeIntegration"), calls, "Auth is still not asked");
 });

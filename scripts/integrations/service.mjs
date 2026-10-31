@@ -34,13 +34,22 @@ const SYSTEM = "system";
 const BUILT_IN_FIXED = "The built-in Station is always there: it can't be removed, shared or left.";
 const BUILT_IN_ORIGIN = "This is the built-in Station. Every account already has it.";
 const NOT_SUPPORTED = "Integrations aren't available on the built-in Station yet.";
+// Who paused a paused integration, as Auth records it (Auth D26 R27): its owner, its custom Station's owner, or an
+// Agora.Build admin, whose pause only an admin lifts, on the admin site.
+const PAUSED_BY = ["owner", "station", "admin"];
+const ADMIN_PAUSED = "Agora.Build paused this integration. Only Agora.Build can resume it.";
+const OWNER_DISABLED = "Agora.Build disabled this integration's owner account. It resumes when the account is enabled again.";
+const adminPaused = () => failure(409, ADMIN_PAUSED, "admin_paused");
+const ownerDisabled = () => failure(409, OWNER_DISABLED, "owner_disabled");
 
 const MANAGE_CONFLICTS = {
   origin_taken: "This Station is already registered.",
   revoked: "This integration has been revoked.",
   duplicate_key: "This key is already registered.",
   built_in: BUILT_IN_FIXED,
-  not_supported: NOT_SUPPORTED
+  not_supported: NOT_SUPPORTED,
+  admin_paused: ADMIN_PAUSED,
+  owner_disabled: OWNER_DISABLED
 };
 
 // Turns Auth's management answer into the Portal's error; anything that is not a ManageError is rethrown unchanged.
@@ -151,9 +160,18 @@ function feedIntegration(row, at) {
   return { ownerAccount: row.ownerAccount, state: effectiveState(row, at), scopes: row.scopes, r9Svc: row.r9Svc, expiresAt: row.expiresAt, quotaPerSecond: row.quotaPerSecond };
 }
 
+// Who stopped a paused integration, for the page: Auth's pausedBy while the row is paused, and "admin" while Agora.Build
+// has its owner's account disabled (Auth then issues it no token, and the Station sees it paused). null otherwise.
+function pausedByOf(row, state) {
+  if (state !== "paused") return null;
+  if (row.ownerDisabledAt != null) return "admin";
+  return row.state === "paused" && PAUSED_BY.includes(row.pausedBy) ? row.pausedBy : null;
+}
+
+// authChanged() asks the stack to read Auth's change feed soon (Auth refused a resume as admin_paused).
 export function createIntegrationService({
   repository, db, manage, stationFetch, exchange, now = Date.now, log = () => {}, ids = randomUUID,
-  challengeValue = () => randomBytes(32).toString("base64url"), pushFetch = createStationFetch({ timeoutMs: 3000 }), notify
+  challengeValue = () => randomBytes(32).toString("base64url"), pushFetch = createStationFetch({ timeoutMs: 3000 }), notify, authChanged = () => {}
 }) {
   // Every transaction here appends events, so each takes the event lock before any row lock (see lockEvents).
   const appending = (work) => db.transaction(async (client) => {
@@ -401,9 +419,10 @@ export function createIntegrationService({
   }
 
   function integrationView(row, role, origin) {
+    const state = effectiveState(row, now());
     return {
       id: row.id, kind: row.kind, name: row.name, stationId: row.stationId, stationOrigin: origin, scopes: row.scopes,
-      state: effectiveState(row, now()), pausedFrom: row.resumeState, r9Svc: row.r9Svc, quotaPerSecond: row.quotaPerSecond,
+      state, pausedFrom: row.resumeState, pausedBy: pausedByOf(row, state), r9Svc: row.r9Svc, quotaPerSecond: row.quotaPerSecond,
       expiresAt: row.expiresAt, approvedAt: row.approvedAt, lastError: row.lastError, createdAt: row.createdAt, role
     };
   }
@@ -457,22 +476,27 @@ export function createIntegrationService({
     return result.row;
   }
 
-  // pause and revoke: the integration's owner or its Station's owner; anyone else is told nothing about it.
+  // pause and revoke: the integration's owner or its Station's owner; anyone else is told nothing about it. A pause
+  // records who paused it as Auth answers (an admin's pause already there stays the admin's: Auth never lowers it), or
+  // by role from an Auth without the admin pause lock. A revocation clears it.
   async function stop(accountId, id, event) {
     const { row, role } = await visible(accountId, id);
     step(row, event, now());
     if (event === "revoke" && STOPPED.includes(row.state)) return viewOf(row, role);
-    await viaAuth(() => manage.changeIntegration(id, { status: event === "pause" ? "paused" : "revoked" }, accountId));
+    const answer = await viaAuth(() => manage.changeIntegration(id, { status: event === "pause" ? "paused" : "revoked" }, accountId));
     const kind = event === "pause" ? "integration_paused" : "integration_revoked";
+    const pausedBy = event !== "pause" ? null : PAUSED_BY.includes(answer?.pausedBy) ? answer.pausedBy : role === "owner" ? "owner" : "station";
     const updated = await commit(id, (current) => {
       if (event === "revoke" && STOPPED.includes(current.state)) return null;
-      return { fields: step(current, event, now()), event: { actor: accountId, kind, reason: role } };
+      return { fields: { ...step(current, event, now()), pausedBy }, event: { actor: accountId, kind, reason: role } };
     });
     return viewOf(updated, role);
   }
 
-  // What following Auth's entry changes on Portal's row: the fields to write and the status event ([transition, kind])
-  // or null. Auth is authoritative, so following it is not held back by expiry: transitions are checked at time 0.
+  // What following Auth's entry changes on Portal's row: the fields to write, the status event ([transition, kind]) or
+  // null, and the settings that changed. Auth is authoritative, so following it is not held back by expiry:
+  // transitions are checked at time 0. Who paused it (pausedBy, from Auth's admin pause lock on) goes with a status
+  // change, and on its own while both sides have it paused.
   function difference(row, entry) {
     const fields = {};
     if (entry.expiresAt && new Date(entry.expiresAt).getTime() !== new Date(row.expiresAt).getTime()) fields.expiresAt = entry.expiresAt;
@@ -482,8 +506,10 @@ export function createIntegrationService({
     if (entry.status === "revoked" && !STOPPED.includes(row.state)) event = ["revoke", "integration_revoked"];
     else if (entry.status === "paused" && row.state !== "paused" && !STOPPED.includes(row.state)) event = ["pause", "integration_paused"];
     else if (entry.status === "active" && row.state === "paused") event = ["resume", "integration_resumed"];
+    const pausedBy = entry.status === "paused" && PAUSED_BY.includes(entry.pausedBy) ? entry.pausedBy : null;
+    if (!event && row.state === "paused" && entry.status === "paused" && entry.pausedBy !== undefined && pausedBy !== row.pausedBy) fields.pausedBy = pausedBy;
     const settings = Object.keys(fields);
-    if (event) Object.assign(fields, step(row, event[0], 0));
+    if (event) Object.assign(fields, step(row, event[0], 0), { pausedBy: event[0] === "pause" ? pausedBy : null });
     return { fields, event, settings };
   }
 
@@ -710,11 +736,21 @@ export function createIntegrationService({
     pause: (accountId, id) => stop(accountId, id, "pause"),
     revoke: (accountId, id) => stop(accountId, id, "revoke"),
 
+    // The owner only, never while Agora.Build has the owner's account disabled, and never out of an Agora.Build admin's
+    // pause, which only an admin lifts on the admin site. Auth holds the lock too: its own 409 admin_paused means the
+    // Portal has not read that change yet, so the stack is asked to read Auth's change feed now.
     async resume(accountId, id) {
       const row = await owned(accountId, id);
+      if (row.ownerDisabledAt != null && effectiveState(row, now()) === "paused") throw ownerDisabled();
+      if (row.state === "paused" && row.pausedBy === "admin") throw adminPaused();
       step(row, "resume", now());
-      await viaAuth(() => manage.changeIntegration(id, { status: "active" }, accountId));
-      const updated = await commit(id, (current) => ({ fields: step(current, "resume", now()), event: { actor: accountId, kind: "integration_resumed", reason: "owner" } }));
+      try {
+        await viaAuth(() => manage.changeIntegration(id, { status: "active" }, accountId));
+      } catch (error) {
+        if (error.details?.code === "admin_paused") authChanged();
+        throw error;
+      }
+      const updated = await commit(id, (current) => ({ fields: { ...step(current, "resume", now()), pausedBy: null }, event: { actor: accountId, kind: "integration_resumed", reason: "owner" } }));
       return viewOf(updated, "owner");
     },
 

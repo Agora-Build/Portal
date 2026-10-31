@@ -679,7 +679,7 @@ account from using a large share of it. If Auth answers 429, it shows as 503
 Common error codes: `not_found` (404), `forbidden` (403), `invalid_state` and
 `expired` (409, the action does not fit the current state), `revoked` (409),
 `origin_taken` and `duplicate_key` (409, from Auth), `challenge` (400, expired or
-used), `proof` (422), `station` (403, the report client is not a registered Station), `exchange` (403, Auth refused the read token), `unavailable` (503, Auth unreachable), `built_in` (409, the built-in Station can't be removed, shared or left), `not_supported` (409, integrations are off on the built-in Station), `plan_limit` (403, the plan's limit on the built-in Station); too many challenges or requests are 429. Field mistakes are
+used), `proof` (422), `station` (403, the report client is not a registered Station), `exchange` (403, Auth refused the read token), `unavailable` (503, Auth unreachable), `built_in` (409, the built-in Station can't be removed, shared or left), `not_supported` (409, integrations are off on the built-in Station), `plan_limit` (403, the plan's limit on the built-in Station), `admin_paused` (409, Agora.Build paused the integration; only Agora.Build resumes it), `owner_disabled` (409, Agora.Build disabled the owner's account; the integration resumes when it is enabled again); too many challenges or requests are 429. Field mistakes are
 400 with `name`, `scopes`, `quota`, `expiry`, `jwk`, `private_key`, `account`,
 `report_key`, `r9_svc`, `reason`, `state`, `report` or `cursor`.
 
@@ -691,7 +691,7 @@ used), `proof` (422), `station` (403, the report client is not a registered Stat
 | `provisioning` | approved; the Station has not taken it up | the Station's report |
 | `waiting_for_host` | the Station is up but its host is not | the Station's report |
 | `ready` | usable | the Station's report only |
-| `paused` | stopped by the owner or Station owner; remembers where it was | resume returns it there |
+| `paused` | stopped by the owner, the Station's owner or Agora.Build; remembers where it was | resume returns it there; after Agora.Build's pause only Agora.Build resumes it (409 `admin_paused`) |
 | `revoking` | revoked at Auth; the Station has not confirmed | the Station reports `revoked` |
 | `revoked` | final | nothing |
 
@@ -704,6 +704,11 @@ longer has). Expiry
 is shown as the state `expired` for anything not yet revoking; expired
 integrations cannot be approved, paused or resumed, but can be renewed, rotated
 or have their quota changed.
+
+A paused integration also says who paused it, `pausedBy`: `owner`, `station` (the custom Station's owner) or `admin`
+(Agora.Build), as Auth recorded it, and `null` for a pause from before Auth recorded it. `pausedBy` is also `admin`,
+and the state `paused`, while Agora.Build has the owner's account disabled; resuming then is 409 `owner_disabled`, and
+the integration resumes by itself when the account is enabled again.
 
 ### For Station Builders
 
