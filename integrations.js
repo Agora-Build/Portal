@@ -199,7 +199,23 @@ function membersPanel(station) {
   panel.append(el("summary", { text: "Members and sharing" }), list, form, output);
   return panel;
 }
+// The built-in Station: Agora.Build runs it and every account has it, so it offers Details only (no Remove, Share or
+// Leave).
+function builtInRow(station) {
+  const output = el("p", { class: "station-details", role: "status" });
+  const details = el("button", { class: "inline-link", type: "button", text: "Details" });
+  details.addEventListener("click", () => act(details, null, () => stationDetails(station, output)));
+  const facts = ["Run by Agora.Build for every account", station.integrationsEnabled ? "Integrations available" : "Integrations not available yet"].join(" · ");
+  return el("article", { class: "account-card station-item station-item--built-in", "data-row": station.id }, [
+    el("div", { class: "integration-heading" }, [el("h3", { text: station.name || "Agora Station" }), el("span", { class: "state-badge state-badge--built-in", text: "Built in" })]),
+    el("p", { class: "mono station-origin", text: station.origin }),
+    el("p", { class: "muted", text: facts }),
+    el("div", { class: "agora-project-actions" }, [details]),
+    output
+  ]);
+}
 function stationRow(station) {
+  if (station.builtIn) return builtInRow(station);
   const owner = station.role === "owner";
   const output = el("p", { class: "station-details", role: "status" });
   const actions = el("div", { class: "agora-project-actions" });
@@ -298,17 +314,20 @@ stationForm.addEventListener("submit", (event) => {
   });
 });
 
-// Integrations: the account's own, and others on Stations it owns (which it may pause or revoke).
+// Integrations: the account's own, others on Stations it owns (which it may pause or revoke), and for Agora.Build admins
+// others on the built-in Station.
 const integrationStatus = document.querySelector("#integration-status");
 const createKey = keyField(document.querySelector("#integration-key"), () => integrationForm.elements.name.value);
+const BUILT_IN_OFF = "Integrations aren't available on the built-in Station yet. Add your own Station to create one.";
 function syncStationSelect() {
   const select = integrationForm.elements.stationId;
   const chosen = select.value;
-  const usable = stations.filter((station) => !station.status || station.status === "active");
-  select.replaceChildren(...usable.map((station) => el("option", { value: station.id, text: station.origin })));
+  // The built-in Station is offered only while Agora.Build allows integrations on it.
+  const usable = stations.filter((station) => (!station.status || station.status === "active") && (!station.builtIn || station.integrationsEnabled));
+  select.replaceChildren(...usable.map((station) => el("option", { value: station.id, text: station.builtIn ? (station.name || "Agora Station") + " (built in)" : station.origin })));
   if (usable.some((station) => station.id === chosen)) select.value = chosen;
   document.querySelector("#integration-submit").disabled = !usable.length;
-  if (!usable.length && !integrationForm.hidden) integrationStatus.textContent = "Add a Station first.";
+  if (!usable.length && !integrationForm.hidden) integrationStatus.textContent = stations.some((station) => station.builtIn) ? BUILT_IN_OFF : "Add a Station first.";
 }
 function closeIntegrationForm() {
   integrationForm.reset();
@@ -433,7 +452,7 @@ function integrationRow(integration) {
   const fact = (term, value) => value ? [el("dt", { text: term }), el("dd", { text: value })] : [];
   return el("article", { class: "account-card integration-item", "data-row": integration.id }, [
     el("div", { class: "integration-heading" }, [el("h3", { text: integration.name }), badge]),
-    ...(owner ? [] : [el("p", { class: "muted", text: "Another account's integration on your Station. You can pause or revoke it." })]),
+    ...(owner ? [] : [el("p", { class: "muted", text: integration.role === "station_admin" ? "Another account's integration on the built-in Station. As an Agora.Build admin you can pause or revoke it." : "Another account's integration on your Station. You can pause or revoke it." })]),
     el("dl", { class: "integration-facts" }, [
       ...fact("Station", integration.stationOrigin || ""),
       ...fact("Scopes", (integration.scopes || []).join(", ")),

@@ -99,3 +99,18 @@ test("closing a form that held focus hands it back to the button that opened it"
   // A hidden button is still connected; focus goes back to it only when it is rendered.
   assert.match(script, /button\.isConnected && button\.getClientRects\(\)\.length/);
 });
+
+test("the built-in Station shows as Built in with Details only, and is offered for integrations only while enabled", async () => {
+  const script = await read("integrations.js");
+  assert.match(script, /if \(station\.builtIn\) return builtInRow\(station\);/);
+  const row = script.slice(script.indexOf("function builtInRow("), script.indexOf("function stationRow("));
+  assert.ok(row.length > 0, "builtInRow comes right before stationRow");
+  assert.match(row, /text: "Built in"/);
+  assert.match(row, /text: "Details"/);
+  assert.doesNotMatch(row, /Remove|Share|Leave|membersPanel|confirmed\(/);
+  assert.match(script, /\(!station\.builtIn \|\| station\.integrationsEnabled\)/);
+  assert.match(script, /Integrations aren't available on the built-in Station yet\. Add your own Station to create one\./);
+  assert.match(script, /As an Agora\.Build admin you can pause or revoke it\./);
+  assert.match(await read("account.html"), /Every account has the built-in Agora Station/);
+  assert.match(await read("styles.css"), /\.state-badge--built-in \{/);
+});

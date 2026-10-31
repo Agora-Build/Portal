@@ -13,16 +13,20 @@
 // PORTAL_TEST_DATABASE_URL), Auth's management API and token exchange, and a Station fetch that reaches
 // https://station.test:<port> on 127.0.0.1 and trusts tests/fixtures/tls/station-test.crt. Auth never connects to a
 // Station, so only the Portal needs that name resolved.
+// With `{ integrations: true, builtIn: { admin } }` Auth's clients document also has a built-in Station at
+// https://station.test:<port> (a stub here), the admin is signed in at Auth first and named in Auth's `admins` and the
+// Portal's `PLATFORM_ADMINS`, and `reconfigureAuth()` changes the entry as an Auth restart would.
 import dns from "node:dns";
 import { createServer, request as httpRequest } from "node:http";
-import { Agent as HttpsAgent } from "node:https";
+import { createServer as createHttpsServer, Agent as HttpsAgent } from "node:https";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import pg from "pg";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { createAppServer } from "../../scripts/serve.mjs";
 import { createStore } from "../../scripts/store.mjs";
 import { modelConfig } from "../../scripts/models.mjs";
@@ -70,11 +74,12 @@ export async function integrationsSkipReason() {
 const authModule = (path) => import(pathToFileURL(resolve(authRepo, path)).href);
 export async function loadAuth() {
   // openid-client comes from the Auth checkout too: its relyingParty() builds Configurations of that copy.
-  const [server, flows, admin, keys, policy, oidc] = await Promise.all([
+  const [server, flows, admin, keys, policy, oidc, app] = await Promise.all([
     authModule("tests/helpers/server.mjs"), authModule("tests/helpers/flows.mjs"),
-    authModule("src/admin.mjs"), authModule("src/keys.mjs"), authModule("src/policy.mjs"), authModule("node_modules/openid-client/build/index.js")
+    authModule("src/admin.mjs"), authModule("src/keys.mjs"), authModule("src/policy.mjs"), authModule("node_modules/openid-client/build/index.js"),
+    authModule("src/app.mjs")
   ]);
-  return { ...server, ...flows, oidc, keysCommand: admin.keysCommand, createKeyStore: keys.createKeyStore, createAudit: policy.createAudit };
+  return { ...server, ...flows, oidc, keysCommand: admin.keysCommand, createKeyStore: keys.createKeyStore, createAudit: policy.createAudit, createApp: app.createApp };
 }
 
 const secret = () => randomBytes(36).toString("base64url");
@@ -138,7 +143,7 @@ function createFront() {
 // With `integrations` the Portal client may manage Stations and exchange ID tokens for station.read, the API carries the
 // Station report and approval scopes, and a native "astation" app (device flow) may list and approve integrations and
 // may ask an owned or shared registered Station for astation.remote (its stationScopes; the Portal API never carries it).
-function clientsDocument(site, { integrations = false } = {}) {
+function clientsDocument(site, { integrations = false, builtIn = null } = {}) {
   const document = {
     resources: [
       { indicator: API, name: "Agora Build API", scopes: ["credits", "agora:projects", "agora:certificates"] },
@@ -156,6 +161,8 @@ function clientsDocument(site, { integrations = false } = {}) {
   document.resources[0].scopes.push("station.report", "integrations:read", "integrations:approve");
   Object.assign(document.clients[0], { manage: true, exchange: true, stationScopes: ["station.read"] });
   document.clients.push({ id: "astation", name: "Astation", type: "native", firstParty: true, grants: ["device_code"], scopes: ["openid", "integrations:read", "integrations:approve"], resources: [API], stationScopes: ["astation.remote"] });
+  // Auth's built-in Station (its `stations` list): no owner, every account, report key from the stub.
+  if (builtIn) document.stations = [{ origin: builtIn.origin, name: "Agora Station", access: "any_account", integrations: builtIn.integrations, admins: builtIn.admins, reportKey: builtIn.reportJwk }];
   return document;
 }
 
@@ -169,6 +176,55 @@ function stationFetches() {
   };
   const agent = new HttpsAgent({ ca: stationTls().cert });
   return { stationFetch: createStationFetch({ allowPrivate: true, lookup, agent }), pushFetch: createStationFetch({ allowPrivate: true, lookup, agent, timeoutMs: 3000 }) };
+}
+
+// A client-credentials token with private_key_jwt (Auth's docs/integrating.md: the client assertion), as a Station
+// report client or an integration asks for one.
+export async function clientCredentials(stack, { clientId, privateKey, resource, scope }) {
+  const now = Math.floor(Date.now() / 1000);
+  const assertion = await new SignJWT({}).setProtectedHeader({ alg: "ES256" }).setIssuer(clientId).setSubject(clientId)
+    .setAudience(stack.issuer + "/token").setJti(randomUUID()).setIssuedAt(now).setExpirationTime(now + 60).sign(privateKey);
+  const response = await fetch(stack.issuer + "/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    body: new URLSearchParams({ grant_type: "client_credentials", resource, scope, client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer", client_assertion: assertion }).toString()
+  });
+  return { status: response.status, body: await response.json() };
+}
+
+// Auth refuses an empty admins list; the stack starts with this placeholder, then names the admin it signed in.
+const PLACEHOLDER_ADMIN = "ab" + "0".repeat(26);
+
+// The built-in Station's stub: https://station.test:<port>, chosen before Auth starts because Auth's clients document
+// names it. It records change nudges and holds its own ES256 report key; Auth sees only the public JWK.
+async function startBuiltInStation() {
+  const port = await freePort();
+  const keys = await generateKeyPair("ES256");
+  const nudges = [];
+  const server = createHttpsServer(stationTls(), (request, response) => {
+    if (request.method === "POST" && request.url === "/agora-build/v1/changes") {
+      const chunks = [];
+      request.on("data", (chunk) => chunks.push(chunk));
+      request.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        try { nudges.push(JSON.parse(text)); } catch { nudges.push({ malformed: text }); }
+        response.writeHead(202).end();
+      });
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  await listen(server, port, "127.0.0.1");
+  return { origin: "https://" + STATION_HOST + ":" + port, nudges, privateKey: keys.privateKey, reportJwk: await exportJWK(keys.publicKey), close: () => shut(server) };
+}
+
+// Signs `user` in at Auth through the sample app, so their account exists there; returns its ID.
+async function signInAtAuth(lib, partial, user) {
+  const browser = createBrowser(partial);
+  const rp = await lib.relyingParty(partial.idp, "sample", partial.secrets.SAMPLE_CLIENT_SECRET);
+  const started = await lib.startAuthorization(rp, { redirectUri: SAMPLE_REDIRECT, scope: "openid" });
+  const page = await lib.signInThrough(browser, partial.idp, started.url, { user });
+  return (await lib.finishAuthorization(rp, page.location, started)).claims().sub;
 }
 
 // A fresh schema in PORTAL_TEST_DATABASE_URL for one Portal; the URL selects it through the connection's options.
@@ -201,14 +257,14 @@ const models = { config: modelConfig({}), chat: async () => "unused", speak: asy
 const signalingEnv = { AGORA_APP_ID: "a".repeat(32), AGORA_APP_CERTIFICATE: "b".repeat(32), SPACES_SIGNALING_SECRET: randomBytes(24).toString("hex") };
 
 // Starts a Portal server on `port` against `issuer`, with a temp data file and a billing file.
-async function startPortal({ issuer, port, directory, clientSecret, logs, databaseUrl }) {
+async function startPortal({ issuer, port, directory, clientSecret, logs, databaseUrl, admins = [] }) {
   const site = "http://127.0.0.1:" + port;
   const billingFile = resolve(directory, "billing-" + port + ".json");
   await writeFile(billingFile, JSON.stringify({ vox: { services: { evaluation: { credits: 3, maxUnits: 5 } } } }));
   const store = createStore(resolve(portalRoot, "data/people.json"), resolve(directory, "community-" + port + ".json"), { log: (line) => logs.push(line) });
   const server = withEnv({
     AUTH_ISSUER: issuer, PORTAL_CLIENT_ID: "portal", PORTAL_CLIENT_SECRET: clientSecret, SITE_URL: site, PORTAL_API_AUDIENCE: API,
-    PORTAL_BILLING_FILE: billingFile, AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64"), PLATFORM_ADMINS: "",
+    PORTAL_BILLING_FILE: billingFile, AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64"), PLATFORM_ADMINS: admins.join(","),
     ...(databaseUrl ? { DATABASE_URL: databaseUrl } : {})
   }, () => createAppServer(portalRoot, {
     monitor: false, store, log: (line) => logs.push(line), models, modelLimit: 1000,
@@ -221,7 +277,9 @@ async function startPortal({ issuer, port, directory, clientSecret, logs, databa
 
 // One IdP + one Portal. Returns everything a flow needs; close() tears it all down. `integrations` turns on Stations
 // and integrations (see the top of this file); it needs PORTAL_TEST_DATABASE_URL (integrationsSkipReason()).
-export async function startStack(lib, { integrations = false } = {}) {
+// `builtIn: { admin }` adds the built-in Station (see the top of this file); it needs `integrations`.
+export async function startStack(lib, { integrations = false, builtIn = null } = {}) {
+  if (builtIn && !integrations) throw new TypeError("builtIn needs integrations: true");
   const directory = await mkdtemp(resolve(tmpdir(), "portal-e2e-"));
   const front = createFront();
   await front.start();
@@ -229,17 +287,32 @@ export async function startStack(lib, { integrations = false } = {}) {
   const portalPort = await freePort();
   const site = "http://127.0.0.1:" + portalPort;
   const secrets = { PORTAL_CLIENT_SECRET: secret(), SAMPLE_CLIENT_SECRET: secret(), VOX_CLIENT_SECRET: secret(), NOTES_CLIENT_SECRET: secret() };
-  const auth = await lib.startAuth({ issuer, clients: clientsDocument(site, { integrations }), env: secrets });
+  const station = builtIn ? await startBuiltInStation() : null;
+  let entry = station ? { origin: station.origin, reportJwk: station.reportJwk, integrations: false, admins: [PLACEHOLDER_ADMIN] } : null;
+  const auth = await lib.startAuth({ issuer, clients: clientsDocument(site, { integrations, builtIn: entry }), env: secrets });
   front.point(auth.origin);
-  const logs = [];
-  const database = integrations ? await portalDatabase() : null;
-  const portal = await startPortal({ issuer, port: portalPort, directory, clientSecret: secrets.PORTAL_CLIENT_SECRET, logs, databaseUrl: database?.url })
-    .catch(async (error) => { await database?.drop(); throw error; });
   // What the relying-party helpers need: the issuer, reached over real HTTP through its public address.
   const idp = { issuer, fake: auth.fake, fetch: (input, init) => fetch(input, init) };
+  // Another Auth instance on the same database with a changed built-in entry (Auth re-seeds it at startup), as a
+  // restart with an edited clients file; the front then sends everything there.
+  const instances = [];
+  async function reconfigureAuth(changes) {
+    entry = { ...entry, ...changes };
+    const app = await lib.createApp({ config: auth.app.services.config, db: auth.db, clientsDocument: clientsDocument(site, { integrations, builtIn: entry }), upstream: auth.app.services.upstream, timers: false, listen: false });
+    const server = createServer(app.handler);
+    await listen(server, 0, "127.0.0.1");
+    instances.push({ app, server });
+    front.point("http://127.0.0.1:" + server.address().port);
+  }
+  const adminId = builtIn ? await signInAtAuth(lib, { issuer, site, idp, secrets }, builtIn.admin) : null;
+  if (adminId) await reconfigureAuth({ admins: [adminId] });
+  const logs = [];
+  const database = integrations ? await portalDatabase() : null;
+  const portal = await startPortal({ issuer, port: portalPort, directory, clientSecret: secrets.PORTAL_CLIENT_SECRET, logs, databaseUrl: database?.url, admins: adminId ? [adminId] : [] })
+    .catch(async (error) => { await database?.drop(); throw error; });
   const closers = [];
-  return {
-    issuer, site, auth, idp, front, portal, store: portal.store, logs, secrets, directory,
+  const stack = {
+    issuer, site, auth, idp, front, portal, store: portal.store, logs, secrets, directory, reconfigureAuth, builtIn: null,
     // Another Portal against the same issuer (for example one started while the IdP is down).
     async extraPortal() {
       const extra = await startPortal({ issuer, port: await freePort(), directory, clientSecret: secrets.PORTAL_CLIENT_SECRET, logs });
@@ -248,13 +321,24 @@ export async function startStack(lib, { integrations = false } = {}) {
     },
     async close() {
       for (const close of closers) await close();
+      await station?.close();
       await portal.close();
       await database?.drop();
+      for (const { app, server } of instances) { await shut(server); await app.close(); }
       await front.stop();
       await auth.close();
       await rm(directory, { recursive: true, force: true });
     }
   };
+  if (station) {
+    const answer = await fetch(issuer + "/manage/v1/stations?account=" + adminId, { headers: { Authorization: "Basic " + Buffer.from("portal:" + encodeURIComponent(secrets.PORTAL_CLIENT_SECRET)).toString("base64"), Accept: "application/json" } });
+    const seeded = (await answer.json()).stations.find((listed) => listed.builtIn);
+    stack.builtIn = {
+      id: seeded.id, origin: station.origin, reportClientId: seeded.reportClientId, adminId, nudges: station.nudges, close: station.close,
+      reportToken: ({ resource = API, scope = "station.report" } = {}) => clientCredentials(stack, { clientId: seeded.reportClientId, privateKey: station.privateKey, resource, scope })
+    };
+  }
+  return stack;
 }
 
 let nextAddress = 0;

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { emptySchema, testDatabase } from "./helpers/test-db.mjs";
 
@@ -8,10 +9,39 @@ test("migrate applies each migration once, even when two instances race", async 
   const first = open();
   const second = open();
   const results = await Promise.all([first.migrate(), second.migrate()]);
-  assert.deepEqual(results.flat(), ["001_integrations.sql"]);
+  assert.deepEqual(results.flat(), ["001_integrations.sql", "002_built_in_stations.sql"]);
   assert.deepEqual(await first.migrate(), []);
   const { rows } = await first.pool.query("SELECT version FROM portal_migrations");
-  assert.deepEqual(rows.map((row) => row.version), ["001_integrations.sql"]);
+  assert.deepEqual(rows.map((row) => row.version), ["001_integrations.sql", "002_built_in_stations.sql"]);
+});
+
+test("migration 002 leaves an existing database's custom Stations, integrations and events as they were", async (t) => {
+  const open = await emptySchema(t);
+  if (!open) return t.skip("PORTAL_TEST_DATABASE_URL is not set");
+  const db = open();
+  // A database that has only run 001, with a custom Station, a member, two integrations and their events.
+  await db.transaction(async (client) => {
+    await client.query("CREATE TABLE portal_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())");
+    await client.query(await readFile(new URL("../migrations/001_integrations.sql", import.meta.url), "utf8"));
+    await client.query("INSERT INTO portal_migrations (version) VALUES ('001_integrations.sql')");
+  });
+  await db.pool.query("INSERT INTO stations (id, origin, owner_account, report_client_id, status, verified_at) VALUES ('st1', 'https://a.example', 'ab1', 's-st1', 'active', '2026-10-01T00:00:00Z')");
+  await db.pool.query("INSERT INTO station_members (station_id, account_id, added_by, added_at) VALUES ('st1', 'ab2', 'ab1', '2026-10-02T00:00:00Z')");
+  const integration = "INSERT INTO integrations (id, owner_account, station_id, kind, name, scopes, state, quota_per_second, expires_at) VALUES ($1, 'ab1', 'st1', 'custom_app', 'App', '{a}', $2, 200, '2027-01-01T00:00:00Z')";
+  await db.pool.query(integration, ["i-1", "revoked"]);
+  await db.pool.query(integration, ["i-2", "revoked"]);
+  await db.pool.query("INSERT INTO integration_events (at, station_id, integration_id, account_id, actor, kind) VALUES ('2026-10-03T00:00:00Z', 'st1', 'i-1', 'ab1', 'ab1', 'integration_revoked')");
+  const snapshot = async () => ({
+    stations: (await db.pool.query("SELECT id, origin, owner_account, report_client_id, status, created_at, verified_at, removed_at FROM stations")).rows,
+    integrations: (await db.pool.query("SELECT * FROM integrations ORDER BY id")).rows,
+    members: (await db.pool.query("SELECT * FROM station_members")).rows,
+    events: (await db.pool.query("SELECT * FROM integration_events ORDER BY id")).rows
+  });
+  const before = await snapshot();
+  assert.deepEqual(await db.migrate(), ["002_built_in_stations.sql"]);
+  assert.deepEqual(await snapshot(), before);
+  const { rows: [row] } = await db.pool.query("SELECT owner_account, status, built_in, access, integrations_enabled, name FROM stations WHERE id = 'st1'");
+  assert.deepEqual(row, { owner_account: "ab1", status: "active", built_in: false, access: "members", integrations_enabled: true, name: null });
 });
 
 test("ensureEventPartitions creates this and next month once and adopts rows from the default partition", async (t) => {

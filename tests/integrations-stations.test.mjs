@@ -13,7 +13,7 @@ const MEMBER = "ab" + "0".repeat(25) + "2";
 const STRANGER = "ab" + "0".repeat(25) + "3";
 const REPORT_KEY = { kty: "EC", crv: "P-256", x: "test-x", y: "test-y" };
 
-async function setup(t, { wrap = (repository) => repository } = {}) {
+async function setup(t, { wrap = (repository) => repository, admins = [] } = {}) {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
   const repository = createRepository(db);
@@ -30,9 +30,11 @@ async function setup(t, { wrap = (repository) => repository } = {}) {
   };
   let counter = 0;
   const notified = [];
+  const logs = [];
   const service = createIntegrationService({
     repository: wrap(repository), db, manage, stationFetch, exchange: exchangeFn,
-    now: () => clock.now, challengeValue: () => "proof-value-" + (++counter), notify: (stationId) => notified.push(stationId)
+    now: () => clock.now, challengeValue: () => "proof-value-" + (++counter), notify: (stationId) => notified.push(stationId),
+    admins, log: (line) => logs.push(line)
   });
   // Register a Station for an account the way the browser does: a challenge, then the served value.
   async function register(accountId = OWNER, origin = "https://one.example") {
@@ -42,7 +44,7 @@ async function setup(t, { wrap = (repository) => repository } = {}) {
     return service.registerStation(accountId, { challengeId: challenge.challengeId, reportKey: REPORT_KEY });
   }
   const events = async (kind) => (await db.pool.query("SELECT * FROM integration_events" + (kind ? " WHERE kind = $1" : "") + " ORDER BY id", kind ? [kind] : [])).rows;
-  return { db, repository, manage, clock, served, fetched, exchange, service, register, events, notified };
+  return { db, repository, manage, clock, served, fetched, exchange, service, register, events, notified, logs };
 }
 
 const refused = (status, code, message) => (error) => {
@@ -66,6 +68,8 @@ test("fromManage maps Auth's answers to Portal errors and rethrows anything else
     [409, "origin_taken", 409, "origin_taken", "This Station is already registered."],
     [409, "revoked", 409, "revoked", "This integration has been revoked."],
     [409, "duplicate_key", 409, "duplicate_key", "This key is already registered."],
+    [409, "built_in", 409, "built_in", "The built-in Station is always there: it can't be removed, shared or left."],
+    [409, "not_supported", 409, "not_supported", "Integrations aren't available on the built-in Station yet."],
     [503, "unavailable", 503, "unavailable", "Auth is unavailable. Try again shortly."],
     [500, "server_error", 503, "unavailable", "Auth is unavailable. Try again shortly."]
   ];
@@ -498,4 +502,151 @@ test("a membership Auth has dropped is removed by the member's next listing, rev
   assert.equal((await s.events("member_removed")).length, 1, "reconciling twice adds nothing");
   assert.deepEqual(s.notified, ["st1"]);
   assert.equal((await s.repository.station("st1")).status, "active", "the owner's Station stays");
+});
+
+const BUILT_IN = "https://station.agora.test";
+const BUILT_IN_FIXED = "The built-in Station is always there: it can't be removed, shared or left.";
+
+test("every account lists the built-in Station first, with no owner or report client, and a listing without it removes nothing", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const built = s.manage.seedBuiltIn();
+  const mine = await s.register(OWNER);
+  const listed = await s.service.stations(OWNER);
+  assert.deepEqual(listed.stations.map((station) => [station.id, station.role]), [[built.id, "built_in"], [mine.id, "owner"]]);
+  assert.deepEqual(listed.stations[0], { id: built.id, origin: BUILT_IN, role: "built_in", ownerAccount: null, status: "active", createdAt: listed.stations[0].createdAt, builtIn: true, name: "Agora Station", integrationsEnabled: false });
+  assert.deepEqual([listed.stations[1].builtIn, listed.stations[1].name, listed.stations[1].integrationsEnabled], [false, null, true]);
+  assert.deepEqual((await s.service.stations(STRANGER)).stations.map((station) => [station.id, station.role]), [[built.id, "built_in"]]);
+  const reconciled = (await s.events("station_reconciled")).filter((row) => row.station_id === built.id);
+  assert.deepEqual(reconciled.map((row) => [row.account_id, row.actor]), [["system", "system"]], "recorded once, as system");
+  assert.deepEqual(await s.repository.currentMembers(built.id), [], "nobody is made a member");
+  // A listing that lacks it (a stale answer, a bug at Auth) never removes it or revokes its integrations.
+  await seedIntegration(s.repository, "i-b1", built.id, STRANGER, "ready");
+  s.manage.records.splice(s.manage.records.indexOf(built), 1);
+  assert.deepEqual((await s.service.stations(OWNER)).stations.map((station) => station.id), [built.id, mine.id]);
+  assert.equal((await s.repository.station(built.id)).status, "active");
+  assert.equal((await s.repository.integration("i-b1")).state, "ready");
+  assert.equal((await s.events("station_removed")).length, 0);
+});
+
+
+test("a built-in Station Auth lists as a custom one is left as it is (no owner, no members)", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const built = s.manage.seedBuiltIn();
+  await s.service.stations(OWNER);
+  Object.assign(built, { builtIn: false, access: "members", owner: OWNER, members: [{ account: MEMBER }] });
+  await s.service.stations(MEMBER);
+  assert.deepEqual(await s.repository.currentMembers(built.id), [], "nobody is made a member");
+  const row = await s.repository.station(built.id);
+  assert.deepEqual([row.builtIn, row.ownerAccount, row.status], [true, null, "active"]);
+  assert.ok(s.logs.includes("Built-in Station listed by Auth as a custom Station: left as it is."));
+});
+test("the built-in Station follows Auth's integrations setting and name on every listing", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const built = s.manage.seedBuiltIn();
+  await s.service.stations(OWNER);
+  built.integrations = true;
+  built.name = "Agora Station (dev)";
+  const [first] = (await s.service.stations(MEMBER)).stations;
+  assert.deepEqual([first.integrationsEnabled, first.name], [true, "Agora Station (dev)"]);
+});
+
+test("removing, sharing, leaving or listing the members of the built-in Station is 409 built_in without asking Auth", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const built = s.manage.seedBuiltIn({ admins: [OWNER] });
+  await s.service.stations(OWNER);
+  const calls = s.manage.calls.length;
+  for (const [what, run] of [
+    ["remove", () => s.service.removeStation(OWNER, built.id)],
+    ["share", () => s.service.share(OWNER, built.id, MEMBER)],
+    ["unshare", () => s.service.unshare(OWNER, built.id, MEMBER)],
+    ["leave", () => s.service.unshare(MEMBER, built.id, MEMBER)],
+    ["members", () => s.service.members(MEMBER, built.id)]
+  ]) await assert.rejects(run(), refused(409, "built_in", BUILT_IN_FIXED), what);
+  assert.equal(s.manage.calls.length, calls, "Auth is not asked");
+  // Auth answers the same requests the same way.
+  await assert.rejects(s.manage.removeStation(built.id, OWNER), (error) => error.status === 409 && error.code === "built_in");
+  await assert.rejects(s.manage.members(built.id, OWNER), (error) => error.status === 409 && error.code === "built_in");
+});
+
+test("the built-in Station's origin can't be checked or registered, and no proof is fetched", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  s.manage.seedBuiltIn();
+  const early = await s.service.createChallenge(OWNER, BUILT_IN); // before the Portal knows the built-in Station
+  await s.service.stations(OWNER);
+  await assert.rejects(s.service.createChallenge(OWNER, BUILT_IN), refused(409, "origin_taken", "This is the built-in Station. Every account already has it."));
+  await assert.rejects(s.service.createChallenge(OWNER, BUILT_IN + "/"), refused(409, "origin_taken"));
+  await assert.rejects(s.service.registerStation(OWNER, { challengeId: early.challengeId, reportKey: REPORT_KEY }), refused(409, "origin_taken"));
+  assert.deepEqual(s.fetched, []);
+});
+
+test("any account gets a read token for the built-in Station", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const built = s.manage.seedBuiltIn();
+  await s.service.stations(OWNER);
+  assert.deepEqual(await s.service.readToken(STRANGER, "id-token", built.id), { accessToken: "read-token-for-" + BUILT_IN, expiresIn: 300, origin: BUILT_IN });
+});
+
+test("a new built-in Station at the same origin retires the old one in Portal, with its integrations", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const old = s.manage.seedBuiltIn({ id: "stold" });
+  await s.service.stations(OWNER);
+  await seedIntegration(s.repository, "i-old", old.id, OWNER, "ready");
+  old.status = "removed";
+  s.manage.seedBuiltIn({ id: "stnew", reportClientId: "s-" + "0".repeat(24) + "bt" });
+  assert.deepEqual((await s.service.stations(MEMBER)).stations.map((station) => station.id), ["stnew"]);
+  assert.equal((await s.repository.station("stold")).status, "removed");
+  assert.equal((await s.repository.integration("i-old")).state, "revoked");
+  assert.deepEqual((await s.events("station_removed")).map((row) => [row.station_id, row.account_id, row.reason]), [["stold", "system", "reconciled"]]);
+});
+
+const ADMIN = "ab" + "0".repeat(25) + "4";
+
+test("syncBuiltIn brings the built-in Stations in as the first admin, follows their settings and adds nothing else", async (t) => {
+  const s = await setup(t, { admins: [ADMIN, OWNER] });
+  if (!s) return;
+  const built = s.manage.seedBuiltIn();
+  await s.manage.registerStation({ origin: "https://admins.example", owner: ADMIN, reportKey: REPORT_KEY, actor: ADMIN });
+  assert.equal(await s.service.syncBuiltIn(), true);
+  assert.deepEqual((await s.repository.builtInStations()).map((station) => [station.id, station.reportClientId, station.integrationsEnabled]), [[built.id, built.reportClientId, false]]);
+  assert.equal((await s.db.pool.query("SELECT count(*)::int AS n FROM stations WHERE NOT built_in")).rows[0].n, 0, "the admin's own Stations are left to its own listing");
+  assert.equal((await s.repository.stationByReportClient(built.reportClientId)).id, built.id, "its report client is known without anyone signing in");
+  built.integrations = true;
+  assert.equal(await s.service.syncBuiltIn(), true);
+  assert.equal((await s.repository.station(built.id)).integrationsEnabled, true);
+  assert.equal((await s.events("station_reconciled")).length, 1, "inserted once");
+});
+
+test("syncBuiltIn without admins asks nothing, and with Auth down changes nothing; both are logged by reason", async (t) => {
+  const none = await setup(t);
+  if (!none) return;
+  none.manage.seedBuiltIn();
+  assert.equal(await none.service.syncBuiltIn(), false);
+  assert.equal(none.manage.calls.includes("stations"), false);
+  assert.ok(none.logs.includes("Built-in Station sync skipped: no PLATFORM_ADMINS."));
+  const s = await setup(t, { admins: [ADMIN] });
+  s.manage.seedBuiltIn();
+  s.manage.down = true;
+  assert.equal(await s.service.syncBuiltIn(), false);
+  assert.ok(s.logs.includes("Built-in Station sync failed: unavailable."));
+  assert.deepEqual(await s.repository.builtInStations(), []);
+});
+
+test("a sync whose listing lacks a built-in Station removes nothing and revokes nothing", async (t) => {
+  const s = await setup(t, { admins: [ADMIN] });
+  if (!s) return;
+  const built = s.manage.seedBuiltIn();
+  await s.service.syncBuiltIn();
+  await seedIntegration(s.repository, "i-kept", built.id, OWNER, "ready");
+  s.manage.records.splice(s.manage.records.indexOf(built), 1);
+  assert.equal(await s.service.syncBuiltIn(), true);
+  assert.equal((await s.repository.station(built.id)).status, "active");
+  assert.equal((await s.repository.integration("i-kept")).state, "ready");
+  assert.ok(s.logs.includes("Built-in Station absent from Auth's listing: left as it is."));
 });
