@@ -599,12 +599,20 @@ Auth's clients file must be set up for this:
 - **Sync.** The Portal learns of built-in Stations from Auth itself: when the Stations and integrations stack becomes
   ready (the first request to one of their routes, which waits for it) and then hourly, it lists Stations at Auth as
   the first account in `PLATFORM_ADMINS` (which must exist at Auth) and adds or updates the built-in ones, never
-  removing one. Without `PLATFORM_ADMINS`, or with Auth unreachable, the log says so by reason and the next hour
-  tries again; every account's own listing also syncs them. A report client the Portal does not know answers 403
-  `station`.
+  removing one. Without `PLATFORM_ADMINS`, or with Auth unreachable, the log says so by reason and the sync is tried
+  again a minute later (hourly again once it succeeds); every account's own listing also syncs them. The first sync
+  holds the first request for up to Auth's 10-second management timeout plus the database writes it makes. A report
+  client the Portal does not know answers 403 `station`.
+- **Retiring it.** A built-in Station Auth retires (`"retired": true`) without another Station at its origin stays
+  listed in the Portal, since absence or retirement never removes one here. After Auth has retired it (which revokes
+  its report client and integrations there), an operator marks it removed in the Portal database:
+  `UPDATE stations SET status = 'removed', removed_at = now() WHERE id = '<station id>' AND built_in AND status = 'active';`
+  It then leaves every listing, is no longer offered for integrations and its report token is refused; each owner's
+  next integration listing follows Auth's revocations. A later listing from Auth never restores it (logged).
 - **Limits across replicas.** The plan limit is checked one creation at a time per account in each Portal process;
   with several Portal instances two simultaneous creations could pass it by one (accepted, bounded by the creation
-  rate limit).
+  rate limit). A creation Auth accepted but the Portal failed to record is not counted until an integration listing
+  reconciles it, so the limit can also be passed by one for that time.
 
 ### Routes
 
