@@ -700,7 +700,8 @@ approval.
    and dump the Portal's and Auth's databases.
 3. **Deploy Auth D26** (`feat/admin-mfa`) with the D24 clients file unchanged. Check that Auth starts and signs people
    in, and that the Portal still lists Stations and integrations for an ordinary account.
-4. **Passkeys.** At least two of the built-in Station's admins add passkeys at Auth.
+4. **Passkeys.** At least two of the built-in Station's admins add passkeys at Auth. A lost passkey can only be reset by
+   another admin on the admin site, so a single admin who loses theirs is locked out.
 5. **Deploy the Portal D26.** Migration 003 runs when the server starts. Set `TRUST_PROXY=1` behind the proxy. The
    reader starts with an empty cursor and reads Auth's whole feed once. Check that the log has no `Auth change feed
    read failed`, `Auth change feed not available yet` or `Built-in Station sync failed` line, and that
