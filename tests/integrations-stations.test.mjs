@@ -13,7 +13,7 @@ const MEMBER = "ab" + "0".repeat(25) + "2";
 const STRANGER = "ab" + "0".repeat(25) + "3";
 const REPORT_KEY = { kty: "EC", crv: "P-256", x: "test-x", y: "test-y" };
 
-async function setup(t, { wrap = (repository) => repository, admins = [] } = {}) {
+async function setup(t, { wrap = (repository) => repository } = {}) {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
   const repository = createRepository(db);
@@ -34,7 +34,7 @@ async function setup(t, { wrap = (repository) => repository, admins = [] } = {})
   const service = createIntegrationService({
     repository: wrap(repository), db, manage, stationFetch, exchange: exchangeFn,
     now: () => clock.now, challengeValue: () => "proof-value-" + (++counter), notify: (stationId) => notified.push(stationId),
-    admins, log: (line) => logs.push(line)
+    log: (line) => logs.push(line)
   });
   // Register a Station for an account the way the browser does: a challenge, then the served value.
   async function register(accountId = OWNER, origin = "https://one.example") {
@@ -378,6 +378,30 @@ test("removing a Station revokes all its integrations; only the owner may", asyn
   assert.deepEqual(s.notified, ["st1"]);
 });
 
+test("an integration revoked by unsharing, removing its Station or a listing without the Station no longer says who paused it", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await s.register(OWNER, "https://one.example");
+  await s.register(OWNER, "https://two.example");
+  await s.service.share(OWNER, "st1", MEMBER);
+  for (const [id, stationId, owner] of [["i-member", "st1", MEMBER], ["i-owner", "st1", OWNER], ["i-gone", "st2", OWNER]]) {
+    await seedIntegration(s.repository, id, stationId, owner, "ready");
+    await s.repository.updateIntegration(id, { state: "paused", resumeState: "ready", pausedBy: "station" });
+  }
+  const pick = async (id) => {
+    const row = await s.repository.integration(id);
+    return [row.state, row.pausedBy];
+  };
+  await s.service.unshare(OWNER, "st1", MEMBER);
+  assert.deepEqual(await pick("i-member"), ["revoking", null]);
+  assert.deepEqual(await pick("i-owner"), ["paused", "station"], "untouched");
+  await s.service.removeStation(OWNER, "st1");
+  assert.deepEqual(await pick("i-owner"), ["revoking", null]);
+  s.manage.records.find((entry) => entry.id === "st2").status = "removed";
+  await s.service.stations(OWNER);
+  assert.deepEqual(await pick("i-gone"), ["revoked", null]);
+});
+
 test("unsharing someone Portal does not count a member still asks Auth but records nothing", async (t) => {
   const s = await setup(t);
   if (!s) return;
@@ -606,16 +630,15 @@ test("a new built-in Station at the same origin retires the old one in Portal, w
   assert.deepEqual((await s.events("station_removed")).map((row) => [row.station_id, row.account_id, row.reason]), [["stold", "system", "reconciled"]]);
 });
 
-const ADMIN = "ab" + "0".repeat(25) + "4";
-
-test("syncBuiltIn brings the built-in Stations in as the first admin, follows their settings and adds nothing else", async (t) => {
-  const s = await setup(t, { admins: [ADMIN, OWNER] });
+test("syncBuiltIn brings in the built-in Stations from Auth's listing that names no account, follows their settings and adds nothing else", async (t) => {
+  const s = await setup(t);
   if (!s) return;
   const built = s.manage.seedBuiltIn();
-  await s.manage.registerStation({ origin: "https://admins.example", owner: ADMIN, reportKey: REPORT_KEY, actor: ADMIN });
+  await s.manage.registerStation({ origin: "https://custom.example", owner: OWNER, reportKey: REPORT_KEY, actor: OWNER });
   assert.equal(await s.service.syncBuiltIn(), true);
+  assert.deepEqual(s.manage.calls.filter((name) => name !== "registerStation"), ["builtInStations"], "no account's listing is asked for");
   assert.deepEqual((await s.repository.builtInStations()).map((station) => [station.id, station.reportClientId, station.integrationsEnabled]), [[built.id, built.reportClientId, false]]);
-  assert.equal((await s.db.pool.query("SELECT count(*)::int AS n FROM stations WHERE NOT built_in")).rows[0].n, 0, "the admin's own Stations are left to its own listing");
+  assert.equal((await s.db.pool.query("SELECT count(*)::int AS n FROM stations WHERE NOT built_in")).rows[0].n, 0, "custom Stations are left to their accounts' listings");
   assert.equal((await s.repository.stationByReportClient(built.reportClientId)).id, built.id, "its report client is known without anyone signing in");
   built.integrations = true;
   assert.equal(await s.service.syncBuiltIn(), true);
@@ -623,23 +646,22 @@ test("syncBuiltIn brings the built-in Stations in as the first admin, follows th
   assert.equal((await s.events("station_reconciled")).length, 1, "inserted once");
 });
 
-test("syncBuiltIn without admins asks nothing, and with Auth down changes nothing; both are logged by reason", async (t) => {
-  const none = await setup(t);
-  if (!none) return;
-  none.manage.seedBuiltIn();
-  assert.equal(await none.service.syncBuiltIn(), false);
-  assert.equal(none.manage.calls.includes("stations"), false);
-  assert.ok(none.logs.includes("Built-in Station sync skipped: no PLATFORM_ADMINS."));
-  const s = await setup(t, { admins: [ADMIN] });
+test("syncBuiltIn with Auth down, or an Auth without the listing, changes nothing and is logged by reason", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
   s.manage.seedBuiltIn();
   s.manage.down = true;
   assert.equal(await s.service.syncBuiltIn(), false);
   assert.ok(s.logs.includes("Built-in Station sync failed: unavailable."));
+  s.manage.down = false;
+  s.manage.failNext.builtInStations = { status: 404, code: "not_found" };
+  assert.equal(await s.service.syncBuiltIn(), false);
+  assert.ok(s.logs.includes("Built-in Station sync failed: not_found."));
   assert.deepEqual(await s.repository.builtInStations(), []);
 });
 
 test("a sync whose listing lacks a built-in Station removes nothing and revokes nothing", async (t) => {
-  const s = await setup(t, { admins: [ADMIN] });
+  const s = await setup(t);
   if (!s) return;
   const built = s.manage.seedBuiltIn();
   await s.service.syncBuiltIn();

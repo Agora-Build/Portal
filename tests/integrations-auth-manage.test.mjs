@@ -130,3 +130,27 @@ test("bad settings are refused", () => {
   assert.throws(() => createManageClient({ issuer, clientId, clientSecret: "short" }), TypeError);
   assert.throws(() => createManageClient({ issuer, clientId: "", clientSecret }), TypeError);
 });
+
+test("builtInStations lists Auth's built-in Stations without naming an account", async () => {
+  const station = { id: "st1", origin: "https://station.agora.build", owner: null, status: "active", reportClientId: "s-x", createdAt: "2026-10-30T00:00:00Z", builtIn: true, access: "any_account", integrations: false, name: "Agora Station" };
+  const s = stub({ stations: [station] });
+  assert.deepEqual(await clientWith(s).builtInStations(), [station]);
+  assert.deepEqual([s.calls[0].method, s.calls[0].url, s.calls[0].body], ["GET", issuer + "/manage/v1/built-in-stations", undefined]);
+  await assert.rejects(clientWith(stub({ nope: [] })).builtInStations(), (error) => error instanceof ManageError && error.code === "bad_response");
+});
+
+test("integrationChanges reads Auth's change feed after a cursor and checks the answer's shape", async () => {
+  const change = { cursor: "YzE", at: "2026-10-31T10:00:00.000Z", kind: "paused", clientId: "i-1", stationId: "st1", owner: actor, status: "paused", pausedBy: "admin", actorAccountId: other, reason: "Spam", admin: true };
+  let s = stub({ changes: [change], nextCursor: "YzE" });
+  assert.deepEqual(await clientWith(s).integrationChanges({ after: "YzA", limit: 100 }), { changes: [change], nextCursor: "YzE" });
+  assert.deepEqual([s.calls[0].method, s.calls[0].url], ["GET", issuer + "/manage/v1/integration-changes?after=YzA&limit=100"]);
+  s = stub({ changes: [], nextCursor: null });
+  assert.deepEqual(await clientWith(s).integrationChanges(), { changes: [], nextCursor: null });
+  assert.equal(s.calls[0].url, issuer + "/manage/v1/integration-changes", "no cursor before the first read");
+  for (const body of [{ nextCursor: null }, { changes: [], nextCursor: 7 }, { changes: [] }]) {
+    await assert.rejects(clientWith(stub(body)).integrationChanges(), (error) => error instanceof ManageError && error.code === "bad_response", JSON.stringify(body));
+  }
+  // A cursor beyond Auth's newest change (Auth restored from a backup) keeps Auth's code, for the reader to reset.
+  const ahead = stub(Response.json({ error: "cursor_ahead" }, { status: 409 }));
+  await assert.rejects(clientWith(ahead).integrationChanges({ after: "Yzk", limit: 100 }), (error) => error instanceof ManageError && error.status === 409 && error.code === "cursor_ahead");
+});

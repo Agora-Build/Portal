@@ -24,6 +24,9 @@ const LIVE = ["awaiting_approval", "provisioning", "waiting_for_host", "ready"];
 const STOPPED = ["revoking", "revoked"];
 const STALE = "Showing saved details; Auth could not be reached.";
 const NO_DETAILS = "This Station does not offer details yet.";
+// An integration Agora.Build stopped (an admin's pause, or its owner's account disabled): only Agora.Build lifts it.
+const PAUSED_BY_AGORA = "Paused by Agora.Build";
+const LOCKED_NOTE = "Agora.Build paused this integration. Only Agora.Build can resume it; you can still revoke it.";
 let me = null;
 let stations = [];
 let challenge = null;
@@ -314,8 +317,8 @@ stationForm.addEventListener("submit", (event) => {
   });
 });
 
-// Integrations: the account's own, others on Stations it owns (which it may pause or revoke), and for Agora.Build admins
-// others on the built-in Station.
+// Integrations: the account's own, and others on custom Stations it owns (which it may pause or revoke). Agora.Build
+// admins act on the admin site, never here (spec D26).
 const integrationStatus = document.querySelector("#integration-status");
 const createKey = keyField(document.querySelector("#integration-key"), () => integrationForm.elements.name.value);
 const BUILT_IN_OFF = "Integrations aren't available on the built-in Station yet. Add your own Station to create one.";
@@ -369,7 +372,7 @@ async function openHistory(integration) {
     output.textContent = events.length ? "" : "No events yet.";
     list.replaceChildren(...events.map((entry) => el("li", { class: "statement-row" }, [
       el("div", {}, [el("strong", { text: words(entry.kind) }), el("time", { datetime: entry.at, text: time(entry.at) })]),
-      el("span", { class: "muted", text: [entry.state ? stateLabel(entry.state) : "", entry.reason ? words(entry.reason) : "", entry.actor ? "by " + entry.actor : ""].filter(Boolean).join(" · ") })
+      el("span", { class: "muted", text: [entry.state ? stateLabel(entry.state) : "", entry.reason ? words(entry.reason) : "", entry.actor ? "by " + (entry.actor === "agora_build" ? "Agora.Build" : entry.actor) : ""].filter(Boolean).join(" · ") })
     ])));
   } catch (error) { output.textContent = error.message; }
 }
@@ -418,6 +421,8 @@ function rotatePanel(integration) {
 function integrationRow(integration) {
   const owner = integration.role === "owner";
   const state = integration.state;
+  // Paused by Agora.Build: shown as such, with no Resume (Auth answers 409 admin_paused to anyone but an admin).
+  const locked = state === "paused" && integration.pausedBy === "admin";
   const path = "/api/integrations/" + segment(integration.id) + "/";
   const output = el("p", { class: "form-note", role: "status" });
   const actions = el("div", { class: "agora-project-actions" });
@@ -427,9 +432,17 @@ function integrationRow(integration) {
     pause.addEventListener("click", () => act(pause, output, () => change("pause")));
     actions.append(pause);
   }
-  if (owner && state === "paused") {
+  if (owner && state === "paused" && !locked) {
     const resume = el("button", { class: "inline-link", type: "button", text: "Resume" });
-    resume.addEventListener("click", () => act(resume, output, () => change("resume")));
+    resume.addEventListener("click", () => act(resume, output, async () => {
+      try { await change("resume"); }
+      catch (error) {
+        // Agora.Build paused it since this list was loaded: say so, and show the list as it is now.
+        if (error.code !== "admin_paused" && error.code !== "owner_disabled") throw error;
+        notify(error.message);
+        await loadIntegrations();
+      }
+    }));
     actions.append(resume);
   }
   if (!STOPPED.includes(state)) {
@@ -448,11 +461,12 @@ function integrationRow(integration) {
       rotatePanel(integration)
     );
   }
-  const badge = el("span", { class: "state-badge state-badge--" + String(state).replace(/[^a-z_]/g, "").replace(/_/g, "-"), text: stateLabel(state) });
+  const badge = el("span", { class: "state-badge state-badge--" + String(state).replace(/[^a-z_]/g, "").replace(/_/g, "-"), text: locked ? PAUSED_BY_AGORA : stateLabel(state) });
   const fact = (term, value) => value ? [el("dt", { text: term }), el("dd", { text: value })] : [];
   return el("article", { class: "account-card integration-item", "data-row": integration.id }, [
     el("div", { class: "integration-heading" }, [el("h3", { text: integration.name }), badge]),
-    ...(owner ? [] : [el("p", { class: "muted", text: integration.role === "station_admin" ? "Another account's integration on the built-in Station. As an Agora.Build admin you can pause or revoke it." : "Another account's integration on your Station. You can pause or revoke it." })]),
+    ...(owner ? [] : [el("p", { class: "muted", text: "Another account's integration on your Station. You can pause or revoke it." })]),
+    ...(owner && locked ? [el("p", { class: "muted", text: LOCKED_NOTE })] : []),
     el("dl", { class: "integration-facts" }, [
       ...fact("Station", integration.stationOrigin || ""),
       ...fact("Scopes", (integration.scopes || []).join(", ")),

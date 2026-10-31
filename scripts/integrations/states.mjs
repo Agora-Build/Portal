@@ -19,8 +19,13 @@ function invalid(message, code = "invalid_state") {
   return Object.assign(new AppError(409, message), { details: { code } });
 }
 
+// The state as shown and as Stations see it: expired for anything not yet revoking, and paused while Auth's change feed
+// says the owner's account is disabled (Auth issues the integration no token then; spec §3.3.4), whatever the row's own
+// state. Transitions use the row's own state.
 export function effectiveState(row, now) {
-  if (row.state !== "revoking" && row.state !== "revoked" && row.expiresAt != null && new Date(row.expiresAt).getTime() <= now) return "expired";
+  if (row.state === "revoking" || row.state === "revoked") return row.state;
+  if (row.expiresAt != null && new Date(row.expiresAt).getTime() <= now) return "expired";
+  if (row.ownerDisabledAt != null) return "paused";
   return row.state;
 }
 

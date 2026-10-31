@@ -7,11 +7,16 @@ export const BUILT_IN_REPORT_CLIENT = "s-" + "0".repeat(24) + "bs";
 
 // An in-memory Auth /manage/v1 following the actor rules of Auth's docs/integrating.md, including built-in Stations
 // (seedBuiltIn): listed first for every account, with no owner or members (409 built_in), integrations only while
-// switched on (409 not_supported), and admins who may pause or revoke others' integrations on them. `failNext` makes
-// the next call of that name fail with the given status and code (after the gate, so the call is still recorded).
+// switched on (409 not_supported), and admins, who have no rights on them through the Portal (Auth D26 R12). `feed` is
+// Auth's change feed (integrationChanges): every status change and owner account change, whoever made it; adminChange,
+// systemRevoke and setOwnerDisabled stand in for the admin site's calls and Auth's own changes, and call `onNudge` as
+// Auth nudges the Portal (Auth D26 Task 13). `failNext` makes the next call of that name fail with the given status and
+// code (after the gate, so the call is still recorded).
 export function fakeManage({ now = Date.now } = {}) {
   const stations = [];
   const integrations = [];
+  // Accounts an admin has disabled (setOwnerDisabled): Auth refuses them as actor.
+  const disabledAccounts = new Set();
   let next = 0;
   let nextIntegration = 0;
   const valid = (account) => typeof account === "string" && /^ab[0-9A-HJKMNP-TV-Z]{26}$/.test(account);
@@ -19,7 +24,7 @@ export function fakeManage({ now = Date.now } = {}) {
   const uses = (station, account) => station.builtIn || station.owner === account || station.members.some((member) => member.account === account);
   const notBuiltIn = (station) => { if (station.builtIn) fail(409, "built_in"); return station; };
   const listedStation = ({ id, origin, owner, status, reportClientId, createdAt, builtIn, access, integrations: enabled, name }) => ({ id, origin, owner, status, reportClientId, createdAt, builtIn, access, integrations: enabled, name });
-  const listed = ({ keys, ...integration }) => ({ ...integration, scopes: [...integration.scopes] });
+  const listed = ({ keys, ...integration }) => ({ ...integration, scopes: [...integration.scopes], pausedBy: integration.status === "paused" ? integration.pausedBy ?? null : null });
   const checkKey = (publicJwk) => {
     if (!publicJwk || typeof publicJwk !== "object") fail(400, "jwk");
     if (PRIVATE_MEMBERS.some((member) => Object.hasOwn(publicJwk, member))) fail(400, "private_key");
@@ -29,12 +34,26 @@ export function fakeManage({ now = Date.now } = {}) {
     if (!Number.isFinite(at) || at <= now() || at > now() + 90 * DAY) fail(400, "expiry");
     return new Date(at).toISOString();
   };
+  // Auth's change feed (Auth D26 R25): one entry per change to an integration's access, oldest first, with an opaque
+  // cursor as Auth hands it out.
+  const feed = [];
+  const feedCursor = (n) => Buffer.from("c" + n, "utf8").toString("base64url");
+  function recordChange(integration, kind, { actor = null, reason = null, admin = false } = {}) {
+    feed.push({
+      cursor: feedCursor(feed.length + 1), at: new Date(now()).toISOString(), kind, clientId: integration.clientId, stationId: integration.stationId,
+      owner: integration.owner, status: integration.status, pausedBy: integration.status === "paused" ? integration.pausedBy ?? null : null,
+      actorAccountId: actor, reason, admin
+    });
+  }
+  const statusKind = (status) => (status === "paused" ? "paused" : status === "revoked" ? "revoked" : "resumed");
   const auth = {
     down: false,
     calls: [],
     failNext: {},
     records: stations,
     integrationRecords: integrations,
+    feed,
+    onNudge: null,
     find(id) {
       const station = stations.find((entry) => entry.id === id && entry.status === "active");
       if (!station) fail(404, "not_found");
@@ -45,18 +64,33 @@ export function fakeManage({ now = Date.now } = {}) {
       if (!integration || !stations.some((entry) => entry.id === integration.stationId && entry.status === "active")) fail(404, "not_found");
       return integration;
     },
-    async gate(name, actor, ...accounts) {
+    // A management call: recorded, refused while Auth is down, then `check` (the actor rules), then a failNext.
+    async open(name, check = () => {}) {
       auth.calls.push(name);
       if (auth.down) fail(503, "unavailable");
-      if (![actor, ...accounts].every(valid)) fail(400, "invalid_request");
+      check();
       const failure = auth.failNext[name];
       if (failure) {
         delete auth.failNext[name];
         fail(failure.status, failure.code);
       }
     },
-    revokeWhere(pick) {
-      for (const integration of integrations) if (pick(integration)) integration.status = "revoked";
+    // A call naming an actor (and maybe other accounts): each must be well-formed, and the actor not disabled, or Auth
+    // answers 400 invalid_request.
+    async gate(name, actor, ...accounts) {
+      await auth.open(name, () => { if (![actor, ...accounts].every(valid) || disabledAccounts.has(actor)) fail(400, "invalid_request"); });
+    },
+    // A listing for an account (?account=), which Auth answers for a disabled account too.
+    async listing(name, account) {
+      await auth.open(name, () => { if (!valid(account)) fail(400, "invalid_request"); });
+    },
+    revokeWhere(pick, by = {}) {
+      for (const integration of integrations) {
+        if (!pick(integration) || integration.status === "revoked") continue;
+        integration.status = "revoked";
+        integration.pausedBy = null;
+        recordChange(integration, "revoked", by);
+      }
     },
     // A built-in Station as Auth seeds it from its clients file. Not a management call, so it is not recorded.
     seedBuiltIn({ id = "stbuiltin", origin = "https://station.agora.test", name = "Agora Station", integrations: enabled = false, admins = [], reportClientId = BUILT_IN_REPORT_CLIENT } = {}) {
@@ -75,16 +109,21 @@ export function fakeManage({ now = Date.now } = {}) {
       return { id: station.id, origin, owner, status: "active", reportClientId: station.reportClientId };
     },
     async stations(account) {
-      await auth.gate("stations", account);
+      await auth.listing("stations", account);
       const active = stations.filter((entry) => entry.status === "active");
       return [...active.filter((entry) => entry.builtIn), ...active.filter((entry) => !entry.builtIn && uses(entry, account))].map(listedStation);
+    },
+    // GET /manage/v1/built-in-stations: the active built-in Stations, for any management client, naming no account.
+    async builtInStations() {
+      await auth.open("builtInStations");
+      return stations.filter((entry) => entry.builtIn && entry.status === "active").map(listedStation);
     },
     async removeStation(id, actor) {
       await auth.gate("removeStation", actor);
       const station = notBuiltIn(auth.find(id));
       if (station.owner !== actor) fail(403, "forbidden");
       station.status = "removed";
-      auth.revokeWhere((integration) => integration.stationId === id);
+      auth.revokeWhere((integration) => integration.stationId === id, { actor, reason: "station_removed" });
     },
     async members(id, actor) {
       await auth.gate("members", actor);
@@ -102,8 +141,10 @@ export function fakeManage({ now = Date.now } = {}) {
       await auth.gate("removeMember", actor, account);
       const station = notBuiltIn(auth.find(id));
       if (station.owner !== actor && account !== actor) fail(403, "forbidden");
-      station.members = station.members.filter((member) => member.account !== account);
-      auth.revokeWhere((integration) => integration.stationId === id && integration.owner === account);
+      // As at Auth, the account's integrations there are revoked only if it was a member.
+      const member = station.members.some((entry) => entry.account === account);
+      station.members = station.members.filter((entry) => entry.account !== account);
+      if (member) auth.revokeWhere((integration) => integration.stationId === id && integration.owner === account, { actor, reason: "member_removed" });
     },
     async createIntegration({ owner, stationId, name, scopes, publicJwk, r9Svc = null, quotaPerSecond = 200, expiresAt, actor }) {
       await auth.gate("createIntegration", actor, owner);
@@ -123,7 +164,7 @@ export function fakeManage({ now = Date.now } = {}) {
       return { clientId: integration.clientId, status: integration.status, expiresAt: integration.expiresAt };
     },
     async integrations(account) {
-      await auth.gate("integrations", account);
+      await auth.listing("integrations", account);
       return integrations.filter((entry) => entry.owner === account).map(listed);
     },
     async addKey(id, publicJwk, actor) {
@@ -141,10 +182,14 @@ export function fakeManage({ now = Date.now } = {}) {
       const integration = auth.findIntegration(id);
       const others = [r9Svc, quotaPerSecond, expiresAt].some((value) => value !== undefined);
       const station = stations.find((entry) => entry.id === integration.stationId);
-      // The Station-owner rights: the owner of a custom Station, the configured admins of a built-in one.
-      const stationRights = station.builtIn ? station.admins : [station.owner];
+      // The Station-owner right: the owner of a custom Station may pause or revoke. A built-in Station's admins act
+      // through Auth's admin client only (Auth D26 R12): through the Portal an admin is just another account.
+      const stationRights = station.builtIn ? [] : [station.owner];
       const mayStop = (status === "paused" || status === "revoked") && !others;
       if (integration.owner !== actor && !(mayStop && stationRights.includes(actor))) fail(403, "forbidden");
+      // An admin's pause locks (Auth D26 R28): resuming it is 409 admin_paused for anyone but an admin, with or without
+      // other fields; only Auth's admin client lifts it.
+      if (status === "active" && integration.status === "paused" && integration.pausedBy === "admin") fail(409, "admin_paused");
       if (integration.status === "revoked") {
         if (status === "revoked" && !others) return listed(integration);
         fail(409, "revoked");
@@ -153,11 +198,75 @@ export function fakeManage({ now = Date.now } = {}) {
       if (r9Svc !== undefined && r9Svc !== null && !/^[0-9a-f]{64}$/.test(r9Svc)) fail(400, "invalid_request");
       if (quotaPerSecond !== undefined && !(Number.isInteger(quotaPerSecond) && quotaPerSecond >= 1 && quotaPerSecond <= 10000)) fail(400, "invalid_request");
       const expiry = expiresAt === undefined ? undefined : checkExpiry(expiresAt);
-      if (status !== undefined) integration.status = status;
+      // Who paused it (Auth D26 R27): its owner or its custom Station's owner; pausing an admin's pause changes nothing.
+      if (status !== undefined && status !== integration.status) {
+        integration.status = status;
+        integration.pausedBy = status === "paused" ? (integration.owner === actor ? "owner" : "station") : null;
+        recordChange(integration, statusKind(status), { actor });
+      }
       if (r9Svc !== undefined) integration.r9Svc = r9Svc;
       if (quotaPerSecond !== undefined) integration.quotaPerSecond = quotaPerSecond;
       if (expiry !== undefined) integration.expiresAt = expiry;
       return listed(integration);
+    },
+    // An Agora.Build admin's change through Auth's admin client (the admin site): pause, revoke, or lift an admin's
+    // pause, on a built-in Station the admin administers, with a reason; in the feed with admin: true, then Auth's
+    // nudge. Resuming an active integration and revoking a revoked one change nothing, as at Auth. Not a Portal call,
+    // so it is not recorded in calls.
+    adminChange(id, { status, actor, reason = "Admin test" }) {
+      const integration = auth.findIntegration(id);
+      const station = stations.find((entry) => entry.id === integration.stationId);
+      const lifts = status === "active" && ((integration.status === "paused" && integration.pausedBy === "admin") || integration.status === "active");
+      if (!station.builtIn || !station.admins.includes(actor) || !(status === "paused" || status === "revoked" || lifts)) fail(403, "forbidden");
+      if (integration.status === "revoked") {
+        if (status === "revoked") return listed(integration);
+        fail(409, "revoked");
+      }
+      const converts = status === "paused" && integration.status === "paused" && integration.pausedBy !== "admin";
+      if (status === integration.status && !converts) return listed(integration);
+      integration.status = status;
+      integration.pausedBy = status === "paused" ? "admin" : null;
+      recordChange(integration, statusKind(status), { actor, reason, admin: true });
+      auth.onNudge?.();
+      return listed(integration);
+    },
+    // Auth's own change (no actor): a built-in Station retired by its clients file revokes its integrations.
+    systemRevoke(id, reason = "configuration") {
+      const integration = auth.findIntegration(id);
+      if (integration.status === "revoked") return;
+      integration.status = "revoked";
+      integration.pausedBy = null;
+      recordChange(integration, "revoked", { reason });
+      auth.onNudge?.();
+    },
+    // An admin disabling or enabling an account: Auth then refuses it as actor, or accepts it again, and writes one
+    // owner_disabled or owner_enabled entry per integration it owns that is not revoked, each with that integration's
+    // status (Auth D26 R24).
+    setOwnerDisabled(account, disabled, { actor = null, reason = null } = {}) {
+      if (disabled) disabledAccounts.add(account);
+      else disabledAccounts.delete(account);
+      let written = 0;
+      for (const integration of integrations) {
+        if (integration.owner !== account || integration.status === "revoked") continue;
+        recordChange(integration, disabled ? "owner_disabled" : "owner_enabled", { actor, reason, admin: actor !== null });
+        written += 1;
+      }
+      if (written) auth.onNudge?.();
+    },
+    // GET /manage/v1/integration-changes (the Portal only): oldest first, after a cursor it handed out. As at Auth, the
+    // newest cursor answers no changes and itself, and one beyond the newest change (Auth restored from an earlier
+    // backup) is 409 cursor_ahead.
+    async integrationChanges({ after, limit = 100 } = {}) {
+      await auth.open("integrationChanges");
+      let start = 0;
+      if (after !== undefined && after !== null) {
+        const place = /^c([1-9][0-9]*)$/.exec(Buffer.from(String(after), "base64url").toString("utf8"));
+        if (!place || feedCursor(Number(place[1])) !== after) fail(400, "invalid_request");
+        start = Number(place[1]);
+        if (start > feed.length) fail(409, "cursor_ahead");
+      }
+      const changes = feed.slice(start, start + limit).map((entry) => ({ ...entry }));
+      return { changes, nextCursor: changes.length ? changes.at(-1).cursor : after ?? null };
     }
   };
   return auth;
