@@ -588,8 +588,8 @@ Auth's clients file must be set up for this:
   downgrade existing integrations keep working; new ones wait until the account is under its limit. Custom Stations
   have no cap.
 - **Admins** are the accounts in `PLATFORM_ADMINS`, which must equal the Station's `admins` in Auth's clients file.
-  They see every other account's integration on it (`role` `station_admin`) and may pause or revoke them, nothing
-  else; the history records reason `station_admin`.
+  They see every other account's integration on it (`role` `station_admin`) and may read an integration and its history, pause it
+  or revoke it, nothing else; the history records reason `station_admin`.
 - **Reports and feed** use the same routes as any Station. Its report token's `sub` is its own `s-` client ID (it has
   no owner): the Portal accepts such a token only when `client_id` equals `sub`, `sub` is `s-` and 26 lower-case
   Crockford base32 characters, and the scope includes `station.report`. It reaches only the two report routes (403
