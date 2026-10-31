@@ -827,17 +827,13 @@ export function createIntegrationService({
       return answer;
     },
 
-    // The built-in Stations as Auth lists them to the first Agora.Build admin (any account sees them), so their report
-    // clients are known before anyone signs in. Only the built-in part of reconcile runs: nothing is removed or revoked
-    // on absence. Never throws; returns whether it synced. Run by the stack at ready() and hourly.
+    // The built-in Stations as Auth lists them naming no account (GET /manage/v1/built-in-stations, spec §3.3.4), so
+    // their report clients are known before anyone signs in. Only the built-in part of reconcile runs: nothing is
+    // removed or revoked on absence. Never throws; returns whether it synced. Run by the stack at ready(), hourly, and
+    // a minute after a failure.
     async syncBuiltIn() {
-      const account = admins[0];
-      if (!account) {
-        log("Built-in Station sync skipped: no PLATFORM_ADMINS.");
-        return false;
-      }
       try {
-        const listed = (await manage.stations(account)).filter((entry) => entry.builtIn);
+        const listed = (await manage.builtInStations()).filter((entry) => entry.builtIn === true);
         const known = new Set(listed.map((entry) => entry.id));
         for (const station of await repository.builtInStations()) {
           if (!known.has(station.id)) log("Built-in Station absent from Auth's listing: left as it is.");

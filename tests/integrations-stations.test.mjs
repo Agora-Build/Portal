@@ -606,16 +606,15 @@ test("a new built-in Station at the same origin retires the old one in Portal, w
   assert.deepEqual((await s.events("station_removed")).map((row) => [row.station_id, row.account_id, row.reason]), [["stold", "system", "reconciled"]]);
 });
 
-const ADMIN = "ab" + "0".repeat(25) + "4";
-
-test("syncBuiltIn brings the built-in Stations in as the first admin, follows their settings and adds nothing else", async (t) => {
-  const s = await setup(t, { admins: [ADMIN, OWNER] });
+test("syncBuiltIn brings in the built-in Stations from Auth's listing that names no account, follows their settings and adds nothing else", async (t) => {
+  const s = await setup(t);
   if (!s) return;
   const built = s.manage.seedBuiltIn();
-  await s.manage.registerStation({ origin: "https://admins.example", owner: ADMIN, reportKey: REPORT_KEY, actor: ADMIN });
+  await s.manage.registerStation({ origin: "https://custom.example", owner: OWNER, reportKey: REPORT_KEY, actor: OWNER });
   assert.equal(await s.service.syncBuiltIn(), true);
+  assert.deepEqual(s.manage.calls.filter((name) => name !== "registerStation"), ["builtInStations"], "no account's listing is asked for");
   assert.deepEqual((await s.repository.builtInStations()).map((station) => [station.id, station.reportClientId, station.integrationsEnabled]), [[built.id, built.reportClientId, false]]);
-  assert.equal((await s.db.pool.query("SELECT count(*)::int AS n FROM stations WHERE NOT built_in")).rows[0].n, 0, "the admin's own Stations are left to its own listing");
+  assert.equal((await s.db.pool.query("SELECT count(*)::int AS n FROM stations WHERE NOT built_in")).rows[0].n, 0, "custom Stations are left to their accounts' listings");
   assert.equal((await s.repository.stationByReportClient(built.reportClientId)).id, built.id, "its report client is known without anyone signing in");
   built.integrations = true;
   assert.equal(await s.service.syncBuiltIn(), true);
@@ -623,23 +622,22 @@ test("syncBuiltIn brings the built-in Stations in as the first admin, follows th
   assert.equal((await s.events("station_reconciled")).length, 1, "inserted once");
 });
 
-test("syncBuiltIn without admins asks nothing, and with Auth down changes nothing; both are logged by reason", async (t) => {
-  const none = await setup(t);
-  if (!none) return;
-  none.manage.seedBuiltIn();
-  assert.equal(await none.service.syncBuiltIn(), false);
-  assert.equal(none.manage.calls.includes("stations"), false);
-  assert.ok(none.logs.includes("Built-in Station sync skipped: no PLATFORM_ADMINS."));
-  const s = await setup(t, { admins: [ADMIN] });
+test("syncBuiltIn with Auth down, or an Auth without the listing, changes nothing and is logged by reason", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
   s.manage.seedBuiltIn();
   s.manage.down = true;
   assert.equal(await s.service.syncBuiltIn(), false);
   assert.ok(s.logs.includes("Built-in Station sync failed: unavailable."));
+  s.manage.down = false;
+  s.manage.failNext.builtInStations = { status: 404, code: "not_found" };
+  assert.equal(await s.service.syncBuiltIn(), false);
+  assert.ok(s.logs.includes("Built-in Station sync failed: not_found."));
   assert.deepEqual(await s.repository.builtInStations(), []);
 });
 
 test("a sync whose listing lacks a built-in Station removes nothing and revokes nothing", async (t) => {
-  const s = await setup(t, { admins: [ADMIN] });
+  const s = await setup(t);
   if (!s) return;
   const built = s.manage.seedBuiltIn();
   await s.service.syncBuiltIn();

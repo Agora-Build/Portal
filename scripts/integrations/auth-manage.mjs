@@ -54,6 +54,8 @@ export function createManageClient({ issuer: issuerSetting, clientId, clientSecr
   return {
     registerStation: ({ origin, owner, reportKey, actor }) => call("POST", "/stations", { body: { origin, owner, reportKey, actor } }),
     async stations(account) { return list(await call("GET", "/stations", { query: { account } }), "stations"); },
+    // The active built-in Stations, naming no account (D26): the Portal's startup and hourly sync.
+    async builtInStations() { return list(await call("GET", "/built-in-stations"), "stations"); },
     async removeStation(id, actor) { await call("DELETE", "/stations/" + segment(id), { query: { actor } }); },
     members: (id, actor) => call("GET", "/stations/" + segment(id) + "/members", { query: { actor } }),
     async addMember(id, account, actor) { await call("PUT", "/stations/" + segment(id) + "/members/" + segment(account), { query: { actor } }); },

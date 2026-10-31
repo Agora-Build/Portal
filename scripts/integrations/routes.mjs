@@ -36,16 +36,16 @@ export function createIntegrationStack({ db, manage, idp, log, stationFetch = cr
     if (prepared) db.ensureEventPartitions().catch((error) => log("Integration event partitions failed: " + (error.code || "error") + "."));
   }, PARTITION_INTERVAL);
   partitions.unref();
-  // The built-in Stations, synced from Auth once the stack is ready and then hourly (P17); a failed sync is logged by
-  // syncBuiltIn and tried again a minute later. Without PLATFORM_ADMINS it is skipped (logged) and stays hourly.
-  // ready() waits for the first sync, which is bounded by the management call's 10 s timeout plus the database
-  // statements of reconciling (each within statement_timeout).
+  // The built-in Stations, synced from Auth's account-less listing once the stack is ready and then hourly (P17, D26);
+  // a failed sync is logged by syncBuiltIn and tried again a minute later. ready() waits for the first sync, which is
+  // bounded by the management call's 10 s timeout plus the database statements of reconciling (each within
+  // statement_timeout).
   let builtInSync = null;
   let closed = false;
   const syncBuiltIn = async () => {
     const synced = await service.syncBuiltIn();
     if (closed) return;
-    builtInSync = setTimeout(syncBuiltIn, synced || !admins.length ? builtInSyncAfter.ok : builtInSyncAfter.failed);
+    builtInSync = setTimeout(syncBuiltIn, synced ? builtInSyncAfter.ok : builtInSyncAfter.failed);
     builtInSync.unref();
   };
   function ready() {

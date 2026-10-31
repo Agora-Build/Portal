@@ -130,3 +130,11 @@ test("bad settings are refused", () => {
   assert.throws(() => createManageClient({ issuer, clientId, clientSecret: "short" }), TypeError);
   assert.throws(() => createManageClient({ issuer, clientId: "", clientSecret }), TypeError);
 });
+
+test("builtInStations lists Auth's built-in Stations without naming an account", async () => {
+  const station = { id: "st1", origin: "https://station.agora.build", owner: null, status: "active", reportClientId: "s-x", createdAt: "2026-10-30T00:00:00Z", builtIn: true, access: "any_account", integrations: false, name: "Agora Station" };
+  const s = stub({ stations: [station] });
+  assert.deepEqual(await clientWith(s).builtInStations(), [station]);
+  assert.deepEqual([s.calls[0].method, s.calls[0].url, s.calls[0].body], ["GET", issuer + "/manage/v1/built-in-stations", undefined]);
+  await assert.rejects(clientWith(stub({ nope: [] })).builtInStations(), (error) => error instanceof ManageError && error.code === "bad_response");
+});

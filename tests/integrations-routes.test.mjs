@@ -503,32 +503,31 @@ test("the stack hands the platform admins to the service", async (t) => {
   await integrations.service._pushesIdle();
 });
 
-test("the stack syncs the built-in Stations from Auth once when it becomes ready, as the first platform admin", async (t) => {
+test("the stack syncs the built-in Stations from Auth once when it becomes ready, naming no account", async (t) => {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
-  const admin = accountId();
   const manage = fakeManage();
-  const built = manage.seedBuiltIn({ admins: [admin] });
-  const integrations = createIntegrationStack({ db, manage, idp: null, log: () => {}, admins: [admin] });
-  const listings = () => manage.calls.filter((name) => name === "stations").length;
+  const built = manage.seedBuiltIn();
+  const integrations = createIntegrationStack({ db, manage, idp: null, log: () => {} });
+  const listings = () => manage.calls.filter((name) => name === "builtInStations").length;
   assert.equal(listings(), 0, "nothing before the first request");
   await integrations.ready();
   assert.equal(listings(), 1);
+  assert.equal(manage.calls.includes("stations"), false, "no account's listing");
   assert.deepEqual((await db.pool.query("SELECT id, built_in, report_client_id FROM stations")).rows, [{ id: built.id, built_in: true, report_client_id: built.reportClientId }]);
   await integrations.ready();
   assert.equal(listings(), 1, "memoised with ready()");
 });
 
-
 test("the stack is ready even when the first built-in sync fails, retries it a minute later, and close() stops the syncs", async () => {
   const db = { async migrate() { return []; }, async ensureEventPartitions() { return []; }, async close() {} };
   const manage = fakeManage();
   let listings = 0;
-  manage.stations = async () => { listings += 1; throw new ManageError(503, "unavailable"); };
+  manage.builtInStations = async () => { listings += 1; throw new ManageError(503, "unavailable"); };
   const logs = [];
-  const integrations = createIntegrationStack({ db, manage, idp: null, log: (line) => logs.push(line), admins: [accountId()], builtInSyncAfter: { ok: 3600000, failed: 20 } });
+  const integrations = createIntegrationStack({ db, manage, idp: null, log: (line) => logs.push(line), builtInSyncAfter: { ok: 3600000, failed: 20 } });
   assert.equal(typeof (await integrations.ready()).stations, "function", "ready despite Auth refusing the listing");
-  assert.deepEqual([listings, logs], [1, ["Built-in Station sync failed: unavailable."]]);
+  assert.deepEqual([listings, logs.filter((line) => line.startsWith("Built-in"))], [1, ["Built-in Station sync failed: unavailable."]]);
   await new Promise((resolve) => setTimeout(resolve, 60));
   assert.ok(listings >= 2, "a failed sync is retried soon, not an hour later");
   await integrations.close();
@@ -537,13 +536,16 @@ test("the stack is ready even when the first built-in sync fails, retries it a m
   assert.equal(listings, after, "no sync after close()");
 });
 
-test("without platform admins the skipped sync keeps the hourly schedule, so it is logged at most once an hour", async () => {
-  const db = { async migrate() { return []; }, async ensureEventPartitions() { return []; }, async close() {} };
-  const logs = [];
-  const integrations = createIntegrationStack({ db, manage: fakeManage(), idp: null, log: (line) => logs.push(line), builtInSyncAfter: { ok: 3600000, failed: 20 } });
+test("a successful built-in sync is repeated on the hourly schedule, with no platform admins anywhere", async () => {
+  // A database whose every query finds nothing: enough for the built-in part of reconcile.
+  const db = { pool: { async query() { return { rows: [] }; } }, async migrate() { return []; }, async ensureEventPartitions() { return []; }, async close() {} };
+  const manage = fakeManage();
+  let listings = 0;
+  manage.builtInStations = async () => { listings += 1; return []; };
+  const integrations = createIntegrationStack({ db, manage, idp: null, log: () => {}, builtInSyncAfter: { ok: 20, failed: 3600000 } });
   await integrations.ready();
   await new Promise((resolve) => setTimeout(resolve, 80));
-  assert.deepEqual(logs, ["Built-in Station sync skipped: no PLATFORM_ADMINS."], "not retried a minute later");
+  assert.ok(listings >= 2, "synced again on the ok schedule (" + listings + ")");
   await integrations.close();
 });
 test("the built-in Station's own report token reports and reads a feed of every integration on it, and only those", async (t) => {

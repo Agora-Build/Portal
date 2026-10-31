@@ -45,15 +45,19 @@ export function fakeManage({ now = Date.now } = {}) {
       if (!integration || !stations.some((entry) => entry.id === integration.stationId && entry.status === "active")) fail(404, "not_found");
       return integration;
     },
-    async gate(name, actor, ...accounts) {
+    // A management call: recorded, refused while Auth is down, then `check` (the actor rules), then a failNext.
+    async open(name, check = () => {}) {
       auth.calls.push(name);
       if (auth.down) fail(503, "unavailable");
-      if (![actor, ...accounts].every(valid)) fail(400, "invalid_request");
+      check();
       const failure = auth.failNext[name];
       if (failure) {
         delete auth.failNext[name];
         fail(failure.status, failure.code);
       }
+    },
+    async gate(name, actor, ...accounts) {
+      await auth.open(name, () => { if (![actor, ...accounts].every(valid)) fail(400, "invalid_request"); });
     },
     revokeWhere(pick) {
       for (const integration of integrations) if (pick(integration)) integration.status = "revoked";
@@ -78,6 +82,11 @@ export function fakeManage({ now = Date.now } = {}) {
       await auth.gate("stations", account);
       const active = stations.filter((entry) => entry.status === "active");
       return [...active.filter((entry) => entry.builtIn), ...active.filter((entry) => !entry.builtIn && uses(entry, account))].map(listedStation);
+    },
+    // GET /manage/v1/built-in-stations: the active built-in Stations, for any management client, naming no account.
+    async builtInStations() {
+      await auth.open("builtInStations");
+      return stations.filter((entry) => entry.builtIn && entry.status === "active").map(listedStation);
     },
     async removeStation(id, actor) {
       await auth.gate("removeStation", actor);
