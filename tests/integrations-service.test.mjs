@@ -665,3 +665,27 @@ test("while Agora.Build has its owner's account disabled, an integration shows a
   await assert.rejects(s.service.resume(MEMBER, id), refused(409, "admin_paused"));
   assert.equal(s.authCalls("changeIntegration"), calls, "Auth is still not asked");
 });
+
+test("to its Station and the Station's owner, an integration whose owner is disabled reads like an admin's pause", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await s.service.share(OWNER, s.station.id, MEMBER);
+  const { id: disabled } = await s.create(MEMBER);
+  const { id: paused } = await s.create(MEMBER);
+  await s.repository.updateIntegration(disabled, { state: "ready", ownerDisabledAt: s.clock.now });
+  await s.repository.updateIntegration(paused, { state: "paused", resumeState: "ready", pausedBy: "admin" });
+  const listed = (await s.service.integrations(OWNER)).integrations;
+  const view = (id) => { const { id: _, name, createdAt, ...rest } = listed.find((entry) => entry.id === id); return rest; };
+  assert.deepEqual(view(disabled), view(paused), "the Station owner's listing cannot tell them apart");
+  assert.equal(view(disabled).pausedFrom, "ready");
+  // A pause is refused alike, before Auth is asked.
+  const calls = s.authCalls("changeIntegration");
+  const refusal = async (id) => s.service.pause(OWNER, id).then(() => null, (error) => [error.status, error.details?.code, error.message]);
+  assert.deepEqual(await refusal(disabled), await refusal(paused));
+  assert.equal(s.authCalls("changeIntegration"), calls, "Auth is not asked");
+  // An invalid report is refused alike, naming the state the Station is shown.
+  const reported = async (id) => s.service.report(s.station.reportClientId, { integrationId: id, state: "revoked" }).then(() => null, (error) => [error.status, error.details?.code, error.message]);
+  assert.deepEqual(await reported(disabled), await reported(paused));
+  assert.deepEqual(await reported(disabled), [409, "invalid_state", "This integration is paused and cannot take that action."]);
+  assert.equal((await s.repository.integration(disabled)).state, "ready", "the row keeps its own state");
+});

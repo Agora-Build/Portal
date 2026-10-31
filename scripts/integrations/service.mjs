@@ -500,11 +500,16 @@ export function createIntegrationService({
     }
   }
 
+  // Shown as paused while its own state is not: its owner's account is disabled.
+  const shownPaused = (row) => row.state !== "paused" && effectiveState(row, now()) === "paused";
+
   function integrationView(row, role, origin) {
     const state = effectiveState(row, now());
     return {
       id: row.id, kind: row.kind, name: row.name, stationId: row.stationId, stationOrigin: origin, scopes: row.scopes,
-      state, pausedFrom: row.resumeState, pausedBy: pausedByOf(row, state), r9Svc: row.r9Svc, quotaPerSecond: row.quotaPerSecond,
+      // An integration shown as paused because its owner's account is disabled reads like an admin's pause: what it was
+      // paused from is its own state.
+      state, pausedFrom: state === "paused" && row.state !== "paused" ? row.state : row.resumeState, pausedBy: pausedByOf(row, state), r9Svc: row.r9Svc, quotaPerSecond: row.quotaPerSecond,
       expiresAt: row.expiresAt, approvedAt: row.approvedAt, lastError: row.lastError, createdAt: row.createdAt, role
     };
   }
@@ -563,7 +568,8 @@ export function createIntegrationService({
   // by role from an Auth without the admin pause lock. A revocation clears it.
   async function stop(accountId, id, event) {
     const { row, role } = await visible(accountId, id);
-    step(row, event, now());
+    // Shown as paused (its owner's account disabled): a pause is refused as for any paused integration, before Auth.
+    step(shownPaused(row) ? { ...row, state: "paused", resumeState: row.state } : row, event, now());
     if (event === "revoke" && STOPPED.includes(row.state)) return viewOf(row, role);
     const answer = await byActor(accountId, () => manage.changeIntegration(id, { status: event === "pause" ? "paused" : "revoked" }, accountId));
     const kind = event === "pause" ? "integration_paused" : "integration_revoked";
@@ -917,9 +923,16 @@ export function createIntegrationService({
         if (current.state === state || (current.state === "paused" && current.resumeState === state)) return null;
         return { fields: { ...transition(current, "report:" + state, now()), lastError: null }, event };
       };
-      apply(row);
-      // The Station made this change itself, so it is not pushed back to it.
-      const updated = await commit(row.id, apply, { push: false });
+      // The Station made this change itself, so it is not pushed back to it. A refusal names the state the Station is
+      // shown: paused, for an integration whose owner's account is disabled.
+      let updated;
+      try {
+        apply(row);
+        updated = await commit(row.id, apply, { push: false });
+      } catch (error) {
+        if (error.details?.code === "invalid_state" && shownPaused(row)) throw failure(409, "This integration is paused and cannot take that action.", "invalid_state");
+        throw error;
+      }
       // As in its feed, the Station is not told who paused an integration.
       const { role, pausedBy, ...view } = integrationView(updated, null, station.origin);
       return view;
