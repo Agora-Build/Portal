@@ -144,7 +144,7 @@ export async function handleIntegrations({ path, method, url, read, service, cal
   const accountId = changing(await portalUser());
   if (action === "pause" || action === "resume" || action === "revoke") return ok(await service[action](accountId, id));
   if (action === "keys") return { status: 201, body: await service.rotateKey(accountId, id, { publicJwk: (await read()).publicJwk }) };
-  if (action === "renew") return ok(await service.renew(accountId, id, { expiresInDays: (await read()).expiresInDays }));
+  if (action === "renew") return ok(await service.renew(accountId, id, { expiresInDays: (await read()).expiresInDays }, { plan: await planOf(accountId) }));
   if (action === "settings") return ok(await service.settings(accountId, id, { quotaPerSecond: (await read()).quotaPerSecond }));
   return null;
 }

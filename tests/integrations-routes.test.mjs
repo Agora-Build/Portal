@@ -439,6 +439,28 @@ test("creating an integration on the built-in Station uses the account's Portal 
   await integrations.service._pushesIdle();
 });
 
+
+test("renewing an expired integration on the built-in Station is checked against the account's Portal plan", async (t) => {
+  const integrations = await stack(t);
+  if (!integrations) return;
+  const built = integrations.manage.seedBuiltIn({ integrations: true });
+  const app = await start(t, { integrations: integrations.service });
+  const owner = await signIn(app);
+  assert.equal((await call(app.base, "/api/stations", { cookie: owner.cookie })).status, 200);
+  const create = async () => (await (await call(app.base, "/api/integrations", { cookie: owner.cookie, method: "POST", data: { stationId: built.id, name: "Hosted", scopes: ["agent.view"], publicJwk: publicJwk() } })).json()).id;
+  const renew = (id) => call(app.base, "/api/integrations/" + id + "/renew", { cookie: owner.cookie, method: "POST", data: { expiresInDays: 30 } });
+  const old = [];
+  for (let i = 0; i < 4; i += 1) old.push(await create());
+  await integrations.db.pool.query("UPDATE integrations SET expires_at = now() - interval '1 day' WHERE id = ANY($1)", [old]);
+  const fresh = [];
+  for (let i = 0; i < 4; i += 1) fresh.push(await create());
+  const refused = await renew(old[0]);
+  assert.deepEqual([refused.status, await refused.json()], [403, { error: "Your plan allows 4 integrations on the built-in Station. Revoke one, upgrade, or use your own Station.", code: "plan_limit", limit: 4 }]);
+  assert.equal((await renew(fresh[0])).status, 200, "a live one renews at the limit");
+  await app.store.transaction((state) => { state.accounts.find((entry) => entry.id === owner.sub).assignedPlan = "fellow"; });
+  assert.equal((await renew(old[0])).status, 200, "a Fellow has no cap");
+  await integrations.service._pushesIdle();
+});
 test("the stack hands the platform admins to the service", async (t) => {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }

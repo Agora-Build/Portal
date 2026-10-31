@@ -226,6 +226,8 @@ origin.
   your own Station." Custom Stations have no cap on any plan. The plan is Portal's (the same plans as membership and
   billing); Auth does not know plans and does not count. If an account moves to a plan with a lower limit, its existing
   integrations keep working until they are revoked or expire; new ones are refused until it is under the limit.
+  Renewing an expired integration on a built-in Station counts as a creation (checked the same way before Auth is
+  asked); renewing one that is still live is always allowed.
 - The change feed and reports for the built-in Station work as for any Station: its report client sees every
   integration on it (each with `ownerAccount`), and only those. Push hints go to its origin.
 - Reconcile treats `builtIn` Stations as present for every account and never revokes integrations because a

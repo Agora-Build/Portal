@@ -585,8 +585,9 @@ Auth's clients file must be set up for this:
   apply here only: Basic 4, Premium 10, Principal and Fellow no cap, counting the account's integrations on it in every
   state except `revoked` and not expired. At the limit creation answers 403 `{ "error": "Your plan allows N integrations
   on the built-in Station. Revoke one, upgrade, or use your own Station.", "code": "plan_limit", "limit": N }`. After a
-  downgrade existing integrations keep working; new ones wait until the account is under its limit. Custom Stations
-  have no cap.
+  downgrade existing integrations keep working; new ones wait until the account is under its limit. Renewing an
+  expired integration on a built-in Station counts as a creation (same check, same 403; the expired one is not
+  counted yet); renewing a live one is always allowed. Custom Stations have no cap.
 - **Admins** are the accounts in `PLATFORM_ADMINS`, which must equal the Station's `admins` in Auth's clients file.
   They see every other account's integration on it (`role` `station_admin`) and may read an integration and its history, pause it
   or revoke it, nothing else; the history records reason `station_admin`.
@@ -623,7 +624,7 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
 | `POST /api/integrations` `{ stationId, name, scopes, publicJwk, quotaPerSecond, expiresInDays }` | browser | create; 201; on a built-in Station: only while its integrations are on, within the plan limit |
 | `POST /api/integrations/<id>/keys` `{ publicJwk }` | browser | add a key; 201 `{ kid, overlapEndsAt }` |
 | `POST /api/integrations/<id>/pause`, `resume`, `revoke` | browser | pause and revoke also by the Station's owner, or on a built-in Station by an Agora.Build admin |
-| `POST /api/integrations/<id>/renew` `{ expiresInDays }` | browser | new expiry counted from now |
+| `POST /api/integrations/<id>/renew` `{ expiresInDays }` | browser | new expiry counted from now; an expired one on a built-in Station within the plan limit |
 | `POST /api/integrations/<id>/settings` `{ quotaPerSecond }` | browser | change the quota |
 | `GET /api/integrations/<id>/events` | browser | history (`actor` is `you` for your own changes) |
 | `GET /api/integrations` | browser | the account's integrations, and others on Stations it owns |

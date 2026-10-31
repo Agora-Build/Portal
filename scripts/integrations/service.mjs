@@ -164,7 +164,8 @@ export function createIntegrationService({
   // Per Station: the push in flight and whether another change arrived while it ran.
   const pushes = new Map();
 
-  // Per account and built-in Station: the creation in flight, so a second one waits for its count (plan limits).
+  // Per account and built-in Station: the creation (or renewal of an expired one) in flight, so a second one waits for
+  // its count (plan limits).
   const creations = new Map();
   function oneAtATime(key, work) {
     const run = (creations.get(key) ?? Promise.resolve()).then(work);
@@ -172,6 +173,18 @@ export function createIntegrationService({
     creations.set(key, settled);
     settled.then(() => { if (creations.get(key) === settled) creations.delete(key); });
     return run;
+  }
+
+  // Runs `work` (which adds an integration for the account on a built-in Station) one at a time per account and Station,
+  // after checking the plan limit against the account's live integrations there.
+  function withinPlan(accountId, stationId, plan, work) {
+    return oneAtATime(accountId + " " + stationId, async () => {
+      const limit = builtInIntegrationLimit(plan);
+      if (limit !== null && await repository.countLiveIntegrations(stationId, accountId, now()) >= limit) {
+        throw failure(403, "Your plan allows " + limit + " integrations on the built-in Station. Revoke one, upgrade, or use your own Station.", "plan_limit", { limit });
+      }
+      return work();
+    });
   }
 
   // Nudges the Station to read its change feed. The nudge carries no authority, only the latest cursor; the Station
@@ -649,13 +662,7 @@ export function createIntegrationService({
       const station = await usable(accountId, stationId);
       if (!station.builtIn) return create(accountId, station, fields, publicJwk, expiresInDays);
       if (!station.integrationsEnabled) throw failure(409, NOT_SUPPORTED, "not_supported");
-      return oneAtATime(accountId + " " + station.id, async () => {
-        const limit = builtInIntegrationLimit(plan);
-        if (limit !== null && await repository.countLiveIntegrations(station.id, accountId, now()) >= limit) {
-          throw failure(403, "Your plan allows " + limit + " integrations on the built-in Station. Revoke one, upgrade, or use your own Station.", "plan_limit", { limit });
-        }
-        return create(accountId, station, fields, publicJwk, expiresInDays);
-      });
+      return withinPlan(accountId, station.id, plan, () => create(accountId, station, fields, publicJwk, expiresInDays));
     },
 
     // The account's own integrations (reconciled with Auth's list of them) and, read from Portal only, the others on
@@ -714,16 +721,22 @@ export function createIntegrationService({
       return viewOf(updated, "owner");
     },
 
-    async renew(accountId, id, { expiresInDays } = {}) {
+    // Renewing an expired integration on a built-in Station brings one back, so it counts as adding one (plan limit,
+    // where the expired one is not counted yet); renewing a live one never changes the count.
+    async renew(accountId, id, { expiresInDays } = {}, { plan = "basic" } = {}) {
       const row = await owned(accountId, id);
       expiryDays(expiresInDays);
       step(row, "renew", now());
-      const changedAt = await viaAuth(() => manage.changeIntegration(id, { expiresAt: new Date(now() + expiresInDays * DAY).toISOString() }, accountId));
-      const updated = await commit(id, (current) => {
-        step(current, "renew", now());
-        return { fields: { expiresAt: changedAt.expiresAt }, event: { actor: accountId, kind: "integration_renewed", details: { expiresAt: changedAt.expiresAt } } };
-      });
-      return viewOf(updated, "owner");
+      const renewing = async () => {
+        const changedAt = await viaAuth(() => manage.changeIntegration(id, { expiresAt: new Date(now() + expiresInDays * DAY).toISOString() }, accountId));
+        const updated = await commit(id, (current) => {
+          step(current, "renew", now());
+          return { fields: { expiresAt: changedAt.expiresAt }, event: { actor: accountId, kind: "integration_renewed", details: { expiresAt: changedAt.expiresAt } } };
+        });
+        return viewOf(updated, "owner");
+      };
+      if (effectiveState(row, now()) !== "expired" || !(await repository.station(row.stationId))?.builtIn) return renewing();
+      return withinPlan(accountId, row.stationId, plan, renewing);
     },
 
     // Allowed on an expired integration, as Auth allows it: the owner may tune it before renewing.

@@ -452,6 +452,58 @@ test("two creations racing on the built-in Station can't both pass the plan limi
   assert.equal(results.find((result) => result.status === "rejected").reason.details.code, "plan_limit");
 });
 
+
+test("renewing an expired integration on the built-in Station counts as adding one; renewing a live one is always allowed", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const built = await builtIn(s);
+  const old = [];
+  for (let i = 0; i < 4; i += 1) old.push((await onBuiltIn(s, built, OWNER, "basic", { expiresInDays: 1 })).id);
+  s.clock.now += 2 * DAY;
+  const fresh = [];
+  for (let i = 0; i < 4; i += 1) fresh.push((await onBuiltIn(s, built, OWNER, "basic")).id);
+  const calls = s.authCalls("changeIntegration");
+  await assert.rejects(s.service.renew(OWNER, old[0], { expiresInDays: 30 }, { plan: "basic" }),
+    (error) => refused(403, "plan_limit")(error) && error.message === PLAN_MESSAGE(4) && error.details.limit === 4);
+  await assert.rejects(s.service.renew(OWNER, old[0], { expiresInDays: 30 }), refused(403, "plan_limit"), "no plan given counts as Basic");
+  assert.equal(s.authCalls("changeIntegration"), calls, "refused before Auth");
+  assert.equal((await s.service.integrations(OWNER)).integrations.find((entry) => entry.id === old[0]).state, "expired");
+  const live = await s.service.renew(OWNER, fresh[0], { expiresInDays: 60 }, { plan: "basic" });
+  assert.equal(live.expiresAt, new Date(s.clock.now + 60 * DAY).toISOString(), "a live one renews at the limit");
+  await s.service.revoke(OWNER, fresh[1]);
+  const renewed = await s.service.renew(OWNER, old[0], { expiresInDays: 30 }, { plan: "basic" });
+  assert.deepEqual([renewed.state, renewed.expiresAt], ["awaiting_approval", new Date(s.clock.now + 30 * DAY).toISOString()], "under the limit an expired one renews");
+  await assert.rejects(s.service.renew(OWNER, old[1], { expiresInDays: 30 }, { plan: "basic" }), refused(403, "plan_limit"));
+  assert.equal((await s.service.renew(OWNER, old[1], { expiresInDays: 30 }, { plan: "premium" })).state, "awaiting_approval");
+  for (const plan of ["principal", "fellow"]) await s.service.renew(OWNER, old[plan === "principal" ? 2 : 3], { expiresInDays: 30 }, { plan });
+});
+
+test("renewing an expired integration races creation for the last place under the plan limit", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const built = await builtIn(s);
+  const old = (await onBuiltIn(s, built, OWNER, "basic", { expiresInDays: 1 })).id;
+  s.clock.now += 2 * DAY;
+  for (let i = 0; i < 3; i += 1) await onBuiltIn(s, built, OWNER, "basic");
+  // The creation passes its count first and is slow at Auth; the renewal must wait for it, not count beside it.
+  const create = s.manage.createIntegration;
+  s.manage.createIntegration = async (...args) => { await new Promise((resolve) => setTimeout(resolve, 50)); return create.apply(s.manage, args); };
+  const creating = onBuiltIn(s, built, OWNER, "basic");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const results = await Promise.allSettled([creating, s.service.renew(OWNER, old, { expiresInDays: 30 }, { plan: "basic" })]);
+  assert.deepEqual(results.map((result) => result.status).sort(), ["fulfilled", "rejected"]);
+  assert.equal(results.find((result) => result.status === "rejected").reason.details.code, "plan_limit");
+});
+
+test("renewing an expired integration on a custom Station is never capped", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const ids = [];
+  for (let i = 0; i < 5; i += 1) ids.push((await s.create(OWNER, { expiresInDays: 1 })).id);
+  s.clock.now += 2 * DAY;
+  for (let i = 0; i < 5; i += 1) await s.create(OWNER);
+  for (const id of ids) assert.equal((await s.service.renew(OWNER, id, { expiresInDays: 30 }, { plan: "basic" })).state, "awaiting_approval");
+});
 test("Agora.Build admins see others' integrations on the built-in Station and may pause or revoke them, nothing else", async (t) => {
   const s = await setup(t, { admins: [ADMIN] });
   if (!s) return;
