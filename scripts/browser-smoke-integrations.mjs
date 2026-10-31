@@ -19,8 +19,8 @@
 // Pause, Resume, Renew, Quota, Rotate key, History and Revoke; keyboard navigation (reachability, focus indicators,
 // accessible names, Enter and Space, the dialogs' focus); reduced motion; and the built-in Station: its row (Built in,
 // its origin, Details only, nothing else reachable by Tab), the selector leaving it out while its integrations are off
-// and offering it once they are on, and the Basic plan's limit of 4 there. With SCREENSHOT_DIR set, it saves
-// <viewport>-<what>.png there.
+// and offering it once they are on, the Basic plan's limit of 4 there, and an integration an Agora.Build admin paused
+// at Auth ("Paused by Agora.Build", no Resume). With SCREENSHOT_DIR set, it saves <viewport>-<what>.png there.
 import { createRequire } from "node:module";
 import { createServer } from "node:https";
 import { mkdir, readFile } from "node:fs/promises";
@@ -531,6 +531,26 @@ async function flow(viewport, index) {
         await fillAndSubmit("Built-in app");
         await integration(page, "Built-in app").waitFor({ timeout: 8000 }).catch(async (error) => { throw new Error(error.message.split("\n")[0] + " (the form says \"" + await page.locator("#integration-status").textContent() + "\")"); });
         check(new RegExp("Station\\s+" + stack.builtIn.origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(await integration(page, "Built-in app").locator(".integration-facts").innerText()), tag + "an integration created in the browser lands on the built-in Station");
+        // An Agora.Build admin pauses it at Auth (the admin site's call): the page shows it as Agora.Build's, with no Resume.
+        const builtInApp = (await json(await setup.owner.api("/api/integrations"))).body.integrations.find((entry) => entry.name === "Built-in app");
+        await stack.adminChange(builtInApp.id, { status: "paused", reason: "Browser smoke" });
+        await page.goto(stack.site + "/account/");
+        await integration(page, "Built-in app").waitFor({ timeout: 8000 });
+        await until(async () => (await badgeOf(page, "Built-in app")) === "Paused by Agora.Build", "Paused by Agora.Build");
+        const locked = integration(page, "Built-in app");
+        check(await locked.getByRole("button", { name: "Resume", exact: true }).count() === 0, tag + "an admin's pause offers no Resume");
+        check(await locked.getByRole("button", { name: "Revoke", exact: true }).count() === 1, tag + "Revoke is still offered");
+        check(/Only Agora\.Build can resume it/.test(await locked.innerText()), tag + "the row says only Agora.Build can resume it");
+        // Keyboard: from the row's heading, Tab reaches Revoke, History and the owner's panels, and no Pause or Resume.
+        await locked.locator("h3").click();
+        const lockedStops = [];
+        for (let presses = 0; presses < 5; presses += 1) {
+          await page.keyboard.press("Tab");
+          lockedStops.push(await page.evaluate(() => document.activeElement?.closest(".integration-item") ? document.activeElement.textContent.trim() : "(left the row)"));
+        }
+        check(lockedStops.join(" → ") === "Revoke → History → Renew → Quota → Rotate key", tag + "Tab through the paused row: " + lockedStops.join(" → "));
+        await overflowCheck(page, tag, "with an integration Agora.Build paused");
+        await shot(locked, viewport.name + "-paused-by-agora-build");
         expectedErrors.push(/^Failed to load resource: the server responded with a status of 403/);
         await fillAndSubmit("One too many");
         await page.locator("#integration-status").filter({ hasText: /./ }).waitFor({ timeout: 8000 });

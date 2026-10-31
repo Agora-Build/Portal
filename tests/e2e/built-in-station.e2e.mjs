@@ -6,10 +6,13 @@ import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { decodeJwt, exportJWK, generateKeyPair } from "jose";
-import { API, authRepo, bearer, eventually, integrationsSkipReason, loadAuth, person, portalSignIn, skipReason, startStack } from "./harness.mjs";
+import { API, authHasAdminPauseLock, authHasChangeFeed, authRepo, bearer, eventually, integrationsSkipReason, loadAuth, person, portalSignIn, skipReason, startStack } from "./harness.mjs";
 
 const skip = (await skipReason()) ?? (await integrationsSkipReason());
 if (skip) console.log("# Skipping the built-in Station end-to-end suite: " + skip + ".");
+// The D26 flows need Auth's change feed and admin pause lock (Auth feat/admin-mfa Tasks 13 and 14).
+const d26Skip = !authHasChangeFeed ? "the Auth checkout has no change feed (Auth D26 Task 13)" : !authHasAdminPauseLock ? "the Auth checkout has no admin pause lock (Auth D26 Task 14)" : false;
+const ADMIN_PAUSED = "Agora.Build paused this integration. Only Agora.Build can resume it.";
 
 const SCOPES = ["agent.view", "agent.prompt"];
 const REPORT_CLIENT = /^s-[0-9a-hjkmnp-tv-z]{26}$/;
@@ -40,7 +43,7 @@ describe("The built-in Station against the real auth.agora.build", { skip: skip 
   before(async () => {
     lib = await loadAuth();
     reference = await import(pathToFileURL(resolve(authRepo, "scripts/verify-station-token.mjs")).href);
-    stack = await startStack(lib, { integrations: true, builtIn: { admin: person(7301, "Cy") } });
+    stack = await startStack(lib, { integrations: true, builtIn: { admin: person(7301, "Cy") }, authChanges: { pollMs: 3600000, minGapMs: 100 } });
     built = stack.builtIn;
   });
   after(async () => { await stack?.close(); });
@@ -162,5 +165,70 @@ describe("The built-in Station against the real auth.agora.build", { skip: skip 
     const refused = await manage("PATCH", "/integrations/" + state.adaFirst.id, { status: "paused", actor: state.boId });
     assert.deepEqual([refused.status, refused.body.error], [403, "forbidden"], "nor a non-admin pausing another's integration");
     for (const value of Object.values(stack.secrets)) assert.ok(!stack.logs.join("\n").includes(value), "no secret in the Portal log");
+  });
+
+  test("9. an admin's pause at Auth reaches the Portal's events and the Station's feed through Auth's nudge", { skip: d26Skip }, async () => {
+    const id = state.boFirst.id;
+    const token = (await built.reportToken()).body.access_token;
+    const start = (await feed(0, token)).body.cursor;
+    const pushes = built.nudges.length;
+    const paused = await stack.adminChange(id, { status: "paused", reason: "Spam in #general" });
+    assert.deepEqual([paused.status, paused.pausedBy], ["paused", "admin"], "paused at Auth");
+    // The Portal reads Auth's feed only on nudges here, and the Station's feed does not reconcile from Auth.
+    const change = await eventually(async () => (await feed(start, token)).body.changes.find((entry) => entry.integrationId === id && entry.kind === "integration_paused"));
+    assert.ok(change, "the Station's feed has the pause");
+    assert.deepEqual([change.reason, change.integration.state], ["agora_build", "paused"]);
+    assert.ok(await eventually(() => built.nudges.length > pushes), "and the Station was pushed");
+    const [recorded] = (await stack.portalQuery("SELECT actor, reason, details FROM integration_events WHERE integration_id = $1 AND kind = 'integration_paused' ORDER BY id DESC LIMIT 1", [id])).rows;
+    assert.deepEqual([recorded.actor, recorded.reason, recorded.details.admin, recorded.details.pausedBy], [built.adminId, "Spam in #general", true, "admin"], "recorded with the admin as actor and the reason");
+    assert.deepEqual(await auditAtAuth(id, "integration_paused"), [[state.boId, built.adminId]], "as Auth recorded it");
+    const mine = (await (await state.bo.browser.api("/api/integrations")).json()).integrations.find((entry) => entry.id === id);
+    assert.deepEqual([mine.state, mine.pausedBy], ["paused", "admin"]);
+    const [latest] = (await (await state.bo.browser.api("/api/integrations/" + id + "/events")).json()).events;
+    assert.deepEqual([latest.kind, latest.actor, latest.reason], ["integration_paused", "agora_build", null], "Bo sees Agora.Build, not the admin or the reason");
+  });
+
+  test("10. the owner cannot resume an admin's pause, in the Portal or at Auth; the admin's lift and revocation reach the Portal", { skip: d26Skip }, async () => {
+    const id = state.boFirst.id;
+    const resumed = await json(await state.bo.browser.api("/api/integrations/" + id + "/resume", { method: "POST", json: {} }));
+    assert.deepEqual([resumed.status, resumed.body.code, resumed.body.error], [409, "admin_paused", ADMIN_PAUSED]);
+    const atAuth = await manage("PATCH", "/integrations/" + id, { status: "active", actor: state.boId });
+    assert.deepEqual([atAuth.status, atAuth.body.error], [409, "admin_paused"], "Auth holds the lock too");
+    const token = (await built.reportToken()).body.access_token;
+    const start = (await feed(0, token)).body.cursor;
+    await stack.adminChange(id, { status: "active", reason: "Cleared after review" });
+    assert.ok(await eventually(async () => (await feed(start, token)).body.changes.some((entry) => entry.integrationId === id && entry.kind === "integration_resumed")), "the lift reaches the Station");
+    const back = (await (await state.bo.browser.api("/api/integrations")).json()).integrations.find((entry) => entry.id === id);
+    assert.deepEqual([back.state, back.pausedBy], ["awaiting_approval", null]);
+    await stack.adminChange(id, { status: "revoked", reason: "Confirmed abuse" });
+    assert.ok(await eventually(async () => (await stack.portalQuery("SELECT state FROM integrations WHERE id = $1", [id])).rows[0].state === "revoked"), "never approved, so revoked at once");
+    const rows = (await stack.portalQuery("SELECT kind, reason FROM integration_events WHERE integration_id = $1 AND actor = $2 ORDER BY id", [id, built.adminId])).rows;
+    assert.deepEqual(rows.map((row) => [row.kind, row.reason]), [["integration_paused", "Spam in #general"], ["integration_resumed", "Cleared after review"], ["integration_revoked", "Confirmed abuse"]]);
+  });
+});
+
+describe("Admin changes reach the Portal by its poll when Auth's nudge is lost", { skip: skip || d26Skip || false }, () => {
+  let lost;
+  before(async () => {
+    lib ??= await loadAuth();
+    lost = await startStack(lib, { integrations: true, builtIn: { admin: person(7401, "Di") }, nudge: "lost", authChanges: { pollMs: 300, minGapMs: 50 } });
+    await lost.reconfigureAuth({ integrations: true });
+  });
+  after(async () => { await lost?.close(); });
+
+  test("an admin's pause at Auth reaches the Station's feed at the Portal's next poll", async () => {
+    const { browser } = await portalSignIn(lost, person(7411, "Eve"));
+    assert.equal((await browser.api("/api/stations")).status, 200);
+    const created = await json(await browser.api("/api/integrations", { method: "POST", json: { stationId: lost.builtIn.id, name: "Polled", scopes: SCOPES, publicJwk: await publicJwk() } }));
+    assert.equal(created.status, 201);
+    const token = (await lost.builtIn.reportToken()).body.access_token;
+    const read = async (cursor) => (await json(await bearer(lost, "/api/v1/stations/changes?cursor=" + cursor, token))).body;
+    const start = (await read(0)).cursor;
+    await lost.adminChange(created.body.id, { status: "paused", reason: "Spam" });
+    const change = await eventually(async () => (await read(start)).changes.find((entry) => entry.integrationId === created.body.id && entry.kind === "integration_paused"), { timeout: 5000 });
+    assert.ok(change, "the poll brought it, with the nudge lost");
+    assert.deepEqual([change.reason, change.integration.state], ["agora_build", "paused"]);
+    const [recorded] = (await lost.portalQuery("SELECT actor, reason FROM integration_events WHERE integration_id = $1 AND kind = 'integration_paused'", [created.body.id])).rows;
+    assert.deepEqual([recorded.actor, recorded.reason], [lost.builtIn.adminId, "Spam"]);
   });
 });
