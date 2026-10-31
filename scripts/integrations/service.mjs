@@ -205,7 +205,7 @@ function authEffect(row, entry) {
   return { kind: "integration_owner_enabled", fields: row.ownerDisabledAt ? { ownerDisabledAt: null } : {} };
 }
 
-// authChanged() asks the stack to read Auth's change feed soon (Auth refused a resume as admin_paused).
+// authChanged() asks the stack to read Auth's change feed soon (a resume answered 409 admin_paused).
 export function createIntegrationService({
   repository, db, manage, stationFetch, exchange, now = Date.now, log = () => {}, ids = randomUUID,
   challengeValue = () => randomBytes(32).toString("base64url"), pushFetch = createStationFetch({ timeoutMs: 3000 }), notify, authChanged = () => {}
@@ -822,20 +822,25 @@ export function createIntegrationService({
 
     // The owner only, never while Agora.Build has the owner's account disabled, and never out of an Agora.Build admin's
     // pause, which only an admin lifts on the admin site. Auth holds the lock too: its own 409 admin_paused means the
-    // Portal has not read that change yet, so the stack is asked to read Auth's change feed now.
+    // Portal has not read that change yet. An admin's pause the feed applied after Auth accepted this resume is newer
+    // than it, so the row keeps it. Each 409 admin_paused, the Portal's own included (a lift it missed then heals), asks
+    // the stack to read Auth's change feed now.
     async resume(accountId, id) {
       const row = await owned(accountId, id);
       if (row.ownerDisabledAt != null && effectiveState(row, now()) === "paused") throw ownerDisabled();
-      if (row.state === "paused" && row.pausedBy === "admin") throw adminPaused();
-      step(row, "resume", now());
       try {
+        if (row.state === "paused" && row.pausedBy === "admin") throw adminPaused();
+        step(row, "resume", now());
         await byActor(accountId, () => manage.changeIntegration(id, { status: "active" }, accountId));
+        const updated = await commit(id, (current) => {
+          if (current.state === "paused" && current.pausedBy === "admin") throw adminPaused();
+          return { fields: { ...step(current, "resume", now()), pausedBy: null }, event: { actor: accountId, kind: "integration_resumed", reason: "owner", details: seen() } };
+        });
+        return viewOf(updated, "owner");
       } catch (error) {
         if (error.details?.code === "admin_paused") authChanged();
         throw error;
       }
-      const updated = await commit(id, (current) => ({ fields: { ...step(current, "resume", now()), pausedBy: null }, event: { actor: accountId, kind: "integration_resumed", reason: "owner", details: seen() } }));
-      return viewOf(updated, "owner");
     },
 
     // Renewing an expired integration on a built-in Station brings one back, so it counts as adding one (plan limit,

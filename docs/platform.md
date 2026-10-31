@@ -641,9 +641,9 @@ integration's Station refuses still-valid tokens and closes open sessions at onc
   the proxy's address and its limit of 60 a minute, so a flood of forged nudges could make Auth's real ones answer 429.
   Changes would still arrive by the 30-second poll.
 - **The feed.** The Portal reads `GET /manage/v1/integration-changes` over its management connection after each
-  nudge, every 30 seconds in case a nudge is lost, and when Auth refuses a resume with `admin_paused`. One read runs at
-  a time, and reads start at least a second apart however many nudges arrive, so a forged nudge costs no more than an
-  early poll. A read takes up to 10 pages of 100 changes and saves Auth's cursor after each page in
+  nudge, every 30 seconds in case a nudge is lost, and whenever it answers a resume with `admin_paused`. One read runs
+  at a time, and reads start at least a second apart however many nudges arrive, so a forged nudge costs no more than
+  an early poll. A read takes up to 10 pages of 100 changes and saves Auth's cursor after each page in
   `auth_change_feed`, so a restart continues where it stopped; when every page was full, another read follows. The
   server starts the reader in the background as soon as it listens (the stack is prepared then, and tried again after 5
   s, 10 s, 20 s and so on up to a minute while that fails). Its first read ever goes through Auth's whole feed once.
@@ -668,7 +668,10 @@ integration's Station refuses still-valid tokens and closes open sessions at onc
 - **An admin's pause locks.** An integration Agora.Build paused shows "Paused by Agora.Build" (`pausedBy` `admin`, also
   while its owner's account is disabled) and offers no Resume. `POST /api/integrations/<id>/resume` answers 409
   `{ "error": "Agora.Build paused this integration. Only Agora.Build can resume it.", "code": "admin_paused" }` without
-  asking Auth, and Auth answers the same when the Portal has not heard yet (the Portal then reads the feed at once).
+  asking Auth, and Auth answers the same when the Portal has not heard yet. Either way the Portal then reads the feed
+  at once, so a lift it missed heals. A resume Auth accepted just before an admin paused the integration, whose pause
+  the feed brought before the Portal recorded the resume, also answers 409 `admin_paused`: the integration stays
+  paused, as Auth has it.
   While Agora.Build has the owner's account disabled, a resume answers 409 `owner_disabled`. Revoking, renewing, the
   quota and keys stay the owner's. Only an admin lifts the pause, on the admin site; the Portal follows the resume
   from the feed.

@@ -566,7 +566,7 @@ test("a pause records who paused it, as Auth answers; resuming or revoking clear
   assert.equal((await s.repository.integration(id)).pausedBy, null);
 });
 
-test("an admin's pause locks: Resume is 409 admin_paused without asking Auth, and Auth's own 409 reads the same and asks for Auth's feed", async (t) => {
+test("an admin's pause locks: Resume is 409 admin_paused without asking Auth, and Auth's own 409 reads the same; both ask for Auth's feed", async (t) => {
   const s = await setup(t);
   if (!s) return;
   const { id } = await s.create();
@@ -579,12 +579,12 @@ test("an admin's pause locks: Resume is 409 admin_paused without asking Auth, an
   const calls = s.authCalls("changeIntegration");
   await assert.rejects(s.service.resume(OWNER, id), (error) => refused(409, "admin_paused")(error) && error.message === ADMIN_PAUSED);
   assert.equal(s.authCalls("changeIntegration"), calls, "Auth is not asked");
-  assert.equal(s.authAsked(), 0);
+  assert.equal(s.authAsked(), 1, "a read of Auth's feed is asked for, so a lift the Portal missed heals");
   // The Portal has not heard yet: Auth refuses with its own 409, which reads the same and asks for a read of its feed.
   await s.repository.updateIntegration(id, { pausedBy: "owner" });
   await assert.rejects(s.service.resume(OWNER, id), (error) => refused(409, "admin_paused")(error) && error.message === ADMIN_PAUSED);
   assert.equal(s.authCalls("changeIntegration"), calls + 1);
-  assert.equal(s.authAsked(), 1);
+  assert.equal(s.authAsked(), 2);
   assert.equal((await s.repository.integration(id)).state, "paused", "nothing changed in the Portal");
   // The quota stays the owner's, and revoking is never locked.
   assert.equal((await s.service.settings(OWNER, id, { quotaPerSecond: 9 })).quotaPerSecond, 9);

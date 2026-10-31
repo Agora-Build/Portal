@@ -14,6 +14,7 @@ const OWNER = "ab" + "0".repeat(25) + "1";
 const OTHER = "ab" + "0".repeat(25) + "2";
 const ADMIN = "ab" + "0".repeat(25) + "4";
 const R9 = "a".repeat(64);
+const ADMIN_PAUSED = "Agora.Build paused this integration. Only Agora.Build can resume it.";
 const publicJwk = () => generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey.export({ format: "jwk" });
 
 async function setup(t) {
@@ -25,9 +26,10 @@ async function setup(t) {
   const built = manage.seedBuiltIn({ integrations: true, admins: [ADMIN] });
   const notified = [];
   const logs = [];
+  let asked = 0;
   const service = createIntegrationService({
     repository, db, manage, stationFetch: { async get() { return { status: 404, body: "" }; } }, exchange: async () => ({}),
-    now: () => clock.now, log: (line) => logs.push(line), notify: (stationId) => notified.push(stationId)
+    now: () => clock.now, log: (line) => logs.push(line), notify: (stationId) => notified.push(stationId), authChanged: () => { asked += 1; }
   });
   await service.syncBuiltIn();
   const create = async (accountId = OWNER) => (await service.createIntegration(accountId, { stationId: built.id, name: "Hosted", scopes: [], publicJwk: publicJwk() })).id;
@@ -48,7 +50,7 @@ async function setup(t) {
   };
   const events = async (id) => (await db.pool.query("SELECT kind, state, actor, reason, details FROM integration_events WHERE integration_id = $1 ORDER BY id", [id])).rows;
   const stationFeed = () => service.changes(built.reportClientId, "0");
-  return { db, repository, manage, clock, service, built, create, ready, follow, events, stationFeed, notified, logs };
+  return { db, repository, manage, clock, service, built, create, ready, follow, events, stationFeed, notified, logs, authAsked: () => asked };
 }
 
 test("an admin's pause in Auth's feed pauses the Portal's row, records the admin and the reason, and pushes the Station", async (t) => {
@@ -125,6 +127,34 @@ test("an admin's pause of an owner's pause makes it the admin's; only the admin'
   const lifted = await s.repository.integration(id);
   assert.deepEqual([lifted.state, lifted.resumeState, lifted.pausedBy], ["ready", null, null]);
   assert.equal((await s.stationFeed()).changes.at(-1).integration.state, "ready");
+});
+
+// Auth accepted the owner's resume, then an admin paused the integration and the feed applied that pause before the
+// Portal wrote the resume: the admin's pause is Auth's newest change, so the Portal keeps it.
+test("an admin's pause the feed applies after Auth accepted the owner's resume stays: the owner gets 409 admin_paused and Auth's feed is read", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const id = await s.ready();
+  await s.service.pause(OWNER, id);
+  assert.deepEqual(await s.follow(), ["skipped"], "the owner's pause, already recorded");
+  const change = s.manage.changeIntegration;
+  s.manage.changeIntegration = async (...args) => {
+    const answer = await change(...args);
+    s.manage.changeIntegration = change;
+    s.clock.now += 1000;
+    s.manage.adminChange(id, { status: "paused", actor: ADMIN, reason: "Spam" });
+    assert.deepEqual(await s.follow(), ["skipped", "applied"], "the owner's resume is the Portal's own; the admin's pause applies");
+    return answer;
+  };
+  await assert.rejects(s.service.resume(OWNER, id), (error) => error instanceof AppError && error.status === 409 && error.details.code === "admin_paused" && error.message === ADMIN_PAUSED);
+  const row = await s.repository.integration(id);
+  assert.deepEqual([row.state, row.resumeState, row.pausedBy], ["paused", "ready", "admin"]);
+  assert.equal(s.manage.integrationRecords.find((entry) => entry.clientId === id).status, "paused", "as Auth has it");
+  const feed = await s.stationFeed();
+  const last = feed.changes.filter((entry) => entry.integrationId === id).at(-1);
+  assert.deepEqual([last.kind, last.state, last.reason, stateOf(feed, id)], ["integration_paused", "paused", "agora_build", "paused"]);
+  assert.equal((await s.events(id)).filter((event) => event.kind === "integration_resumed").length, 0, "no resume recorded over the admin's pause");
+  assert.equal(s.authAsked(), 1, "a read of Auth's feed follows");
 });
 
 test("an admin's revocation in the feed revokes the Portal's row: revoking until the Station confirms, or at once before approval", async (t) => {

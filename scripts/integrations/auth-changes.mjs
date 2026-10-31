@@ -150,7 +150,7 @@ export function createAuthChanges({ repository, manage, apply, log = () => {}, s
       started = true;
       request();
     },
-    // Asks for a read soon (Auth's nudge; a resume Auth refused as admin_paused). Nothing before start() or after stop().
+    // Asks for a read soon (Auth's nudge; a resume answered admin_paused). Nothing before start() or after stop().
     request,
     // No more reads; resolves once the one in flight, if any, has finished.
     stop() {
