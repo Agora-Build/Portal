@@ -265,3 +265,40 @@ test("stop() cancels the next read and waits for the one in flight; requests aft
   await sleep(60);
   assert.equal(manage.reads.length, 1);
 });
+
+test("stop() during a catch-up returns after the page being applied: its cursor is saved and no further page is fetched", async (t) => {
+  const manage = feedOf(7);
+  let release;
+  const holding = new Promise((resolve) => { release = resolve; });
+  let applying = false;
+  const applied = [];
+  const { feed, repository } = reader(t, { manage, apply: async (change) => {
+    if (change.cursor === "c1") { applying = true; await holding; }
+    applied.push(change.cursor);
+  } });
+  feed.start();
+  while (!applying) await sleep(5); // the reader's own timers are unref'd
+  const stopping = feed.stop();
+  release();
+  await stopping;
+  assert.deepEqual([manage.reads.map((read) => read.after), applied, repository.saved], [[null], ["c1", "c2"], ["c2"]]);
+  await sleep(60);
+  assert.equal(manage.reads.length, 1, "nothing read after stop()");
+});
+
+test("a wall clock stepped back never delays a requested read beyond minGapMs", async (t) => {
+  const clock = fakeClock();
+  const manage = feedOf(0);
+  const { feed } = reader(t, { manage, now: clock.now, settings: { minGapMs: 40 } });
+  feed.start();
+  await feed.idle();
+  assert.equal(manage.reads.length, 1);
+  clock.at -= 5000; // e.g. an NTP step: the last read now seems 5 seconds in the future
+  feed.request();
+  await sleep(90);
+  assert.equal(manage.reads.length, 2, "read within minGapMs, not 5 seconds later");
+  manage.add();
+  feed.request();
+  await feed.idle();
+  assert.equal(manage.reads.length, 3);
+});

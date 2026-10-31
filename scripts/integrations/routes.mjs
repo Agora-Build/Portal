@@ -22,8 +22,8 @@ const CHANGES_PER_MINUTE = 30;
 
 export const integrationPath = (path) => /^\/api\/(stations|integrations)(\/|$)/.test(path);
 
-// The stack for a ready service (tests): nothing to prepare or close.
-export const readyIntegrations = (service) => ({ service, ready: async () => service, close: async () => {} });
+// The stack for a ready service (tests): nothing to prepare or close, and no reader for a nudge to wake.
+export const readyIntegrations = (service) => ({ service, ready: async () => service, nudge: () => {}, close: async () => {} });
 
 // The service over `db`. ready() migrates and creates the event partitions before the first request, once; a failure
 // answers 503 and the next request tries again. The partitions are then kept up hourly. `stationFetch` (proof of

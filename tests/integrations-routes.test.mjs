@@ -14,7 +14,7 @@ import { createSignaling, signalingConfig } from "../scripts/spaces/signaling.mj
 import { createIdp } from "../scripts/idp.mjs";
 import { createRepository } from "../scripts/integrations/repository.mjs";
 import { createIntegrationService } from "../scripts/integrations/service.mjs";
-import { createIntegrationStack, integrationsFromEnv } from "../scripts/integrations/routes.mjs";
+import { createIntegrationStack, integrationsFromEnv, readyIntegrations } from "../scripts/integrations/routes.mjs";
 import { ManageError } from "../scripts/integrations/auth-manage.mjs";
 import { accountId, createFakeIdp } from "./helpers/fake-idp.mjs";
 import { BUILT_IN_REPORT_CLIENT, fakeManage } from "./helpers/fake-manage.mjs";
@@ -585,6 +585,13 @@ test("a nudge before the stack is ready asks for nothing: no ready() retries and
   assert.deepEqual([calls, manage.calls], [["migrate"], []], "a failed ready() is retried by the next request, never by a nudge");
   assert.deepEqual(logs, ["Portal database is not ready: ECONNREFUSED."]);
   await integrations.close();
+});
+
+test("an injected ready service takes a nudge and does nothing with it", async () => {
+  const service = {};
+  const integrations = readyIntegrations(service);
+  assert.equal(integrations.nudge(), undefined);
+  assert.equal(await integrations.ready(), service);
 });
 
 test("close() stops reading Auth's change feed", async () => {

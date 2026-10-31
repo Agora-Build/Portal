@@ -60,11 +60,14 @@ export function createAuthChanges({ repository, manage, apply, log = () => {}, s
     log("Auth change feed read again.");
   }
 
+  // A requested read waits at most minGapMs and the poll at most pollMs, so a wall clock stepped back (which puts the
+  // last read in the "future") never holds reads back by the size of the step.
   function schedule(at, soon) {
     if (timer) clearTimeout(timer.handle);
-    const handle = setTimeout(run, Math.max(0, at - now()));
+    const delay = Math.min(Math.max(0, at - now()), soon ? minGapMs : pollMs);
+    const handle = setTimeout(run, delay);
     handle.unref?.();
-    timer = { handle, at, soon };
+    timer = { handle, at: now() + delay, soon };
   }
 
   function request() {
@@ -79,12 +82,13 @@ export function createAuthChanges({ repository, manage, apply, log = () => {}, s
   }
 
   // One read: pages from the saved cursor until a short page, or pagesPerPull of them. Returns whether more may wait;
-  // throws what stopped it.
+  // throws what stopped it. After stop() it returns before the next page: the cursor of every page applied is saved.
   async function read() {
     let cursor = await repository.authChangeCursor();
     let reset = false;
     let pages = 0;
     while (pages < pagesPerPull) {
+      if (!started) return false;
       let page;
       try {
         page = await manage.integrationChanges({ after: cursor ?? undefined, limit: pageSize });
