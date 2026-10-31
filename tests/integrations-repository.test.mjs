@@ -238,14 +238,43 @@ test("integrations carry who paused them and when Auth said their owner was disa
   await assert.rejects(repo.updateIntegration("i-1", { pausedBy: "someone" }), { code: "23514" });
 });
 
+test("the owner-disabled time is set only on purpose: undefined is refused, null clears, a Date, a number or an ISO string sets", async (t) => {
+  const { repo } = await setup(t);
+  if (!repo) return;
+  await station(repo, "st1");
+  await repo.insertIntegration(sample("i-1"));
+  await assert.rejects(repo.updateIntegration("i-1", { ownerDisabledAt: undefined }), TypeError);
+  await assert.rejects(repo.updateIntegration("i-1", { state: "paused", ownerDisabledAt: undefined }), TypeError);
+  const untouched = await repo.integration("i-1");
+  assert.deepEqual([untouched.state, untouched.ownerDisabledAt], ["awaiting_approval", null], "a refused update changes nothing");
+  const at = "2026-10-31T10:00:00.000Z";
+  await repo.updateIntegration("i-1", { ownerDisabledAt: new Date(at) });
+  assert.equal((await repo.integration("i-1")).ownerDisabledAt, at, "a Date");
+  await repo.updateIntegration("i-1", { ownerDisabledAt: null });
+  assert.equal((await repo.integration("i-1")).ownerDisabledAt, null, "null clears");
+  await repo.updateIntegration("i-1", { ownerDisabledAt: at });
+  assert.equal((await repo.integration("i-1")).ownerDisabledAt, at, "an ISO string");
+  await repo.updateIntegration("i-1", { ownerDisabledAt: NOW });
+  assert.equal((await repo.integration("i-1")).ownerDisabledAt, new Date(NOW).toISOString(), "a number");
+});
+
 test("Auth's change feed cursor starts empty and is saved as given; an applied change is found by its cursor and time", async (t) => {
   const { repo, db } = await setup(t);
   if (!repo) return;
   assert.equal(await repo.authChangeCursor(), null);
   await repo.saveAuthChangeCursor("YzEy");
   assert.equal(await repo.authChangeCursor(), "YzEy");
-  for (const bad of ["", "has space", "x".repeat(65), 12, null]) await assert.rejects(repo.saveAuthChangeCursor(bad), TypeError, JSON.stringify(bad));
+  for (const bad of ["", "has space", "x".repeat(65), 12, undefined, {}]) await assert.rejects(repo.saveAuthChangeCursor(bad), TypeError, JSON.stringify(bad));
   assert.equal(await repo.authChangeCursor(), "YzEy");
+  await repo.saveAuthChangeCursor(null);
+  assert.equal(await repo.authChangeCursor(), null, "null resets the cursor to re-read Auth's feed from the start");
+  await repo.saveAuthChangeCursor("YzEy");
+  await db.pool.query("DELETE FROM auth_change_feed");
+  assert.equal(await repo.authChangeCursor(), null, "a missing row reads as no cursor");
+  await repo.saveAuthChangeCursor("YzEz");
+  assert.equal(await repo.authChangeCursor(), "YzEz", "saving heals a missing row");
+  assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM auth_change_feed")).rows[0].n, 1);
+  await repo.saveAuthChangeCursor("YzEy");
   await station(repo, "st1");
   const at = "2026-10-31T10:00:00.000Z";
   assert.equal(await repo.authChangeApplied("i-1", "YzEy", at), false);

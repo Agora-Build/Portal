@@ -27,7 +27,7 @@ function cursorNumber(cursor) {
 }
 
 // Auth's change feed cursor: opaque to the Portal, base64url as Auth hands it out.
-const AUTH_CURSOR = /^[A-Za-z0-9_-]{1,64}$/;
+export const AUTH_CURSOR = /^[A-Za-z0-9_-]{1,64}$/;
 
 function stationRow(row) {
   return {
@@ -204,6 +204,8 @@ export function createRepository(db) {
       const values = [id];
       for (const [key, value] of Object.entries(fields)) {
         if (!Object.hasOwn(updatable, key)) throw new TypeError("Cannot update integration field " + key + ".");
+        // when() reads undefined as now, and a set owner-disabled time makes Stations deny tokens: only on purpose.
+        if (key === "ownerDisabledAt" && value === undefined) throw new TypeError("ownerDisabledAt must be a time, or null to clear it.");
         values.push(key === "expiresAt" || key === "approvedAt" || key === "ownerDisabledAt" ? (value === null ? null : when(value)) : value);
         assignments.push(updatable[key] + " = $" + values.length);
       }
@@ -250,9 +252,10 @@ export function createRepository(db) {
       return rows[0]?.cursor ?? null;
     },
 
+    // null resets it, to read Auth's feed again from the start. The row is created when it is missing.
     async saveAuthChangeCursor(cursor, client) {
-      if (typeof cursor !== "string" || !AUTH_CURSOR.test(cursor)) throw new TypeError("An Auth change cursor is 1 to 64 base64url characters.");
-      await run(client, "UPDATE auth_change_feed SET cursor = $1, updated_at = now() WHERE id", [cursor]);
+      if (cursor !== null && (typeof cursor !== "string" || !AUTH_CURSOR.test(cursor))) throw new TypeError("An Auth change cursor is 1 to 64 base64url characters, or null.");
+      await run(client, "INSERT INTO auth_change_feed (id, cursor) VALUES (true, $1) ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = now()", [cursor]);
     },
 
     // Whether an entry of Auth's change feed was already applied to this integration: its cursor and time are kept in
