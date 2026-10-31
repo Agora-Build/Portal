@@ -28,6 +28,9 @@ function cursorNumber(cursor) {
 
 // Auth's change feed cursor: opaque to the Portal, base64url as Auth hands it out.
 export const AUTH_CURSOR = /^[A-Za-z0-9_-]{1,64}$/;
+// A time as Auth and the Portal write it into an event's details (toISOString), safe to cast in SQL.
+const ISO_TIME = "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$";
+const STATUS_KINDS = ["integration_paused", "integration_resumed", "integration_revoked"];
 
 function stationRow(row) {
   return {
@@ -194,6 +197,12 @@ export function createRepository(db) {
       return rows.map(integrationRow);
     },
 
+    // The account's integrations Auth's change feed has as owner-disabled: [{ id, ownerDisabledAt }].
+    async ownerDisabledIntegrations(accountId, client) {
+      const { rows } = await run(client, "SELECT id, owner_disabled_at FROM integrations WHERE owner_account = $1 AND owner_disabled_at IS NOT NULL ORDER BY created_at, id", [accountId]);
+      return rows.map((row) => ({ id: row.id, ownerDisabledAt: iso(row.owner_disabled_at) }));
+    },
+
     async integrationsOnStation(stationId, client) {
       const { rows } = await run(client, "SELECT * FROM integrations WHERE station_id = $1 ORDER BY created_at, id", [stationId]);
       return rows.map(integrationRow);
@@ -264,6 +273,18 @@ export function createRepository(db) {
     async authChangeApplied(integrationId, cursor, at, client) {
       const { rows } = await run(client, "SELECT 1 FROM integration_events WHERE integration_id = $1 AND details->>'authCursor' = $2 AND details->>'authAt' = $3 LIMIT 1", [integrationId, cursor, at]);
       return rows.length > 0;
+    },
+
+    // The newest time of a pause, resume or revocation recorded for the integration, as an ISO string, or null when
+    // there is none (service.applyAuthChange, Ruling R-A). An entry of Auth's change feed counts at Auth's time
+    // (details.authAt); a change the Portal saw through its own call or an owner's listing at the time it saw it
+    // (details.seenAt), which is no earlier than Auth made it; an older event without either at the time it was
+    // recorded.
+    async latestStatusAt(integrationId, client) {
+      const { rows } = await run(client,
+        "SELECT max(CASE WHEN details ? 'authCursor' AND details->>'authAt' ~ $3 THEN (details->>'authAt')::timestamptz WHEN details->>'seenAt' ~ $3 THEN (details->>'seenAt')::timestamptz ELSE at END) AS latest FROM integration_events WHERE integration_id = $1 AND kind = ANY($2)",
+        [integrationId, STATUS_KINDS, ISO_TIME]);
+      return iso(rows[0].latest);
     }
   };
 }

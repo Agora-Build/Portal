@@ -7,8 +7,11 @@ export const BUILT_IN_REPORT_CLIENT = "s-" + "0".repeat(24) + "bs";
 
 // An in-memory Auth /manage/v1 following the actor rules of Auth's docs/integrating.md, including built-in Stations
 // (seedBuiltIn): listed first for every account, with no owner or members (409 built_in), integrations only while
-// switched on (409 not_supported), and admins, who have no rights on them through the Portal (Auth D26 R12). `failNext` makes
-// the next call of that name fail with the given status and code (after the gate, so the call is still recorded).
+// switched on (409 not_supported), and admins, who have no rights on them through the Portal (Auth D26 R12). `feed` is
+// Auth's change feed (integrationChanges): every status change and owner account change, whoever made it; adminChange,
+// systemRevoke and setOwnerDisabled stand in for the admin site's calls and Auth's own changes, and call `onNudge` as
+// Auth nudges the Portal (Auth D26 Task 13). `failNext` makes the next call of that name fail with the given status and
+// code (after the gate, so the call is still recorded).
 export function fakeManage({ now = Date.now } = {}) {
   const stations = [];
   const integrations = [];
@@ -29,12 +32,26 @@ export function fakeManage({ now = Date.now } = {}) {
     if (!Number.isFinite(at) || at <= now() || at > now() + 90 * DAY) fail(400, "expiry");
     return new Date(at).toISOString();
   };
+  // Auth's change feed (Auth D26 R25): one entry per change to an integration's access, oldest first, with an opaque
+  // cursor as Auth hands it out.
+  const feed = [];
+  const feedCursor = (n) => Buffer.from("c" + n, "utf8").toString("base64url");
+  function recordChange(integration, kind, { actor = null, reason = null, admin = false } = {}) {
+    feed.push({
+      cursor: feedCursor(feed.length + 1), at: new Date(now()).toISOString(), kind, clientId: integration.clientId, stationId: integration.stationId,
+      owner: integration.owner, status: integration.status, pausedBy: integration.status === "paused" ? integration.pausedBy ?? null : null,
+      actorAccountId: actor, reason, admin
+    });
+  }
+  const statusKind = (status) => (status === "paused" ? "paused" : status === "revoked" ? "revoked" : "resumed");
   const auth = {
     down: false,
     calls: [],
     failNext: {},
     records: stations,
     integrationRecords: integrations,
+    feed,
+    onNudge: null,
     find(id) {
       const station = stations.find((entry) => entry.id === id && entry.status === "active");
       if (!station) fail(404, "not_found");
@@ -59,8 +76,13 @@ export function fakeManage({ now = Date.now } = {}) {
     async gate(name, actor, ...accounts) {
       await auth.open(name, () => { if (![actor, ...accounts].every(valid)) fail(400, "invalid_request"); });
     },
-    revokeWhere(pick) {
-      for (const integration of integrations) if (pick(integration)) integration.status = "revoked";
+    revokeWhere(pick, by = {}) {
+      for (const integration of integrations) {
+        if (!pick(integration) || integration.status === "revoked") continue;
+        integration.status = "revoked";
+        integration.pausedBy = null;
+        recordChange(integration, "revoked", by);
+      }
     },
     // A built-in Station as Auth seeds it from its clients file. Not a management call, so it is not recorded.
     seedBuiltIn({ id = "stbuiltin", origin = "https://station.agora.test", name = "Agora Station", integrations: enabled = false, admins = [], reportClientId = BUILT_IN_REPORT_CLIENT } = {}) {
@@ -93,7 +115,7 @@ export function fakeManage({ now = Date.now } = {}) {
       const station = notBuiltIn(auth.find(id));
       if (station.owner !== actor) fail(403, "forbidden");
       station.status = "removed";
-      auth.revokeWhere((integration) => integration.stationId === id);
+      auth.revokeWhere((integration) => integration.stationId === id, { actor, reason: "station_removed" });
     },
     async members(id, actor) {
       await auth.gate("members", actor);
@@ -112,7 +134,7 @@ export function fakeManage({ now = Date.now } = {}) {
       const station = notBuiltIn(auth.find(id));
       if (station.owner !== actor && account !== actor) fail(403, "forbidden");
       station.members = station.members.filter((member) => member.account !== account);
-      auth.revokeWhere((integration) => integration.stationId === id && integration.owner === account);
+      auth.revokeWhere((integration) => integration.stationId === id && integration.owner === account, { actor, reason: "member_removed" });
     },
     async createIntegration({ owner, stationId, name, scopes, publicJwk, r9Svc = null, quotaPerSecond = 200, expiresAt, actor }) {
       await auth.gate("createIntegration", actor, owner);
@@ -170,11 +192,68 @@ export function fakeManage({ now = Date.now } = {}) {
       if (status !== undefined && status !== integration.status) {
         integration.status = status;
         integration.pausedBy = status === "paused" ? (integration.owner === actor ? "owner" : "station") : null;
+        recordChange(integration, statusKind(status), { actor });
       }
       if (r9Svc !== undefined) integration.r9Svc = r9Svc;
       if (quotaPerSecond !== undefined) integration.quotaPerSecond = quotaPerSecond;
       if (expiry !== undefined) integration.expiresAt = expiry;
       return listed(integration);
+    },
+    // An Agora.Build admin's change through Auth's admin client (the admin site): pause, revoke, or lift an admin's
+    // pause, on a built-in Station the admin administers, with a reason; in the feed with admin: true, then Auth's
+    // nudge. Resuming an active integration and revoking a revoked one change nothing, as at Auth. Not a Portal call,
+    // so it is not recorded in calls.
+    adminChange(id, { status, actor, reason = "Admin test" }) {
+      const integration = auth.findIntegration(id);
+      const station = stations.find((entry) => entry.id === integration.stationId);
+      const lifts = status === "active" && ((integration.status === "paused" && integration.pausedBy === "admin") || integration.status === "active");
+      if (!station.builtIn || !station.admins.includes(actor) || !(status === "paused" || status === "revoked" || lifts)) fail(403, "forbidden");
+      if (integration.status === "revoked") {
+        if (status === "revoked") return listed(integration);
+        fail(409, "revoked");
+      }
+      const converts = status === "paused" && integration.status === "paused" && integration.pausedBy !== "admin";
+      if (status === integration.status && !converts) return listed(integration);
+      integration.status = status;
+      integration.pausedBy = status === "paused" ? "admin" : null;
+      recordChange(integration, statusKind(status), { actor, reason, admin: true });
+      auth.onNudge?.();
+      return listed(integration);
+    },
+    // Auth's own change (no actor): a built-in Station retired by its clients file revokes its integrations.
+    systemRevoke(id, reason = "configuration") {
+      const integration = auth.findIntegration(id);
+      if (integration.status === "revoked") return;
+      integration.status = "revoked";
+      integration.pausedBy = null;
+      recordChange(integration, "revoked", { reason });
+      auth.onNudge?.();
+    },
+    // An admin disabling or enabling an account: one owner_disabled or owner_enabled entry per integration it owns
+    // that is not revoked, each with that integration's status (Auth D26 R24).
+    setOwnerDisabled(account, disabled, { actor = null, reason = null } = {}) {
+      let written = 0;
+      for (const integration of integrations) {
+        if (integration.owner !== account || integration.status === "revoked") continue;
+        recordChange(integration, disabled ? "owner_disabled" : "owner_enabled", { actor, reason, admin: actor !== null });
+        written += 1;
+      }
+      if (written) auth.onNudge?.();
+    },
+    // GET /manage/v1/integration-changes (the Portal only): oldest first, after a cursor it handed out. As at Auth, the
+    // newest cursor answers no changes and itself, and one beyond the newest change (Auth restored from an earlier
+    // backup) is 409 cursor_ahead.
+    async integrationChanges({ after, limit = 100 } = {}) {
+      await auth.open("integrationChanges");
+      let start = 0;
+      if (after !== undefined && after !== null) {
+        const place = /^c([1-9][0-9]*)$/.exec(Buffer.from(String(after), "base64url").toString("utf8"));
+        if (!place || feedCursor(Number(place[1])) !== after) fail(400, "invalid_request");
+        start = Number(place[1]);
+        if (start > feed.length) fail(409, "cursor_ahead");
+      }
+      const changes = feed.slice(start, start + limit).map((entry) => ({ ...entry }));
+      return { changes, nextCursor: changes.length ? changes.at(-1).cursor : after ?? null };
     }
   };
   return auth;

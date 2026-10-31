@@ -740,7 +740,8 @@ belongs to an active Station.
 `{ "integrationId", "state", "reason" }` and no other field. `state` is
 `waiting_for_host`, `ready`, `revoked` or `error`; `reason` is 1 to 200
 characters without control characters, required for `error` and optional
-otherwise. The answer is the integration (without `role`).
+otherwise. The answer is the integration (without `role` or `pausedBy`: as in
+the change feed, the Station is not told who paused it).
 
 | Report | Accepted when the integration is | Effect |
 | --- | --- | --- |
@@ -778,10 +779,17 @@ cursor in a push nudge is only a hint; never store it. `kind` is one of `integra
 `integration_key_added`, `integration_reported` (the Station's own reports),
 `integration_reconciled` (the Portal caught up with a change made at Auth,
 such as a new expiry, quota or R9 binding, or an integration it had missed),
+`integration_owner_disabled` and `integration_owner_enabled` (Agora.Build
+disabled or enabled the integration's owner account: Auth issues it no token
+while it is disabled, and its `state` is `paused` until it is enabled again),
 and for the Station itself `station_registered`, `station_reconciled`,
 `member_added` and `member_removed`, which have no integration. New kinds may
 be added; treat an unknown one as a reason to act on the `integration` it
-carries. A removed Station cannot read its feed any more (its report client is
+carries. A change Agora.Build made (an admin's, on the admin site) has the
+`reason` `agora_build`. As soon as an integration's `state` is `paused`,
+`revoking`, `revoked` or `expired`, refuse its still-valid tokens and close its
+open sessions and streams; its tokens are never trusted past their 300-second
+lifetime anyway. A removed Station cannot read its feed any more (its report client is
 gone at Auth), so it never sees its own `station_removed`.
 
 **The push nudge.** After a committed change the Portal sends

@@ -378,6 +378,30 @@ test("removing a Station revokes all its integrations; only the owner may", asyn
   assert.deepEqual(s.notified, ["st1"]);
 });
 
+test("an integration revoked by unsharing, removing its Station or a listing without the Station no longer says who paused it", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await s.register(OWNER, "https://one.example");
+  await s.register(OWNER, "https://two.example");
+  await s.service.share(OWNER, "st1", MEMBER);
+  for (const [id, stationId, owner] of [["i-member", "st1", MEMBER], ["i-owner", "st1", OWNER], ["i-gone", "st2", OWNER]]) {
+    await seedIntegration(s.repository, id, stationId, owner, "ready");
+    await s.repository.updateIntegration(id, { state: "paused", resumeState: "ready", pausedBy: "station" });
+  }
+  const pick = async (id) => {
+    const row = await s.repository.integration(id);
+    return [row.state, row.pausedBy];
+  };
+  await s.service.unshare(OWNER, "st1", MEMBER);
+  assert.deepEqual(await pick("i-member"), ["revoking", null]);
+  assert.deepEqual(await pick("i-owner"), ["paused", "station"], "untouched");
+  await s.service.removeStation(OWNER, "st1");
+  assert.deepEqual(await pick("i-owner"), ["revoking", null]);
+  s.manage.records.find((entry) => entry.id === "st2").status = "removed";
+  await s.service.stations(OWNER);
+  assert.deepEqual(await pick("i-gone"), ["revoked", null]);
+});
+
 test("unsharing someone Portal does not count a member still asks Auth but records nothing", async (t) => {
   const s = await setup(t);
   if (!s) return;

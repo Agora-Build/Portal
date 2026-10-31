@@ -283,3 +283,35 @@ test("Auth's change feed cursor starts empty and is saved as given; an applied c
   assert.equal(await repo.authChangeApplied("i-1", "YzEy", "2026-10-31T11:00:00.000Z"), false, "the same cursor at another time is another change (Auth's database was restored)");
   assert.equal(await repo.authChangeApplied("i-2", "YzEy", at), false);
 });
+
+test("an integration's newest pause, resume or revocation counts at Auth's time, or when the Portal saw it", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  await station(repo, "st1");
+  await repo.insertIntegration(sample("i-1"));
+  await repo.insertIntegration(sample("i-2"));
+  assert.equal(await repo.latestStatusAt("i-1"), null);
+  const append = (kind, details, integrationId = "i-1") => db.transaction((client) => repo.appendEvent({ stationId: "st1", integrationId, accountId: "ab1", actor: "system", kind, details }, client));
+  await append("integration_paused", { authCursor: "YzE", authAt: "2020-01-01T10:00:00.000Z" });
+  assert.equal(await repo.latestStatusAt("i-1"), "2020-01-01T10:00:00.000Z", "an entry of Auth's feed at Auth's time, not when it was recorded");
+  await append("integration_resumed", { seenAt: "2020-01-01T09:00:00.000Z" });
+  assert.equal(await repo.latestStatusAt("i-1"), "2020-01-01T10:00:00.000Z", "the newest time, not the newest event");
+  await append("integration_reconciled", { seenAt: "2020-01-01T12:00:00.000Z" });
+  await append("integration_paused", { seenAt: "2020-01-01T13:00:00.000Z" }, "i-2");
+  assert.equal(await repo.latestStatusAt("i-1"), "2020-01-01T10:00:00.000Z", "only this integration's status changes");
+  await append("integration_revoked", { seenAt: "2020-01-01T11:00:00.000Z" });
+  assert.equal(await repo.latestStatusAt("i-1"), "2020-01-01T11:00:00.000Z");
+  await append("integration_paused", { authCursor: "YzI", authAt: "not a time" });
+  assert.ok(Date.parse(await repo.latestStatusAt("i-1")) > Date.parse("2020-01-02T00:00:00.000Z"), "without a usable time, when it was recorded");
+});
+
+test("an account's owner-disabled integrations are listed with the time of the disable", async (t) => {
+  const { repo } = await setup(t);
+  if (!repo) return;
+  await station(repo, "st1");
+  for (const [id, ownerAccount] of [["i-1", "ab1"], ["i-2", "ab1"], ["i-3", "ab2"]]) await repo.insertIntegration(sample(id, { ownerAccount }));
+  assert.deepEqual(await repo.ownerDisabledIntegrations("ab1"), []);
+  await repo.updateIntegration("i-2", { ownerDisabledAt: NOW });
+  await repo.updateIntegration("i-3", { ownerDisabledAt: NOW });
+  assert.deepEqual(await repo.ownerDisabledIntegrations("ab1"), [{ id: "i-2", ownerDisabledAt: new Date(NOW).toISOString() }]);
+});

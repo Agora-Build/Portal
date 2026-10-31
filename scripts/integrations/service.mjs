@@ -6,6 +6,7 @@ import { builtInIntegrationLimit } from "../plans.mjs";
 import { ACCOUNT_ID, AppError } from "../store.mjs";
 import { ManageError } from "./auth-manage.mjs";
 import { checkProof, createStationFetch, ProofError, stationOrigin, WELL_KNOWN_PATH } from "./proof.mjs";
+import { AUTH_CURSOR } from "./repository.mjs";
 import { effectiveState, REPORT_STATES, transition } from "./states.mjs";
 
 const CHALLENGE_LIFETIME = 600000;
@@ -41,6 +42,14 @@ const ADMIN_PAUSED = "Agora.Build paused this integration. Only Agora.Build can 
 const OWNER_DISABLED = "Agora.Build disabled this integration's owner account. It resumes when the account is enabled again.";
 const adminPaused = () => failure(409, ADMIN_PAUSED, "admin_paused");
 const ownerDisabled = () => failure(409, OWNER_DISABLED, "owner_disabled");
+// Auth's change feed (Auth D26 R25): the kinds of entry and those about an owner's account (its cursor's shape is
+// AUTH_CURSOR, shared with the repository).
+const AUTH_KINDS = ["paused", "resumed", "revoked", "owner_disabled", "owner_enabled"];
+const OWNER_KINDS = ["owner_disabled", "owner_enabled"];
+const AUTH_REASON_MAX = 500;
+// How the Station's feed and an integration's history name a change an Agora.Build admin made (spec §3.3.4): the admin
+// and the reason they gave stay in the Portal's event (actor, reason) and in Auth's audit.
+const AGORA_BUILD = "agora_build";
 
 const MANAGE_CONFLICTS = {
   origin_taken: "This Station is already registered.",
@@ -168,6 +177,29 @@ function pausedByOf(row, state) {
   return row.state === "paused" && PAUSED_BY.includes(row.pausedBy) ? row.pausedBy : null;
 }
 
+// What an entry of Auth's change feed does to the Portal's row: the event kind and the fields to write. Auth is
+// authoritative, so following it is not held back by expiry: transitions are checked at time 0, as in reconcile. A
+// stopped integration is revoked at Auth, which changes it no more, so an entry about it is older than that and is
+// only recorded (Ruling R-A): it is not paused, resumed, disabled or enabled again. An owner's account being disabled
+// is its own flag, not a pause of the row (effectiveState shows it as paused), so enabling it restores each
+// integration as it was.
+function authEffect(row, entry, at) {
+  const stopped = STOPPED.includes(row.state);
+  if (entry.kind === "revoked") return { kind: "integration_revoked", fields: stopped ? {} : { ...step(row, "revoke", 0), pausedBy: null } };
+  if (stopped) return { kind: "integration_" + entry.kind, fields: {} };
+  if (entry.kind === "paused") {
+    const pausedBy = PAUSED_BY.includes(entry.pausedBy) ? entry.pausedBy : null;
+    if (row.state !== "paused") return { kind: "integration_paused", fields: { ...step(row, "pause", 0), pausedBy } };
+    return { kind: "integration_paused", fields: row.pausedBy === pausedBy ? {} : { pausedBy } };
+  }
+  if (entry.kind === "resumed") return { kind: "integration_resumed", fields: row.state === "paused" ? { ...step(row, "resume", 0), pausedBy: null } : {} };
+  if (entry.kind === "owner_disabled") {
+    const when = Date.parse(entry.at);
+    return { kind: "integration_owner_disabled", fields: row.ownerDisabledAt ? {} : { ownerDisabledAt: Number.isFinite(when) ? when : at } };
+  }
+  return { kind: "integration_owner_enabled", fields: row.ownerDisabledAt ? { ownerDisabledAt: null } : {} };
+}
+
 // authChanged() asks the stack to read Auth's change feed soon (Auth refused a resume as admin_paused).
 export function createIntegrationService({
   repository, db, manage, stationFetch, exchange, now = Date.now, log = () => {}, ids = randomUUID,
@@ -254,6 +286,44 @@ export function createIntegrationService({
     }
   }
 
+  // For the event of a pause, resume or revocation the Portal saw at Auth (its own call's answer, or an owner's
+  // listing): when it saw it, on the Portal's clock, which is no earlier than Auth made it (Ruling R-A).
+  const seen = () => ({ seenAt: new Date(now()).toISOString() });
+
+  // A management call naming accountId as actor. Auth refuses one whose actor is disabled (400 invalid_request), so a
+  // call it accepts proves the account enabled (Ruling R-D): an owner-disabled flag the account's integrations already
+  // had before the call is stale (its owner_enabled was missed, or not read yet) and is cleared, and the Station told.
+  // A flag the feed set or changed while the call ran may be a newer disable, so it stays.
+  async function byActor(accountId, call) {
+    const flagged = await repository.ownerDisabledIntegrations(accountId);
+    const answer = await viaAuth(call);
+    if (flagged.length) {
+      try {
+        await ownerEnabled(flagged);
+      } catch {
+        log("Owner-disabled flag not cleared: error.");
+      }
+    }
+    return answer;
+  }
+
+  async function ownerEnabled(flagged) {
+    const stations = new Set();
+    for (const { id, ownerDisabledAt } of flagged) {
+      const stationId = await appending(async (client) => {
+        const row = await repository.integrationForUpdate(id, client);
+        if (!row || row.ownerDisabledAt !== ownerDisabledAt || STOPPED.includes(row.state)) return null;
+        await repository.updateIntegration(id, { ownerDisabledAt: null }, client);
+        await repository.appendEvent({ stationId: row.stationId, integrationId: id, accountId: row.ownerAccount, actor: SYSTEM, kind: "integration_owner_enabled", state: row.state, reason: "reconciled" }, client);
+        return row.stationId;
+      });
+      if (stationId) stations.add(stationId);
+    }
+    if (!stations.size) return;
+    log("Owner-disabled flag cleared: Auth accepted a call by the owner.");
+    for (const stationId of stations) changed(stationId);
+  }
+
   // Revokes, inside the caller's transaction, each integration `pick` selects on the Station; already revoking or
   // revoked ones are left as they are. `direct` sets revoked at once (Auth has already removed the Station). Returns
   // how many it revoked.
@@ -264,7 +334,8 @@ export function createIntegrationService({
       if (!pick(listed) || listed.state === "revoking" || listed.state === "revoked") continue;
       const row = await repository.integrationForUpdate(listed.id, client);
       if (row.state === "revoking" || row.state === "revoked") continue;
-      const next = direct ? { state: "revoked", resumeState: null } : transition(row, "revoke", at);
+      // A revoked integration is no longer paused by anyone.
+      const next = { ...(direct ? { state: "revoked", resumeState: null } : transition(row, "revoke", at)), pausedBy: null };
       await repository.updateIntegration(row.id, next, client);
       await repository.appendEvent({ stationId, integrationId: row.id, accountId: row.ownerAccount, actor, kind: "integration_revoked", state: next.state, reason }, client);
       revoked += 1;
@@ -483,12 +554,12 @@ export function createIntegrationService({
     const { row, role } = await visible(accountId, id);
     step(row, event, now());
     if (event === "revoke" && STOPPED.includes(row.state)) return viewOf(row, role);
-    const answer = await viaAuth(() => manage.changeIntegration(id, { status: event === "pause" ? "paused" : "revoked" }, accountId));
+    const answer = await byActor(accountId, () => manage.changeIntegration(id, { status: event === "pause" ? "paused" : "revoked" }, accountId));
     const kind = event === "pause" ? "integration_paused" : "integration_revoked";
     const pausedBy = event !== "pause" ? null : PAUSED_BY.includes(answer?.pausedBy) ? answer.pausedBy : role === "owner" ? "owner" : "station";
     const updated = await commit(id, (current) => {
       if (event === "revoke" && STOPPED.includes(current.state)) return null;
-      return { fields: { ...step(current, event, now()), pausedBy }, event: { actor: accountId, kind, reason: role } };
+      return { fields: { ...step(current, event, now()), pausedBy }, event: { actor: accountId, kind, reason: role, details: seen() } };
     });
     return viewOf(updated, role);
   }
@@ -543,7 +614,7 @@ export function createIntegrationService({
         if (!Object.keys(fields).length) return false;
         await repository.updateIntegration(id, fields, client);
         const recorded = { stationId: current.stationId, integrationId: id, accountId: current.ownerAccount, actor: "system", reason: "reconciled" };
-        if (event) await repository.appendEvent({ ...recorded, kind: event[1], state: fields.state }, client);
+        if (event) await repository.appendEvent({ ...recorded, kind: event[1], state: fields.state, details: seen() }, client);
         else {
           const details = { changed: settings, ...Object.fromEntries(settings.map((name) => [name, fields[name]])) };
           await repository.appendEvent({ ...recorded, kind: "integration_reconciled", state: current.state, details }, client);
@@ -558,7 +629,7 @@ export function createIntegrationService({
   async function create(accountId, station, fields, publicJwk, expiresInDays) {
     const stationId = station.id;
     const expiresAt = new Date(now() + expiresInDays * DAY).toISOString();
-    const created = await viaAuth(() => manage.createIntegration({ owner: accountId, stationId, ...fields, publicJwk, expiresAt, actor: accountId }));
+    const created = await byActor(accountId, () => manage.createIntegration({ owner: accountId, stationId, ...fields, publicJwk, expiresAt, actor: accountId }));
     await appending(async (client) => {
       await repository.insertIntegration({ id: created.clientId, ownerAccount: accountId, stationId, kind: "custom_app", ...fields, expiresAt: created.expiresAt ?? expiresAt }, client);
       await repository.appendEvent({ stationId, integrationId: created.clientId, accountId, actor: accountId, kind: "integration_created", state: "awaiting_approval", details: { scopes: fields.scopes, name: fields.name } }, client);
@@ -596,7 +667,7 @@ export function createIntegrationService({
         log("Station proof of control failed: " + proof.reason + ".");
         throw failure(422, "The Station did not serve the check value at " + origin + WELL_KNOWN_PATH + ".", "proof", { reason: proof.reason });
       }
-      const registered = await viaAuth(() => manage.registerStation({ origin, owner: accountId, reportKey, actor: accountId }));
+      const registered = await byActor(accountId, () => manage.registerStation({ origin, owner: accountId, reportKey, actor: accountId }));
       const stale = await appending(async (client) => {
         const stale = await retireStale(client, origin, registered.id);
         await repository.insertStation({ id: registered.id, origin, ownerAccount: accountId, reportClientId: registered.reportClientId, verifiedAt: now() }, client);
@@ -622,7 +693,7 @@ export function createIntegrationService({
 
     async members(accountId, stationId) {
       notBuiltIn(await usable(accountId, stationId));
-      const answer = await viaAuth(() => manage.members(stationId, accountId));
+      const answer = await byActor(accountId, () => manage.members(stationId, accountId));
       return { owner: answer.owner, members: (answer.members || []).map(({ account, addedAt }) => ({ account, addedAt })) };
     },
 
@@ -630,7 +701,7 @@ export function createIntegrationService({
       memberAccount(member);
       const station = await ownStation(accountId, stationId);
       if (member === station.ownerAccount) throw failure(400, "The owner already has this Station.", "account");
-      await viaAuth(() => manage.addMember(stationId, member, accountId));
+      await byActor(accountId, () => manage.addMember(stationId, member, accountId));
       const added = await appending(async (client) => {
         if (!(await repository.addMember(stationId, member, accountId, now(), client))) return false;
         await repository.appendEvent({ stationId, accountId: member, actor: accountId, kind: "member_added" }, client);
@@ -645,7 +716,7 @@ export function createIntegrationService({
       memberAccount(member);
       const station = notBuiltIn(await usable(accountId, stationId));
       if (station.role !== "owner" && member !== accountId) throw ownerOnly();
-      await viaAuth(() => manage.removeMember(stationId, member, accountId));
+      await byActor(accountId, () => manage.removeMember(stationId, member, accountId));
       const wrote = await appending(async (client) => {
         const removed = await repository.removeMember(stationId, member, accountId, now(), client);
         const revoked = await revokeOn(client, stationId, (row) => row.ownerAccount === member, { actor: accountId, reason: "member_removed" });
@@ -657,7 +728,7 @@ export function createIntegrationService({
 
     async removeStation(accountId, stationId) {
       const station = await ownStation(accountId, stationId);
-      await viaAuth(() => manage.removeStation(stationId, accountId));
+      await byActor(accountId, () => manage.removeStation(stationId, accountId));
       await appending(async (client) => {
         await repository.markStationRemoved(stationId, now(), client);
         await revokeOn(client, stationId, () => true, { actor: accountId, reason: "station_removed" });
@@ -724,7 +795,7 @@ export function createIntegrationService({
       if (!row || row.ownerAccount !== accountId) throw notFound();
       if (typeof r9Svc !== "string" || !R9_SVC.test(r9Svc)) throw failure(400, "Send the R9 service fingerprint as 64 lower-case hex characters.", "r9_svc");
       step(row, "approve", now());
-      await viaAuth(() => manage.changeIntegration(id, { r9Svc }, accountId));
+      await byActor(accountId, () => manage.changeIntegration(id, { r9Svc }, accountId));
       // A pause committed in between fails the re-check after Auth stored r9Svc; the owner approves again after resuming.
       const updated = await commit(id, (current) => ({
         fields: { ...step(current, "approve", now()), r9Svc, approvedBy: accountId, approvedAt: now() },
@@ -745,12 +816,12 @@ export function createIntegrationService({
       if (row.state === "paused" && row.pausedBy === "admin") throw adminPaused();
       step(row, "resume", now());
       try {
-        await viaAuth(() => manage.changeIntegration(id, { status: "active" }, accountId));
+        await byActor(accountId, () => manage.changeIntegration(id, { status: "active" }, accountId));
       } catch (error) {
         if (error.details?.code === "admin_paused") authChanged();
         throw error;
       }
-      const updated = await commit(id, (current) => ({ fields: { ...step(current, "resume", now()), pausedBy: null }, event: { actor: accountId, kind: "integration_resumed", reason: "owner" } }));
+      const updated = await commit(id, (current) => ({ fields: { ...step(current, "resume", now()), pausedBy: null }, event: { actor: accountId, kind: "integration_resumed", reason: "owner", details: seen() } }));
       return viewOf(updated, "owner");
     },
 
@@ -763,7 +834,7 @@ export function createIntegrationService({
       expiryDays(expiresInDays);
       step(row, "renew", now());
       const renewing = async () => {
-        const changedAt = await viaAuth(() => manage.changeIntegration(id, { expiresAt: new Date(now() + expiresInDays * DAY).toISOString() }, accountId));
+        const changedAt = await byActor(accountId, () => manage.changeIntegration(id, { expiresAt: new Date(now() + expiresInDays * DAY).toISOString() }, accountId));
         const updated = await commit(id, (current) => {
           step(current, "renew", now());
           return { fields: { expiresAt: changedAt.expiresAt }, event: { actor: accountId, kind: "integration_renewed", details: { expiresAt: changedAt.expiresAt } } };
@@ -785,7 +856,7 @@ export function createIntegrationService({
       const row = await owned(accountId, id);
       quota(quotaPerSecond);
       notRevoked(row);
-      const answer = await viaAuth(() => manage.changeIntegration(id, { quotaPerSecond }, accountId));
+      const answer = await byActor(accountId, () => manage.changeIntegration(id, { quotaPerSecond }, accountId));
       const updated = await commit(id, (current) => {
         notRevoked(current);
         return { fields: { quotaPerSecond: answer.quotaPerSecond }, event: { actor: accountId, kind: "integration_settings_changed", details: { quotaPerSecond: answer.quotaPerSecond } } };
@@ -798,7 +869,7 @@ export function createIntegrationService({
       const row = await owned(accountId, id);
       publicKey(publicJwk);
       notRevoked(row);
-      const { kid, overlapEndsAt } = await viaAuth(() => manage.addKey(id, publicJwk, accountId));
+      const { kid, overlapEndsAt } = await byActor(accountId, () => manage.addKey(id, publicJwk, accountId));
       await commit(id, (current) => {
         notRevoked(current);
         return { event: { actor: accountId, kind: "integration_key_added", details: { kid, overlapEndsAt } } };
@@ -827,7 +898,8 @@ export function createIntegrationService({
       apply(row);
       // The Station made this change itself, so it is not pushed back to it.
       const updated = await commit(row.id, apply, { push: false });
-      const { role, ...view } = integrationView(updated, null, station.origin);
+      // As in its feed, the Station is not told who paused an integration.
+      const { role, pausedBy, ...view } = integrationView(updated, null, station.origin);
       return view;
     },
 
@@ -843,8 +915,9 @@ export function createIntegrationService({
       const rows = await repository.integrationsOnStation(station.id);
       const at = now();
       const current = new Map(rows.map((row) => [row.id, row]));
-      const changes = events.map(({ id, at: when, integrationId, kind, state, reason }) => {
-        const change = { id, at: when, integrationId, kind, state, reason };
+      const changes = events.map(({ id, at: when, integrationId, kind, state, reason, details }) => {
+        // Agora.Build's changes say only that: the admin and their reason stay in the Portal's event (spec §3.3.4).
+        const change = { id, at: when, integrationId, kind, state, reason: details?.admin === true ? AGORA_BUILD : reason };
         const row = integrationId ? current.get(integrationId) : null;
         if (row) change.integration = feedIntegration(row, at);
         return change;
@@ -873,6 +946,62 @@ export function createIntegrationService({
       }
     },
 
+    // One entry of Auth's change feed (GET /manage/v1/integration-changes, read by auth-changes.mjs): Auth's change to
+    // an integration's access, followed on the Portal's row (authEffect), recorded in integration_events with the
+    // account that made it and its reason (an Agora.Build admin and the reason they gave; spec §3.3.4), then appended
+    // to the Station's feed and pushed to it. Changes the Portal made itself (an account's pause, resume or revoke
+    // through these routes) are already recorded and are skipped, as are integrations the Portal does not know (their
+    // owner's next listing brings them in). Each entry is applied once: its cursor and time are kept in the event's
+    // details. Returns "applied" or "skipped"; only a database failure throws, so the reader reads it again.
+    //
+    // The feed may be read after the Portal already followed a newer change (an owner's listing, the owner's own call,
+    // or a revocation). Such an entry is still recorded, and a pause or revocation still applies: a pause that is out
+    // of date errs on the safe side, and the owner's next listing follows Auth again. A resume applies only if it is not older
+    // than the newest pause, resume or revocation the row has recorded (repository.latestStatusAt); otherwise the row
+    // keeps its state and the event says so (details.superseded), so a resume read late never undoes a newer pause
+    // (Ruling R-A). Auth's clock and the Portal's are compared here, so they are kept in sync.
+    async applyAuthChange(entry) {
+      if (!plainObject(entry) || !AUTH_KINDS.includes(entry.kind) || typeof entry.clientId !== "string" || typeof entry.cursor !== "string" || !AUTH_CURSOR.test(entry.cursor) || typeof entry.at !== "string" || !Number.isFinite(Date.parse(entry.at))) {
+        log("Auth change skipped: not a change entry.");
+        return "skipped";
+      }
+      const ours = !OWNER_KINDS.includes(entry.kind) && entry.admin !== true && entry.actorAccountId !== null;
+      if (ours) return "skipped";
+      if (!(await repository.integration(entry.clientId))) {
+        log("Auth change skipped: the integration is unknown to Portal.");
+        return "skipped";
+      }
+      const actor = typeof entry.actorAccountId === "string" && ACCOUNT_ID.test(entry.actorAccountId) ? entry.actorAccountId : SYSTEM;
+      const reason = typeof entry.reason === "string" && entry.reason ? [...entry.reason].slice(0, AUTH_REASON_MAX).join("") : null;
+      const applied = await appending(async (client) => {
+        const row = await repository.integrationForUpdate(entry.clientId, client);
+        if (!row || await repository.authChangeApplied(row.id, entry.cursor, entry.at, client)) return null;
+        const effect = authEffect(row, entry, now());
+        let superseded = false;
+        if (entry.kind === "resumed" && Object.keys(effect.fields).length) {
+          const latest = await repository.latestStatusAt(row.id, client);
+          superseded = latest !== null && Date.parse(latest) > Date.parse(entry.at);
+        }
+        const fields = superseded ? {} : effect.fields;
+        if (Object.keys(fields).length) await repository.updateIntegration(row.id, fields, client);
+        const after = { ...row, ...fields };
+        await repository.appendEvent({
+          stationId: row.stationId, integrationId: row.id, accountId: row.ownerAccount, actor, kind: effect.kind,
+          state: effectiveState(after, 0), reason,
+          details: {
+            authCursor: entry.cursor, authAt: entry.at, admin: entry.admin === true,
+            ...(after.state === "paused" && PAUSED_BY.includes(after.pausedBy) ? { pausedBy: after.pausedBy } : {}),
+            ...(superseded ? { superseded: true } : {})
+          }
+        }, client);
+        return { stationId: row.stationId, superseded };
+      });
+      if (!applied) return "skipped";
+      if (applied.superseded) log("Auth change recorded without its state change: the Portal has a newer one.");
+      changed(applied.stationId);
+      return "applied";
+    },
+
     notify: (stationId) => changed(stationId),
 
     // For tests: resolves once no push is in flight.
@@ -880,10 +1009,14 @@ export function createIntegrationService({
       while (pushes.size) await Promise.all([...pushes.values()].map((entry) => entry.done));
     },
 
+    // Newest first. The reader's own changes show as "you". An Agora.Build admin's change shows as Agora.Build's: the
+    // admin's account and their reason stay in the event, for the audit (spec §3.3.4).
     async history(accountId, id) {
       const { row } = await visible(accountId, id);
       const events = await repository.eventsFor(row.id);
-      return { events: events.map(({ at, kind, state, reason, actor }) => ({ at, kind, state, reason, actor: actor === accountId ? "you" : actor })) };
+      return { events: events.map(({ at, kind, state, reason, actor, details }) => details?.admin === true
+        ? { at, kind, state, reason: null, actor: AGORA_BUILD }
+        : { at, kind, state, reason, actor: actor === accountId ? "you" : actor }) };
     }
   };
 }
