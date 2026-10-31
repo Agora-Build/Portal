@@ -64,7 +64,8 @@ async function start(t, options = {}) {
     ...("integrationNudge" in options ? { integrationNudge: options.integrationNudge } : {}),
     ...("integrationStack" in options ? { integrationStack: options.integrationStack } : {}),
     ...("integrationRetryMs" in options ? { integrationRetryMs: options.integrationRetryMs } : {}),
-    ...("trustProxy" in options ? { trustProxy: options.trustProxy } : {})
+    ...("trustProxy" in options ? { trustProxy: options.trustProxy } : {}),
+    ...(options.log ? { log: (line) => { logs.push(line); options.log(line); } } : {})
   });
   await new Promise((done) => instance.listen(0, "127.0.0.1", done));
   t.after(() => close(instance));
@@ -639,26 +640,41 @@ test("without Stations and integrations the nudge answers 404", async (t) => {
   assert.equal((await fetch(app.base + "/auth/integration-changes", { method: "POST" })).status, 404);
 });
 
-test("the nudge refuses a body with 413 and Connection: close, without waiting for it", async (t) => {
+test("the nudge refuses a body with 413 and closes the connection at once, without waiting for the body", async (t) => {
   const nudges = [];
   const app = await start(t, { integrations: {}, integrationNudge: () => nudges.push(1) });
   const { port } = app.server.address();
-  // A raw request: Transfer-Encoding: chunked with a body the server must not wait for, then Content-Length: 5 with none sent.
+  // A raw request: Transfer-Encoding: chunked with a body the server must not wait for, then Content-Length: 5 with none
+  // sent. The connection is the server's to close; a client-side safety timer (1 s) only keeps a broken server from hanging the test.
   const raw = (head) => new Promise((resolve, reject) => {
+    const started = Date.now();
     const socket = connect(port, "127.0.0.1", () => socket.write(head));
     let received = "";
+    const safety = setTimeout(() => { socket.destroy(); }, 1000);
     socket.setEncoding("utf8");
     socket.on("data", (chunk) => { received += chunk; });
-    socket.on("close", () => resolve(received));
-    socket.on("error", reject);
-    setTimeout(() => { socket.destroy(); }, 1000).unref();
+    socket.on("close", () => { clearTimeout(safety); resolve({ received, elapsed: Date.now() - started }); });
+    socket.on("error", (error) => { clearTimeout(safety); reject(error); });
   });
   for (const head of ["POST /auth/integration-changes HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", "POST /auth/integration-changes HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\n"]) {
-    const received = await raw(head);
+    const { received, elapsed } = await raw(head);
     assert.match(received, /^HTTP\/1\.1 413 /, "the body is refused before it arrives");
     assert.match(received, /connection: close/i);
+    assert.ok(elapsed < 500, "the server closed the connection itself (" + elapsed + " ms)");
   }
   assert.deepEqual(nudges, []);
+});
+
+test("an unauthenticated nudge never looks up the session cookie or a guest", async (t) => {
+  const lookups = [];
+  const app = await start(t, { integrations: {}, integrationNudge: () => {} });
+  for (const name of ["browserToken", "guestToken", "session"]) {
+    const original = app.store[name];
+    app.store[name] = (...args) => { lookups.push(name); return original.apply(app.store, args); };
+  }
+  const answer = await fetch(app.base + "/auth/integration-changes", { method: "POST", headers: { Cookie: "house_session=" + "a".repeat(40), Authorization: "Bearer not-a-token" } });
+  assert.equal(answer.status, 204);
+  assert.deepEqual(lookups, [], "no session work for a nudge");
 });
 
 test("the nudge's allowance is per client address: behind TRUST_PROXY=1 the last X-Forwarded-For hop, never a leading one", async (t) => {
@@ -697,7 +713,7 @@ test("the stack starts when the server starts, without holding up the server, an
   await waitFor(() => reads() === 1, "the reader's first read");
   assert.deepEqual(calls, ["migrate", "migrate"]);
   assert.deepEqual(stackLogs, ["Portal database is not ready: ECONNREFUSED."]);
-  assert.deepEqual(stackLines(app), ["Stations and integrations did not start: error."], "a fixed message and a code, nothing from the error");
+  assert.deepEqual(stackLines(app), ["Stations and integrations did not start; trying again in 1 s."], "a fixed message and the delay, nothing from the error");
   // Started, it is not started again.
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.deepEqual(calls, ["migrate", "migrate"]);
@@ -720,12 +736,29 @@ test("closing the server stops the start's retries and closes the stack", async 
   const app = await start(t, { integrationStack: stack, integrationRetryMs: { first: 15, max: 15 } });
   await waitFor(() => calls.ready >= 3, "retries of the start");
   assert.ok(stackLines(app).length >= 3);
-  assert.ok(stackLines(app).every((line) => line === "Stations and integrations did not start: ECONNREFUSED."), "a fixed message and the code only");
+  assert.ok(stackLines(app).every((line) => /^Stations and integrations did not start \(ECONNREFUSED\)(; trying again in 1 s)?\.$/.test(line)), "a fixed message, the code and the delay only");
   await app.stop();
   await waitFor(() => calls.close === 1, "the stack's close");
   const settled = { ...calls, logs: stackLines(app).length };
   await new Promise((resolve) => setTimeout(resolve, 120));
   assert.deepEqual({ ...calls, logs: stackLines(app).length }, settled, "no start after the server closed");
+});
+
+test("a start that fails with a non-Error, or whose log throws, is still retried and never an unhandled rejection", async (t) => {
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  t.after(() => process.off("unhandledRejection", onUnhandled));
+  const reasons = [undefined, null, "down", { code: "x".repeat(200) + " secret" }];
+  let calls = 0;
+  const stack = { service: {}, ready: () => { calls += 1; return calls <= reasons.length ? Promise.reject(reasons[calls - 1]) : Promise.resolve(); }, nudge: () => {}, close: async () => {} };
+  let thrown = 0;
+  const app = await start(t, { integrationStack: stack, integrationRetryMs: { first: 10, max: 10 }, log: (line) => { if (line.startsWith("Stations and integrations did not start") && thrown < 2) { thrown += 1; throw new Error("the log failed"); } } });
+  await waitFor(() => calls === reasons.length + 1, "a retry after each failure");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(calls, reasons.length + 1, "started, then left alone");
+  assert.deepEqual(unhandled, []);
+  assert.ok(stackLines(app).every((line) => /^Stations and integrations did not start(; trying again in 1 s)?\.$/.test(line)), "no code that is not a plain code, nothing from the error: " + JSON.stringify(stackLines(app)));
 });
 
 test("close() stops reading Auth's change feed", async () => {

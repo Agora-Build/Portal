@@ -175,6 +175,24 @@ export function createAppServer(directory = root, options = {}) {
       const versioned = requestUrl.pathname.startsWith(API_V1);
       const path = versioned ? "/api/" + requestUrl.pathname.slice(API_V1.length) : requestUrl.pathname;
       if (versioned && !isBearerRoute(request.method + " " + path)) throw new AppError(404, "This API was not found. See https://github.com/Agora-Build/Portal/blob/main/docs/platform.md for the /api/v1 routes.");
+      if (path === CHANGES_NUDGE_PATH) {
+        // Auth's nudge after an integration change the Portal did not make (an Agora.Build admin's, or Auth's own;
+        // spec §3.3.4). It is answered before any cookie or session lookup, so an unauthenticated POST costs no store
+        // work. Server to server like the back-channel logout, so it is the other exemption from the same-origin
+        // checks below. It carries nothing and proves nothing: all it does is ask for a read of Auth's change feed over
+        // the Portal's own authenticated connection, and those reads are one at a time and at least a second apart
+        // however many nudges arrive (integrations/auth-changes.mjs), so a forged one costs no more than an early
+        // poll. No body is ever read.
+        const done = (status, headers = {}) => { response.writeHead(status, { "Cache-Control": "no-store", ...headers }).end(); };
+        if (request.method !== "POST") { done(405, { Allow: "POST" }); return; }
+        try { limit("nudge:" + clientAddress(request), NUDGES_PER_MINUTE, 60000); }
+        catch { done(429, { "Retry-After": "60" }); return; }
+        if (request.headers["transfer-encoding"] !== undefined || (request.headers["content-length"] ?? "0") !== "0") { done(413, { Connection: "close" }); return; }
+        if (!integrations) { done(404); return; }
+        integrations.nudge();
+        done(204);
+        return;
+      }
       const bearer = request.headers.authorization?.startsWith("Bearer ") ? request.headers.authorization.slice(7).trim() : "";
       const secure = siteUrl.startsWith("https:") || Boolean(request.socket.encrypted);
       const sessionName = secure ? "__Host-house_session" : "house_session";
@@ -262,7 +280,7 @@ export function createAppServer(directory = root, options = {}) {
         return;
       }
       if (path === "/auth/backchannel-logout") {
-        // A server-to-server POST from the IdP, so it is the one exemption from the same-origin checks below.
+        // A server-to-server POST from the IdP, so it is one of the exemptions from the same-origin checks below.
         if (request.method !== "POST") { response.writeHead(405, { Allow: "POST" }).end("Method not allowed"); return; }
         let status = 200;
         try {
@@ -276,23 +294,6 @@ export function createAppServer(directory = root, options = {}) {
           log("Back-channel logout refused: " + (error instanceof TokenError ? error.reason : "request") + ".");
         }
         response.writeHead(status, { "Cache-Control": "no-store" }).end();
-        return;
-      }
-      if (path === CHANGES_NUDGE_PATH) {
-        // Auth's nudge after an integration change the Portal did not make (an Agora.Build admin's, or Auth's own;
-        // spec §3.3.4). Server to server like the back-channel logout, so it is the other exemption from the
-        // same-origin checks below. It carries nothing and proves nothing: all it does is ask for a read of Auth's
-        // change feed over the Portal's own authenticated connection, and those reads are one at a time and at least a
-        // second apart however many nudges arrive (integrations/auth-changes.mjs), so a forged one costs no more than an
-        // early poll. No body is ever read.
-        const done = (status, headers = {}) => { response.writeHead(status, { "Cache-Control": "no-store", ...headers }).end(); };
-        if (request.method !== "POST") { done(405, { Allow: "POST" }); return; }
-        try { limit("nudge:" + clientAddress(request), NUDGES_PER_MINUTE, 60000); }
-        catch { done(429, { "Retry-After": "60" }); return; }
-        if (request.headers["transfer-encoding"] !== undefined || (request.headers["content-length"] ?? "0") !== "0") { done(413, { Connection: "close" }); return; }
-        if (!integrations) { done(404); return; }
-        integrations.nudge();
-        done(204);
         return;
       }
       if (path.startsWith("/api/")) {
@@ -509,21 +510,26 @@ export function createAppServer(directory = root, options = {}) {
   spaceSweep.unref();
   server.on("close", () => clearInterval(spaceSweep));
   // The integration stack starts when the server starts listening, in the background, so the reader of Auth's change
-  // feed and the built-in Station sync do not wait for a Station's first request. A failed start is logged by its code
-  // only and tried again after 5 s, 10 s, 20 s … up to a minute (integrationRetryMs is for tests), until it succeeds or
-  // the server closes. The stack's ready() keeps its own log of why; nudges never start it (see the nudge route).
+  // feed and the built-in Station sync do not wait for a Station's first request. A failed start is logged (a fixed
+  // message, the error's code when it has a plain one, and the delay) and tried again after 5 s, 10 s, 20 s … up to a
+  // minute (integrationRetryMs is for tests), until it succeeds or the server closes. The stack's ready() keeps its own
+  // log of why; nudges never start it (see the nudge route). The retry is scheduled before the log line, so a log that
+  // throws cannot end the retries, and nothing here can become an unhandled rejection.
   let startRetry;
   const retryMs = { first: 5000, max: 60000, ...options.integrationRetryMs };
   async function startIntegrations(failures = 0) {
     try { await integrations.ready(); }
     catch (error) {
-      log("Stations and integrations did not start: " + (error.code || "error") + ".");
-      if (!server.listening) return;
-      startRetry = setTimeout(() => { if (server.listening) startIntegrations(failures + 1); }, Math.min(retryMs.max, retryMs.first * 2 ** failures));
+      const code = error?.code;
+      const reason = typeof code === "string" && /^[A-Za-z0-9_]{1,40}$/.test(code) ? " (" + code + ")" : "";
+      if (!server.listening) { log("Stations and integrations did not start" + reason + "."); return; }
+      const delay = Math.min(retryMs.max, retryMs.first * 2 ** failures);
+      startRetry = setTimeout(() => { if (server.listening) startIntegrations(failures + 1).catch(() => {}); }, delay);
       startRetry.unref();
+      log("Stations and integrations did not start" + reason + "; trying again in " + Math.ceil(delay / 1000) + " s.");
     }
   }
-  if (integrations) server.once("listening", () => { startIntegrations(); });
+  if (integrations) server.once("listening", () => { startIntegrations().catch(() => {}); });
   server.on("close", () => { clearTimeout(startRetry); integrations?.close().catch(() => {}); });
   return server;
 }
