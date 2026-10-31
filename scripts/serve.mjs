@@ -16,6 +16,7 @@ import { createLedger } from "./ledger.mjs";
 import { createBilling } from "./billing.mjs";
 import { ConnectError, createConnections } from "./connections.mjs";
 import { createPostgresPersistence } from "./persistence.mjs";
+import { effectivePlan } from "./plans.mjs";
 import { createSignaling, signalingConfig } from "./spaces/signaling.mjs";
 import { createSpaces, loadWorlds } from "./spaces/service.mjs";
 import { handleSpaces } from "./spaces/routes.mjs";
@@ -129,10 +130,13 @@ export function createAppServer(directory = root, options = {}) {
   const worlds = options.worlds || loadWorlds(directory);
   const themes = options.themes || loadThemes(directory);
   const signaling = options.signaling || createSignaling(signalingConfig());
-  const spaces = options.spaces || createSpaces({ store, worlds, signaling, calls, secret: options.channelSecret ?? signalingConfig().secret, admins: platformAdmins(process.env.PLATFORM_ADMINS, log), plazaCapacity: options.plazaCapacity });
+  const admins = platformAdmins(process.env.PLATFORM_ADMINS, log);
+  const spaces = options.spaces || createSpaces({ store, worlds, signaling, calls, secret: options.channelSecret ?? signalingConfig().secret, admins, plazaCapacity: options.plazaCapacity });
   // Stations and integrations: a ready service (tests), null (off), or built from DATABASE_URL; without it every
   // integration route answers 503. integrationOptions ({ stationFetch, pushFetch }) are for the end-to-end tests.
-  const integrations = "integrations" in options ? (options.integrations && readyIntegrations(options.integrations)) : integrationsFromEnv(process.env, { ...options.integrationOptions, idp, log });
+  const integrations = "integrations" in options ? (options.integrations && readyIntegrations(options.integrations)) : integrationsFromEnv(process.env, { ...options.integrationOptions, idp, log, admins });
+  // The account's plan (scripts/plans.mjs), for the integration limits on the built-in Station.
+  const planOf = async (accountId) => effectivePlan((await store.snapshot()).accounts.find((account) => account.id === accountId), clock());
   const windows = new Map();
   const scanning = new Set();
   const radarHours = Math.max(1, Number(process.env.RADAR_INTERVAL_HOURS) || 24);
@@ -429,7 +433,7 @@ export function createAppServer(directory = root, options = {}) {
           json(response, 200, { result: await scan(person) });
         } else if (path === "/api/rooms" || path.startsWith("/api/rooms/")) throw new AppError(410, "Meeting rooms are now Stoa spaces. Start one from the Stoa.");
         else if (integrationPath(path)) {
-          const handled = await handleIntegrations({ path, method: request.method, url: requestUrl, read: () => body(request), service: integrations && await integrations.ready(), caller, scoped, invalidToken, portalUser, idToken: () => store.sessionIdToken(token), limit });
+          const handled = await handleIntegrations({ path, method: request.method, url: requestUrl, read: () => body(request), service: integrations && await integrations.ready(), caller, scoped, invalidToken, portalUser, idToken: () => store.sessionIdToken(token), limit, planOf });
           if (!handled) throw new AppError(404, "This page or service was not found.");
           json(response, handled.status, handled.body);
         } else {

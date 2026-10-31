@@ -15,7 +15,7 @@ const R9 = "a".repeat(64);
 
 const publicJwk = () => generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey.export({ format: "jwk" });
 
-async function setup(t, { wrap = (repository) => repository } = {}) {
+async function setup(t, { wrap = (repository) => repository, admins = [] } = {}) {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
   const repository = createRepository(db);
@@ -28,7 +28,7 @@ async function setup(t, { wrap = (repository) => repository } = {}) {
   let counter = 0;
   const service = createIntegrationService({
     repository: wrap(repository), db, manage, stationFetch, exchange: async () => ({}), now: () => clock.now, log: (line) => logs.push(line),
-    challengeValue: () => "proof-value-" + (++counter), notify: (stationId) => notified.push(stationId)
+    challengeValue: () => "proof-value-" + (++counter), notify: (stationId) => notified.push(stationId), admins
   });
   async function register(accountId = OWNER, origin = "https://one.example") {
     const challenge = await service.createChallenge(accountId, origin);
@@ -370,4 +370,110 @@ test("history lists events newest first, showing the reader as you", async (t) =
   assert.deepEqual(Object.keys(mine.events[0]).sort(), ["actor", "at", "kind", "reason", "state"]);
   assert.deepEqual((await s.service.history(OWNER, id)).events.map((event) => event.actor), ["you", MEMBER, MEMBER]);
   await assert.rejects(s.service.history(STRANGER, id), refused(404, "not_found"));
+});
+
+const ADMIN = "ab" + "0".repeat(25) + "4";
+const PLAN_MESSAGE = (n) => "Your plan allows " + n + " integrations on the built-in Station. Revoke one, upgrade, or use your own Station.";
+async function builtIn(s, settings = {}) {
+  const built = s.manage.seedBuiltIn({ integrations: true, admins: [ADMIN], ...settings });
+  await s.service.stations(OWNER);
+  return built;
+}
+const onBuiltIn = (s, built, accountId = OWNER, plan, fields = {}) => s.service.createIntegration(accountId, { stationId: built.id, name: "Hosted app", scopes: [], publicJwk: publicJwk(), ...fields }, plan ? { plan } : undefined);
+
+test("while the built-in Station's integrations are off, creating one there is 409 not_supported, before Auth", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const built = await builtIn(s, { integrations: false });
+  const calls = s.authCalls("createIntegration");
+  await assert.rejects(onBuiltIn(s, built), refused(409, "not_supported"));
+  assert.equal(s.authCalls("createIntegration"), calls, "Auth is not asked");
+  // Turned off at Auth after the Portal last listed it: Auth's own refusal reads the same.
+  built.integrations = true;
+  await s.service.stations(OWNER);
+  built.integrations = false;
+  await assert.rejects(onBuiltIn(s, built), (error) => refused(409, "not_supported")(error) && error.message === "Integrations aren't available on the built-in Station yet.");
+  assert.equal(s.authCalls("createIntegration"), calls + 1);
+});
+
+test("with integrations on, any account creates one on the built-in Station, owned by it and seen only by it", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const built = await builtIn(s);
+  const theirs = await onBuiltIn(s, built, STRANGER);
+  assert.deepEqual([theirs.stationId, theirs.stationOrigin, theirs.role, theirs.state], [built.id, "https://station.agora.test", "owner", "awaiting_approval"]);
+  assert.equal(s.record(theirs.id).owner, STRANGER);
+  assert.equal((await s.service.integrations(OWNER)).integrations.some((entry) => entry.id === theirs.id), false);
+  await assert.rejects(s.service.pause(OWNER, theirs.id), refused(404, "not_found"));
+  await s.service.approve(STRANGER, theirs.id, { r9Svc: R9 });
+  assert.equal((await s.service.pause(STRANGER, theirs.id)).state, "paused");
+  assert.equal((await s.service.resume(STRANGER, theirs.id)).state, "provisioning");
+});
+
+test("plan limits on the built-in Station: Basic 4, Premium 10, Principal and Fellow none; revoked and expired ones don't count", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const built = await builtIn(s);
+  const ids = [];
+  const short = (await onBuiltIn(s, built, OWNER, "basic", { expiresInDays: 1 })).id;
+  for (let i = 0; i < 3; i += 1) ids.push((await onBuiltIn(s, built, OWNER, "basic")).id);
+  const calls = s.authCalls("createIntegration");
+  await assert.rejects(onBuiltIn(s, built, OWNER, "basic"), (error) => refused(403, "plan_limit")(error) && error.message === PLAN_MESSAGE(4) && error.details.limit === 4);
+  await assert.rejects(onBuiltIn(s, built, OWNER), refused(403, "plan_limit"), "no plan given counts as Basic");
+  assert.equal(s.authCalls("createIntegration"), calls, "refused before Auth");
+  for (let i = 0; i < 5; i += 1) await s.create(OWNER); // custom Stations are never capped
+  await s.service.pause(OWNER, ids[0]);
+  await assert.rejects(onBuiltIn(s, built, OWNER, "basic"), refused(403, "plan_limit"), "a paused one still counts");
+  await s.service.revoke(OWNER, ids[1]);
+  ids.push((await onBuiltIn(s, built, OWNER, "basic")).id); // a revoked one frees a place
+  await assert.rejects(onBuiltIn(s, built, OWNER, "basic"), refused(403, "plan_limit"));
+  s.clock.now += 2 * DAY;
+  ids.push((await onBuiltIn(s, built, OWNER, "basic")).id); // so does an expired one
+  await assert.rejects(onBuiltIn(s, built, OWNER, "basic"), refused(403, "plan_limit"));
+  for (let i = 0; i < 6; i += 1) ids.push((await onBuiltIn(s, built, OWNER, "premium")).id);
+  await assert.rejects(onBuiltIn(s, built, OWNER, "premium"), (error) => refused(403, "plan_limit")(error) && error.message === PLAN_MESSAGE(10));
+  for (const plan of ["principal", "fellow"]) ids.push((await onBuiltIn(s, built, OWNER, plan)).id);
+  // After a downgrade the existing ones keep working; new ones are refused until the account is under the limit.
+  const live = (await s.service.integrations(OWNER)).integrations.filter((entry) => entry.stationId === built.id && !["revoked", "expired"].includes(entry.state));
+  assert.equal(live.length, 12);
+  assert.ok(live.every((entry) => s.record(entry.id).status === (entry.state === "paused" ? "paused" : "active")));
+  assert.equal((await s.repository.integration(short)).state, "awaiting_approval", "expired is shown, not stored");
+  await assert.rejects(onBuiltIn(s, built, OWNER, "basic"), refused(403, "plan_limit"));
+  assert.equal((await onBuiltIn(s, built, MEMBER, "basic")).role, "owner", "each account counts its own");
+});
+
+test("two creations racing on the built-in Station can't both pass the plan limit", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const built = await builtIn(s);
+  for (let i = 0; i < 3; i += 1) await onBuiltIn(s, built, OWNER, "basic");
+  const results = await Promise.allSettled([onBuiltIn(s, built, OWNER, "basic"), onBuiltIn(s, built, OWNER, "basic")]);
+  assert.deepEqual(results.map((result) => result.status).sort(), ["fulfilled", "rejected"]);
+  assert.equal(results.find((result) => result.status === "rejected").reason.details.code, "plan_limit");
+});
+
+test("Agora.Build admins see others' integrations on the built-in Station and may pause or revoke them, nothing else", async (t) => {
+  const s = await setup(t, { admins: [ADMIN] });
+  if (!s) return;
+  const built = await builtIn(s);
+  const theirs = await onBuiltIn(s, built, OWNER);
+  const other = await onBuiltIn(s, built, MEMBER);
+  const custom = await s.create(OWNER);
+  assert.deepEqual((await s.service.integrations(ADMIN)).integrations.map((entry) => [entry.id, entry.role]), [[theirs.id, "station_admin"], [other.id, "station_admin"]]);
+  assert.deepEqual((await s.service.integrations(STRANGER)).integrations, [], "nobody else sees them");
+  await assert.rejects(s.service.pause(ADMIN, custom.id), refused(404, "not_found"), "no rights on custom Stations");
+  await assert.rejects(s.service.pause(STRANGER, theirs.id), refused(404, "not_found"));
+  await s.service.approve(OWNER, theirs.id, { r9Svc: R9 });
+  const paused = await s.service.pause(ADMIN, theirs.id);
+  assert.deepEqual([paused.state, paused.role], ["paused", "station_admin"]);
+  assert.equal(s.record(theirs.id).status, "paused", "Auth accepted the admin's pause");
+  for (const call of [() => s.service.resume(ADMIN, theirs.id), () => s.service.renew(ADMIN, theirs.id, { expiresInDays: 10 }), () => s.service.settings(ADMIN, theirs.id, { quotaPerSecond: 5 }), () => s.service.rotateKey(ADMIN, theirs.id, { publicJwk: publicJwk() })]) {
+    await assert.rejects(call(), refused(403, "forbidden"));
+  }
+  await assert.rejects(s.service.approve(ADMIN, other.id, { r9Svc: R9 }), refused(404, "not_found"), "never approves");
+  assert.equal((await s.service.revoke(ADMIN, other.id)).state, "revoked");
+  assert.deepEqual((await s.events()).filter((event) => event.actor === ADMIN).map((event) => [event.kind, event.account_id, event.reason]), [
+    ["integration_paused", OWNER, "station_admin"], ["integration_revoked", MEMBER, "station_admin"]
+  ]);
+  assert.ok((await s.service.history(ADMIN, theirs.id)).events.length > 0);
 });

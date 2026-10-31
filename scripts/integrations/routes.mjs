@@ -12,6 +12,7 @@ const ID = "[A-Za-z0-9_-]{1,64}";
 const STATION = new RegExp("^/api/stations/(" + ID + ")(?:/(members|read-token)(?:/([^/]+))?)?$");
 const INTEGRATION = new RegExp("^/api/integrations/(" + ID + ")/(keys|pause|resume|revoke|renew|settings|events|approval)$");
 const PARTITION_INTERVAL = 3600000;
+const BUILT_IN_SYNC_INTERVAL = 3600000;
 // Per-account limits on routes that call Auth: each list is limited on its own, and all changes share one budget.
 // Registering a Station and creating an integration keep their own, stricter limits.
 const LISTS_PER_MINUTE = 60;
@@ -25,20 +26,25 @@ export const readyIntegrations = (service) => ({ service, ready: async () => ser
 // The service over `db`. ready() migrates and creates the event partitions before the first request, once; a failure
 // answers 503 and the next request tries again. The partitions are then kept up hourly. `stationFetch` (proof of
 // control) and `pushFetch` (change nudges) are only given by tests; production uses the guarded defaults.
-export function createIntegrationStack({ db, manage, idp, log, stationFetch = createStationFetch(), pushFetch }) {
+export function createIntegrationStack({ db, manage, idp, log, stationFetch = createStationFetch(), pushFetch, admins = [] }) {
   const exchange = (idToken, origin) => idp ? idp.exchangeForStation(idToken, origin) : Promise.reject(new TokenError(503, "unavailable"));
-  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, pushFetch, exchange, log });
+  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, pushFetch, exchange, log, admins });
   let pending = null;
   let prepared = false;
   const partitions = setInterval(() => {
     if (prepared) db.ensureEventPartitions().catch((error) => log("Integration event partitions failed: " + (error.code || "error") + "."));
   }, PARTITION_INTERVAL);
   partitions.unref();
+  // The built-in Stations, synced from Auth once the stack is ready and then hourly (P17); a failed sync is logged by
+  // syncBuiltIn and tried again at the next interval.
+  const builtInSync = setInterval(() => { if (prepared) service.syncBuiltIn(); }, BUILT_IN_SYNC_INTERVAL);
+  builtInSync.unref();
   function ready() {
     pending ||= (async () => {
       await db.migrate();
       await db.ensureEventPartitions();
       prepared = true;
+      await service.syncBuiltIn();
       return service;
     })().catch((error) => {
       pending = null;
@@ -47,12 +53,12 @@ export function createIntegrationStack({ db, manage, idp, log, stationFetch = cr
     });
     return pending;
   }
-  return { service, ready, close: async () => { clearInterval(partitions); await db.close(); } };
+  return { service, ready, close: async () => { clearInterval(partitions); clearInterval(builtInSync); await db.close(); } };
 }
 
 // The stack from the environment: only with DATABASE_URL, and null (logged once, by setting name) when Auth's settings
 // are missing or invalid. Tests may pass `stationFetch` and `pushFetch` (see createIntegrationStack).
-export function integrationsFromEnv(env, { idp, log, stationFetch, pushFetch }) {
+export function integrationsFromEnv(env, { idp, log, stationFetch, pushFetch, admins }) {
   if (!env.DATABASE_URL) return null;
   let manage;
   try {
@@ -63,13 +69,13 @@ export function integrationsFromEnv(env, { idp, log, stationFetch, pushFetch }) 
     log("Stations and integrations are unavailable: " + (error instanceof TypeError ? error.message : "their settings are invalid") + ".");
     return null;
   }
-  return createIntegrationStack({ db: createDatabase(env.DATABASE_URL, { log }), manage, idp, log, stationFetch, pushFetch });
+  return createIntegrationStack({ db: createDatabase(env.DATABASE_URL, { log }), manage, idp, log, stationFetch, pushFetch, admins });
 }
 
 // Maps HTTP requests to the integration service. Returns null when the request is not an integration route. `caller`
 // is the verified bearer (only ever on the v1 routes; serve.mjs refuses it elsewhere), `scoped(scope)` checks its scope
 // and returns its account, and `idToken()` reads the browser session's ID token.
-export async function handleIntegrations({ path, method, url, read, service, caller, scoped, invalidToken, portalUser, idToken, limit }) {
+export async function handleIntegrations({ path, method, url, read, service, caller, scoped, invalidToken, portalUser, idToken, limit, planOf = async () => "basic" }) {
   if (!integrationPath(path)) return null;
   if (!service) throw new AppError(503, "Stations and integrations need the Portal database.");
   const ok = (body) => ({ status: 200, body });
@@ -112,7 +118,7 @@ export async function handleIntegrations({ path, method, url, read, service, cal
   }
   if (path === "/api/integrations" && method === "POST") {
     const accountId = await portalUser(); limit("integrations:" + accountId, 20, 60000);
-    return { status: 201, body: await service.createIntegration(accountId, await read()) };
+    return { status: 201, body: await service.createIntegration(accountId, await read(), { plan: await planOf(accountId) }) };
   }
   const station = STATION.exec(path);
   if (station) {

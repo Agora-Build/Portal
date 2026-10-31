@@ -57,7 +57,7 @@ async function start(t, options = {}) {
 }
 
 // A real service on the test database; null (and the test skipped) without PORTAL_TEST_DATABASE_URL.
-async function stack(t) {
+async function stack(t, { admins = [] } = {}) {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
   const manage = fakeManage();
@@ -67,7 +67,7 @@ async function stack(t) {
   const pushFetch = { async post(url, body) { pushes.push({ url, body }); return { status: 202 }; } };
   const exchanges = [];
   const exchange = async (idToken, origin) => { exchanges.push({ idToken, origin }); return { accessToken: "station-read-token", expiresIn: 300 }; };
-  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, pushFetch, exchange, log: () => {} });
+  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, pushFetch, exchange, log: () => {}, admins });
   t.after(() => service._pushesIdle());
   return { db, manage, served, service, exchanges, pushes };
 }
@@ -416,4 +416,55 @@ test("a read token for a Station comes from exchanging the session's ID token", 
   const bearer = await app.fake.issueAccessToken({ sub: owner.sub, scope: "credits" });
   const me = await (await call(app.base, "/api/v1/me", { bearer })).json();
   assert.equal("integrationsAvailable" in me, false, "the bearer /api/me shape is unchanged");
+});
+
+test("creating an integration on the built-in Station uses the account's Portal plan", async (t) => {
+  const integrations = await stack(t);
+  if (!integrations) return;
+  const built = integrations.manage.seedBuiltIn({ integrations: true });
+  const app = await start(t, { integrations: integrations.service });
+  const owner = await signIn(app);
+  assert.equal((await call(app.base, "/api/stations", { cookie: owner.cookie })).status, 200);
+  const create = () => call(app.base, "/api/integrations", { cookie: owner.cookie, method: "POST", data: { stationId: built.id, name: "Hosted", scopes: ["agent.view"], publicJwk: publicJwk() } });
+  const account = (state) => state.accounts.find((entry) => entry.id === owner.sub);
+  for (let i = 0; i < 4; i += 1) assert.equal((await create()).status, 201);
+  const basic = await create();
+  assert.deepEqual([basic.status, (await basic.json()).code], [403, "plan_limit"]);
+  await app.store.transaction((state) => { account(state).assignedPlan = "fellow"; });
+  assert.equal((await create()).status, 201, "a Fellow has no cap");
+  await app.store.transaction((state) => { account(state).assignedPlan = null; account(state).subscription = { status: "active", currentPeriodEnd: Math.floor(Date.now() / 1000) + 86400 }; });
+  for (let i = 0; i < 5; i += 1) assert.equal((await create()).status, 201, "Premium allows 10");
+  const premium = await create();
+  assert.deepEqual([premium.status, await premium.json()], [403, { error: "Your plan allows 10 integrations on the built-in Station. Revoke one, upgrade, or use your own Station.", code: "plan_limit", limit: 10 }]);
+  await integrations.service._pushesIdle();
+});
+
+test("the stack hands the platform admins to the service", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
+  const owner = accountId();
+  const admin = accountId();
+  const manage = fakeManage();
+  const built = manage.seedBuiltIn({ integrations: true, admins: [admin] });
+  const integrations = createIntegrationStack({ db, manage, idp: null, log: () => {}, admins: [admin], pushFetch: { async post() { return { status: 202 }; } } });
+  await integrations.service.stations(owner);
+  const created = await integrations.service.createIntegration(owner, { stationId: built.id, name: "Hosted", scopes: [], publicJwk: publicJwk() });
+  assert.deepEqual((await integrations.service.integrations(admin)).integrations.map((entry) => [entry.id, entry.role]), [[created.id, "station_admin"]]);
+  await integrations.service._pushesIdle();
+});
+
+test("the stack syncs the built-in Stations from Auth once when it becomes ready, as the first platform admin", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
+  const admin = accountId();
+  const manage = fakeManage();
+  const built = manage.seedBuiltIn({ admins: [admin] });
+  const integrations = createIntegrationStack({ db, manage, idp: null, log: () => {}, admins: [admin] });
+  const listings = () => manage.calls.filter((name) => name === "stations").length;
+  assert.equal(listings(), 0, "nothing before the first request");
+  await integrations.ready();
+  assert.equal(listings(), 1);
+  assert.deepEqual((await db.pool.query("SELECT id, built_in, report_client_id FROM stations")).rows, [{ id: built.id, built_in: true, report_client_id: built.reportClientId }]);
+  await integrations.ready();
+  assert.equal(listings(), 1, "memoised with ready()");
 });
