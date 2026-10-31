@@ -206,7 +206,8 @@ async function startBuiltInStation() {
       const chunks = [];
       request.on("data", (chunk) => chunks.push(chunk));
       request.on("end", () => {
-        nudges.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        const text = Buffer.concat(chunks).toString("utf8");
+        try { nudges.push(JSON.parse(text)); } catch { nudges.push({ malformed: text }); }
         response.writeHead(202).end();
       });
       return;

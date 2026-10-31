@@ -31,6 +31,9 @@ const manage = (method, path, body) => fetch(stack.issuer + "/manage/v1" + path,
 const publicJwk = async () => exportJWK((await generateKeyPair("ES256")).publicKey);
 const create = async (browser, name = "Hosted app") => json(await browser.api("/api/integrations", { method: "POST", json: { stationId: built.id, name, scopes: SCOPES, publicJwk: await publicJwk() } }));
 const feed = async (cursor, token) => json(await bearer(stack, "/api/v1/stations/changes?cursor=" + cursor, token));
+// Who Auth recorded for an integration's status change (its integration_audit rows), as [account, actor] pairs.
+const auditAtAuth = async (clientId, event) => (await stack.auth.db.query("SELECT account_id, actor_account_id FROM integration_audit WHERE client_id = $1 AND event = $2 ORDER BY id", [clientId, event])).rows.map((row) => [row.account_id, row.actor_account_id]);
+// The same change as the operator's `platform-admin.mjs assign-role` (assignedPlan, null for Basic), in process.
 const setPlan = (accountId, change) => stack.store.transaction((data) => { Object.assign(data.accounts.find((account) => account.id === accountId), change); });
 
 describe("The built-in Station against the real auth.agora.build", { skip: skip || false }, () => {
@@ -151,11 +154,12 @@ describe("The built-in Station against the real auth.agora.build", { skip: skip 
     assert.ok(seen.some((entry) => entry.id === state.boFirst.id && entry.role === "station_admin"));
     assert.ok(seen.every((entry) => entry.role === "station_admin"));
     const bosView = (await (await state.bo.browser.api("/api/integrations")).json()).integrations;
-    assert.ok(bosView.every((entry) => entry.role === "owner"), "Bo sees only his own");
+    assert.ok(bosView.length > 0 && bosView.every((entry) => entry.role === "owner"), "Bo sees only his own");
     const nudgesBefore = built.nudges.length;
     const paused = await json(await cy.browser.api("/api/integrations/" + state.boFirst.id + "/pause", { method: "POST", json: {} }));
     assert.deepEqual([paused.status, paused.body.state, paused.body.role], [200, "paused", "station_admin"]);
     assert.equal((await manage("GET", "/integrations?account=" + state.boId)).body.integrations.find((entry) => entry.clientId === state.boFirst.id).status, "paused", "paused at Auth");
+    assert.deepEqual(await auditAtAuth(state.boFirst.id, "integration_paused"), [[state.boId, built.adminId]], "Auth recorded the admin as the actor on Bo's integration");
     assert.equal((await cy.browser.api("/api/integrations/" + state.boFirst.id + "/resume", { method: "POST", json: {} })).status, 403, "only the owner resumes");
     const refused = await manage("PATCH", "/integrations/" + state.adaFirst.id, { status: "paused", actor: state.boId });
     assert.deepEqual([refused.status, refused.body.error], [403, "forbidden"], "Auth refuses a non-admin pausing another's integration");
@@ -163,7 +167,8 @@ describe("The built-in Station against the real auth.agora.build", { skip: skip 
     assert.deepEqual([refusedRevoke.status, refusedRevoke.body.error], [403, "forbidden"], "and revoking it");
     const revoked = await json(await cy.browser.api("/api/integrations/" + state.adaFirst.id + "/revoke", { method: "POST", json: {} }));
     assert.deepEqual([revoked.status, revoked.body.state], [200, "revoked"]);
-    assert.equal((await manage("GET", "/integrations?account=" + state.adaId)).body.integrations.find((entry) => entry.clientId === state.adaFirst.id).status, "revoked", "revoked at Auth, with the admin as actor");
+    assert.equal((await manage("GET", "/integrations?account=" + state.adaId)).body.integrations.find((entry) => entry.clientId === state.adaFirst.id).status, "revoked", "revoked at Auth");
+    assert.deepEqual(await auditAtAuth(state.adaFirst.id, "integration_revoked"), [[state.adaId, built.adminId]], "Auth recorded the admin as the actor on Ada's integration");
     assert.equal((await state.bo.browser.api("/api/integrations/" + state.adaFirst.id + "/pause", { method: "POST", json: {} })).status, 404, "an ordinary account can't find another's integration");
     assert.ok(await eventually(() => built.nudges.length > nudgesBefore), "the changes were pushed to the Station");
     for (const value of Object.values(stack.secrets)) assert.ok(!stack.logs.join("\n").includes(value), "no secret in the Portal log");
