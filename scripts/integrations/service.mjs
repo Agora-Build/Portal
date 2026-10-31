@@ -341,6 +341,11 @@ export function createIntegrationService({
         continue;
       }
       const existing = await repository.station(entry.id);
+      // A built-in Station is only ever reconciled as one: it never gains an owner or members here.
+      if (existing?.builtIn) {
+        log("Built-in Station listed by Auth as a custom Station: left as it is.");
+        continue;
+      }
       // Auth still lists a Station Portal has removed (its integrations already revoked here); restoring it is left to
       // an operator, so it is logged.
       if (existing?.status === "removed") log("Station listed by Auth is removed in Portal: not restored.");

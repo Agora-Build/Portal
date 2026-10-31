@@ -529,6 +529,19 @@ test("every account lists the built-in Station first, with no owner or report cl
   assert.equal((await s.events("station_removed")).length, 0);
 });
 
+
+test("a built-in Station Auth lists as a custom one is left as it is (no owner, no members)", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const built = s.manage.seedBuiltIn();
+  await s.service.stations(OWNER);
+  Object.assign(built, { builtIn: false, access: "members", owner: OWNER, members: [{ account: MEMBER }] });
+  await s.service.stations(MEMBER);
+  assert.deepEqual(await s.repository.currentMembers(built.id), [], "nobody is made a member");
+  const row = await s.repository.station(built.id);
+  assert.deepEqual([row.builtIn, row.ownerAccount, row.status], [true, null, "active"]);
+  assert.ok(s.logs.includes("Built-in Station listed by Auth as a custom Station: left as it is."));
+});
 test("the built-in Station follows Auth's integrations setting and name on every listing", async (t) => {
   const s = await setup(t);
   if (!s) return;
