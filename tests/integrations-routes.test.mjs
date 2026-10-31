@@ -15,6 +15,7 @@ import { createIdp } from "../scripts/idp.mjs";
 import { createRepository } from "../scripts/integrations/repository.mjs";
 import { createIntegrationService } from "../scripts/integrations/service.mjs";
 import { createIntegrationStack, integrationsFromEnv } from "../scripts/integrations/routes.mjs";
+import { ManageError } from "../scripts/integrations/auth-manage.mjs";
 import { accountId, createFakeIdp } from "./helpers/fake-idp.mjs";
 import { BUILT_IN_REPORT_CLIENT, fakeManage } from "./helpers/fake-manage.mjs";
 import { testDatabase } from "./helpers/test-db.mjs";
@@ -491,6 +492,23 @@ test("the stack syncs the built-in Stations from Auth once when it becomes ready
   assert.equal(listings(), 1, "memoised with ready()");
 });
 
+
+test("the stack is ready even when the first built-in sync fails, retries it a minute later, and close() stops the syncs", async () => {
+  const db = { async migrate() { return []; }, async ensureEventPartitions() { return []; }, async close() {} };
+  const manage = fakeManage();
+  let listings = 0;
+  manage.stations = async () => { listings += 1; throw new ManageError(503, "unavailable"); };
+  const logs = [];
+  const integrations = createIntegrationStack({ db, manage, idp: null, log: (line) => logs.push(line), admins: [accountId()], builtInSyncAfter: { ok: 3600000, failed: 20 } });
+  assert.equal(typeof (await integrations.ready()).stations, "function", "ready despite Auth refusing the listing");
+  assert.deepEqual([listings, logs], [1, ["Built-in Station sync failed: unavailable."]]);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.ok(listings >= 2, "a failed sync is retried soon, not an hour later");
+  await integrations.close();
+  const after = listings;
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(listings, after, "no sync after close()");
+});
 test("the built-in Station's own report token reports and reads a feed of every integration on it, and only those", async (t) => {
   const admin = accountId();
   const integrations = await stack(t, { admins: [admin] });
