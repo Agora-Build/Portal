@@ -495,6 +495,32 @@ test("renewing an expired integration races creation for the last place under th
   assert.equal(results.find((result) => result.status === "rejected").reason.details.code, "plan_limit");
 });
 
+
+test("a renewal judged live just before expiry and a creation just after it can't both pass the plan limit", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const built = await builtIn(s);
+  const soon = await onBuiltIn(s, built, OWNER, "basic", { expiresInDays: 1 });
+  for (let i = 0; i < 3; i += 1) await onBuiltIn(s, built, OWNER, "basic");
+  const expiry = new Date(soon.expiresAt).getTime();
+  // Auth holds the renewal until released, while the clock passes the expiry.
+  const change = s.manage.changeIntegration;
+  let reached;
+  let release;
+  const atAuth = new Promise((resolve) => { reached = resolve; });
+  const held = new Promise((resolve) => { release = resolve; });
+  s.manage.changeIntegration = async (...args) => { reached(); await held; return change.apply(s.manage, args); };
+  s.clock.now = expiry - 1;
+  const renewing = s.service.renew(OWNER, soon.id, { expiresInDays: 30 }, { plan: "basic" });
+  await atAuth;
+  s.clock.now = expiry + 1;
+  const creating = onBuiltIn(s, built, OWNER, "basic");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  release();
+  const results = await Promise.allSettled([renewing, creating]);
+  assert.deepEqual(results.map((result) => result.status), ["fulfilled", "rejected"], "the creation waits for the renewal and then counts it");
+  assert.equal(results[1].reason.details.code, "plan_limit");
+});
 test("renewing an expired integration on a custom Station is never capped", async (t) => {
   const s = await setup(t);
   if (!s) return;
