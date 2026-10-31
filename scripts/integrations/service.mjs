@@ -29,11 +29,17 @@ const notFound = () => failure(404, "This Station or integration was not found."
 const ownerOnly = () => failure(403, "Only the Station owner can do this.", "forbidden");
 const unknownStation = () => failure(403, "This Station is not registered.", "station");
 const expiredChallenge = () => failure(400, "This check has expired or was already used. Start again.", "challenge");
+const SYSTEM = "system";
+const BUILT_IN_FIXED = "The built-in Station is always there: it can't be removed, shared or left.";
+const BUILT_IN_ORIGIN = "This is the built-in Station. Every account already has it.";
+const NOT_SUPPORTED = "Integrations aren't available on the built-in Station yet.";
 
 const MANAGE_CONFLICTS = {
   origin_taken: "This Station is already registered.",
   revoked: "This integration has been revoked.",
-  duplicate_key: "This key is already registered."
+  duplicate_key: "This key is already registered.",
+  built_in: BUILT_IN_FIXED,
+  not_supported: NOT_SUPPORTED
 };
 
 // Turns Auth's management answer into the Portal's error; anything that is not a ManageError is rethrown unchanged.
@@ -54,9 +60,13 @@ async function viaAuth(call) {
   }
 }
 
-// Members are not shown the Station's report client; it is not secret, but they have no use for it.
+// Members are not shown the Station's report client; it is not secret, but they have no use for it. Nobody is shown a
+// built-in Station's report client (its role is built_in).
 function stationView(station, role) {
-  const view = { id: station.id, origin: station.origin, role, ownerAccount: station.ownerAccount, status: station.status, createdAt: station.createdAt };
+  const view = {
+    id: station.id, origin: station.origin, role, ownerAccount: station.ownerAccount, status: station.status, createdAt: station.createdAt,
+    builtIn: station.builtIn, name: station.name, integrationsEnabled: station.integrationsEnabled
+  };
   if (role === "owner") view.reportClientId = station.reportClientId;
   return view;
 }
@@ -142,7 +152,7 @@ function feedIntegration(row, at) {
 
 export function createIntegrationService({
   repository, db, manage, stationFetch, exchange, now = Date.now, log = () => {}, ids = randomUUID,
-  challengeValue = () => randomBytes(32).toString("base64url"), pushFetch = createStationFetch({ timeoutMs: 3000 }), notify
+  challengeValue = () => randomBytes(32).toString("base64url"), pushFetch = createStationFetch({ timeoutMs: 3000 }), notify, admins = []
 }) {
   // Every transaction here appends events, so each takes the event lock before any row lock (see lockEvents).
   const appending = (work) => db.transaction(async (client) => {
@@ -230,7 +240,7 @@ export function createIntegrationService({
     if (!stale || stale.id === id) return null;
     await repository.markStationRemoved(stale.id, now(), client);
     await revokeOn(client, stale.id, () => true, { actor: "system", reason: "reconciled", direct: true });
-    await repository.appendEvent({ stationId: stale.id, accountId: stale.ownerAccount, actor: "system", kind: "station_removed", reason: "reconciled" }, client);
+    await repository.appendEvent({ stationId: stale.id, accountId: stale.ownerAccount ?? SYSTEM, actor: SYSTEM, kind: "station_removed", reason: "reconciled" }, client);
     return stale.id;
   }
 
@@ -240,18 +250,30 @@ export function createIntegrationService({
     changed(stationId);
   }
 
-  // The active Station as this account has it in Portal (with its role, "owner" or "member"). An account that neither
-  // owns it nor is a current member gets the same 404 as for an unknown ID, before Auth is asked, so nothing about the
-  // Station is revealed (as for integrations, Ruling T7-8).
+  // The active Station as this account has it in Portal (with its role, "built_in", "owner" or "member"). An account
+  // that neither owns a custom Station nor is a current member gets the same 404 as for an unknown ID, before Auth is
+  // asked, so nothing about the Station is revealed (as for integrations, Ruling T7-8). Every account has the built-in.
   async function usable(accountId, stationId) {
     const station = typeof stationId === "string" && stationId ? (await repository.stationsFor(accountId)).find((entry) => entry.id === stationId) : null;
     if (!station) throw notFound();
     return station;
   }
 
+  // Remove, share, leave and the member list don't exist for a built-in Station; refused here as Auth refuses them
+  // (409 built_in), without asking Auth.
+  function notBuiltIn(station) {
+    if (station.builtIn) throw failure(409, BUILT_IN_FIXED, "built_in");
+    return station;
+  }
+
+  // Auth answers 409 origin_taken for a built-in Station's origin; Portal says so before a check is issued or fetched.
+  async function notBuiltInOrigin(origin) {
+    if ((await repository.builtInStations()).some((station) => station.origin === origin)) throw failure(409, BUILT_IN_ORIGIN, "origin_taken");
+  }
+
   // For changes only the Station's owner may make; a member sees the Station, so it is told why.
   async function ownStation(accountId, stationId) {
-    const station = await usable(accountId, stationId);
+    const station = notBuiltIn(await usable(accountId, stationId));
     if (station.role !== "owner") throw ownerOnly();
     return station;
   }
@@ -261,6 +283,11 @@ export function createIntegrationService({
   async function reconcile(accountId, listed) {
     const known = new Set(listed.map((station) => station.id));
     for (const station of await repository.stationsFor(accountId)) {
+      // A built-in Station is every account's: a listing without it never removes it or revokes anything (D24).
+      if (station.builtIn) {
+        if (!known.has(station.id)) log("Built-in Station absent from Auth's listing: left as it is.");
+        continue;
+      }
       if (known.has(station.id)) continue;
       if (station.role === "owner") {
         await appending(async (client) => {
@@ -285,6 +312,10 @@ export function createIntegrationService({
       }
     }
     for (const entry of listed) {
+      if (entry.builtIn) {
+        await reconcileBuiltIn(entry);
+        continue;
+      }
       const existing = await repository.station(entry.id);
       // Auth still lists a Station Portal has removed (its integrations already revoked here); restoring it is left to
       // an operator, so it is logged.
@@ -314,6 +345,32 @@ export function createIntegrationService({
           changed(entry.id);
         }
       }
+    }
+  }
+
+  // Inserts a built-in Station Auth lists (no owner, no members) or follows its name and integrations setting. A new
+  // Station at the origin of an older one retires the older one, as for custom Stations.
+  async function reconcileBuiltIn(entry) {
+    const existing = await repository.station(entry.id);
+    if (existing?.status === "removed") {
+      log("Built-in Station listed by Auth is removed in Portal: not restored.");
+      return;
+    }
+    const settings = { name: entry.name, integrationsEnabled: entry.integrations === true };
+    if (existing) {
+      if (await repository.updateBuiltInStation(entry.id, settings)) log("Built-in Station settings followed from Auth.");
+      return;
+    }
+    const { added, stale } = await appending(async (client) => {
+      const stale = await retireStale(client, entry.origin, entry.id);
+      if (!(await repository.insertStation({ id: entry.id, origin: entry.origin, reportClientId: entry.reportClientId, verifiedAt: entry.createdAt, builtIn: true, ...settings }, client))) return { added: false, stale };
+      await repository.appendEvent({ stationId: entry.id, accountId: SYSTEM, actor: SYSTEM, kind: "station_reconciled", reason: "built_in" }, client);
+      return { added: true, stale };
+    });
+    retired(stale);
+    if (added) {
+      log("Built-in Station added from Auth.");
+      changed(entry.id);
     }
   }
 
@@ -447,6 +504,7 @@ export function createIntegrationService({
   return {
     async createChallenge(accountId, originInput) {
       const origin = stationOrigin(originInput);
+      await notBuiltInOrigin(origin);
       // A soft limit: check, then insert, so concurrent requests may pass it by a few.
       const since = new Date(now() - 3600000);
       if (await repository.challengesSince(accountId, since) >= CHALLENGES_PER_HOUR) throw new AppError(429, "Too many Station checks. Try again later.");
@@ -466,6 +524,7 @@ export function createIntegrationService({
       const challenge = await repository.takeChallenge(challengeId, accountId, now());
       if (!challenge) throw expiredChallenge();
       const { origin, value } = challenge;
+      await notBuiltInOrigin(origin);
       const proof = await checkProof(origin, value, { fetch: stationFetch });
       if (!proof.ok) {
         log("Station proof of control failed: " + proof.reason + ".");
@@ -496,7 +555,7 @@ export function createIntegrationService({
     },
 
     async members(accountId, stationId) {
-      await usable(accountId, stationId);
+      notBuiltIn(await usable(accountId, stationId));
       const answer = await viaAuth(() => manage.members(stationId, accountId));
       return { owner: answer.owner, members: (answer.members || []).map(({ account, addedAt }) => ({ account, addedAt })) };
     },
@@ -518,7 +577,7 @@ export function createIntegrationService({
     // on the Station; Portal follows in one transaction, recording the removal only when it had the member.
     async unshare(accountId, stationId, member) {
       memberAccount(member);
-      const station = await usable(accountId, stationId);
+      const station = notBuiltIn(await usable(accountId, stationId));
       if (station.role !== "owner" && member !== accountId) throw ownerOnly();
       await viaAuth(() => manage.removeMember(stationId, member, accountId));
       const wrote = await appending(async (client) => {
@@ -703,6 +762,29 @@ export function createIntegrationService({
       const answer = { changes, cursor: events.length ? events.at(-1).id : cursor };
       if (cursor === 0) answer.integrations = rows.map((row) => ({ id: row.id, ...feedIntegration(row, at) }));
       return answer;
+    },
+
+    // The built-in Stations as Auth lists them to the first Agora.Build admin (any account sees them), so their report
+    // clients are known before anyone signs in. Only the built-in part of reconcile runs: nothing is removed or revoked
+    // on absence. Never throws; returns whether it synced. Run by the stack at ready() and hourly.
+    async syncBuiltIn() {
+      const account = admins[0];
+      if (!account) {
+        log("Built-in Station sync skipped: no PLATFORM_ADMINS.");
+        return false;
+      }
+      try {
+        const listed = (await manage.stations(account)).filter((entry) => entry.builtIn);
+        const known = new Set(listed.map((entry) => entry.id));
+        for (const station of await repository.builtInStations()) {
+          if (!known.has(station.id)) log("Built-in Station absent from Auth's listing: left as it is.");
+        }
+        for (const entry of listed) await reconcileBuiltIn(entry);
+        return true;
+      } catch (error) {
+        log("Built-in Station sync failed: " + (error instanceof ManageError ? error.code : error.code || "error") + ".");
+        return false;
+      }
     },
 
     notify: (stationId) => changed(stationId),

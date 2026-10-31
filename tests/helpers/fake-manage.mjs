@@ -2,9 +2,13 @@ import { ManageError } from "../../scripts/integrations/auth-manage.mjs";
 
 const DAY = 86400000;
 const PRIVATE_MEMBERS = ["d", "p", "q", "dp", "dq", "qi", "k"];
+// The report client a seeded built-in Station gets at Auth: s- and 26 lower-case Crockford characters.
+export const BUILT_IN_REPORT_CLIENT = "s-" + "0".repeat(24) + "bs";
 
-// An in-memory Auth /manage/v1 following the actor rules of Auth's docs/integrating.md. `failNext` makes the next call
-// of that name fail with the given status and code (after the gate, so the call is still recorded).
+// An in-memory Auth /manage/v1 following the actor rules of Auth's docs/integrating.md, including built-in Stations
+// (seedBuiltIn): listed first for every account, with no owner or members (409 built_in), integrations only while
+// switched on (409 not_supported), and admins who may pause or revoke others' integrations on them. `failNext` makes
+// the next call of that name fail with the given status and code (after the gate, so the call is still recorded).
 export function fakeManage({ now = Date.now } = {}) {
   const stations = [];
   const integrations = [];
@@ -12,7 +16,9 @@ export function fakeManage({ now = Date.now } = {}) {
   let nextIntegration = 0;
   const valid = (account) => typeof account === "string" && /^ab[0-9A-HJKMNP-TV-Z]{26}$/.test(account);
   const fail = (status, code) => { throw new ManageError(status, code); };
-  const uses = (station, account) => station.owner === account || station.members.some((member) => member.account === account);
+  const uses = (station, account) => station.builtIn || station.owner === account || station.members.some((member) => member.account === account);
+  const notBuiltIn = (station) => { if (station.builtIn) fail(409, "built_in"); return station; };
+  const listedStation = ({ id, origin, owner, status, reportClientId, createdAt, builtIn, access, integrations: enabled, name }) => ({ id, origin, owner, status, reportClientId, createdAt, builtIn, access, integrations: enabled, name });
   const listed = ({ keys, ...integration }) => ({ ...integration, scopes: [...integration.scopes] });
   const checkKey = (publicJwk) => {
     if (!publicJwk || typeof publicJwk !== "object") fail(400, "jwk");
@@ -52,43 +58,49 @@ export function fakeManage({ now = Date.now } = {}) {
     revokeWhere(pick) {
       for (const integration of integrations) if (pick(integration)) integration.status = "revoked";
     },
+    // A built-in Station as Auth seeds it from its clients file. Not a management call, so it is not recorded.
+    seedBuiltIn({ id = "stbuiltin", origin = "https://station.agora.test", name = "Agora Station", integrations: enabled = false, admins = [], reportClientId = BUILT_IN_REPORT_CLIENT } = {}) {
+      const station = { id, origin, owner: null, status: "active", reportClientId, createdAt: new Date(now() - 2000).toISOString(), members: [], builtIn: true, access: "any_account", integrations: enabled, name, admins: [...admins] };
+      stations.push(station);
+      return station;
+    },
     async registerStation({ origin, owner, reportKey, actor }) {
       await auth.gate("registerStation", actor, owner);
       if (actor !== owner) fail(403, "forbidden");
       if (!reportKey || typeof reportKey !== "object") fail(400, "jwk");
       if (stations.some((entry) => entry.origin === origin && entry.status === "active")) fail(409, "origin_taken");
       next += 1;
-      const station = { id: "st" + next, origin, owner, status: "active", reportClientId: "s-st" + next, createdAt: new Date(Date.now() - 1000).toISOString(), members: [] };
+      const station = { id: "st" + next, origin, owner, status: "active", reportClientId: "s-st" + next, createdAt: new Date(Date.now() - 1000).toISOString(), members: [], builtIn: false, access: "members", integrations: true, name: null };
       stations.push(station);
       return { id: station.id, origin, owner, status: "active", reportClientId: station.reportClientId };
     },
     async stations(account) {
       await auth.gate("stations", account);
-      return stations.filter((entry) => entry.status === "active" && uses(entry, account))
-        .map(({ id, origin, owner, status, reportClientId, createdAt }) => ({ id, origin, owner, status, reportClientId, createdAt }));
+      const active = stations.filter((entry) => entry.status === "active");
+      return [...active.filter((entry) => entry.builtIn), ...active.filter((entry) => !entry.builtIn && uses(entry, account))].map(listedStation);
     },
     async removeStation(id, actor) {
       await auth.gate("removeStation", actor);
-      const station = auth.find(id);
+      const station = notBuiltIn(auth.find(id));
       if (station.owner !== actor) fail(403, "forbidden");
       station.status = "removed";
       auth.revokeWhere((integration) => integration.stationId === id);
     },
     async members(id, actor) {
       await auth.gate("members", actor);
-      const station = auth.find(id);
+      const station = notBuiltIn(auth.find(id));
       if (!uses(station, actor)) fail(403, "forbidden");
       return { owner: station.owner, members: station.members.map((member) => ({ ...member })) };
     },
     async addMember(id, account, actor) {
       await auth.gate("addMember", actor, account);
-      const station = auth.find(id);
+      const station = notBuiltIn(auth.find(id));
       if (station.owner !== actor) fail(403, "forbidden");
       if (!station.members.some((member) => member.account === account)) station.members.push({ account, addedAt: new Date().toISOString() });
     },
     async removeMember(id, account, actor) {
       await auth.gate("removeMember", actor, account);
-      const station = auth.find(id);
+      const station = notBuiltIn(auth.find(id));
       if (station.owner !== actor && account !== actor) fail(403, "forbidden");
       station.members = station.members.filter((member) => member.account !== account);
       auth.revokeWhere((integration) => integration.stationId === id && integration.owner === account);
@@ -97,6 +109,7 @@ export function fakeManage({ now = Date.now } = {}) {
       await auth.gate("createIntegration", actor, owner);
       if (actor !== owner) fail(403, "forbidden");
       const station = stations.find((entry) => entry.id === stationId && entry.status === "active");
+      if (station?.builtIn && !station.integrations) fail(409, "not_supported");
       if (!station || !uses(station, owner)) fail(400, "invalid_request");
       if (!Array.isArray(scopes) || !scopes.includes("agent.view") || !scopes.every((scope) => /^agent\.[a-z]+$/.test(scope))) fail(400, "scopes");
       checkKey(publicJwk);
@@ -127,9 +140,11 @@ export function fakeManage({ now = Date.now } = {}) {
       await auth.gate("changeIntegration", actor);
       const integration = auth.findIntegration(id);
       const others = [r9Svc, quotaPerSecond, expiresAt].some((value) => value !== undefined);
-      const stationOwner = stations.find((entry) => entry.id === integration.stationId).owner;
+      const station = stations.find((entry) => entry.id === integration.stationId);
+      // The Station-owner rights: the owner of a custom Station, the configured admins of a built-in one.
+      const stationRights = station.builtIn ? station.admins : [station.owner];
       const mayStop = (status === "paused" || status === "revoked") && !others;
-      if (integration.owner !== actor && !(mayStop && stationOwner === actor)) fail(403, "forbidden");
+      if (integration.owner !== actor && !(mayStop && stationRights.includes(actor))) fail(403, "forbidden");
       if (integration.status === "revoked") {
         if (status === "revoked" && !others) return listed(integration);
         fail(409, "revoked");
