@@ -545,8 +545,9 @@ The tables:
 | `stations` | Auth's Station ID, origin, owner (none for a built-in Station), report client ID, `active` or `removed`, `built_in`, `access` (`members` or `any_account`), `integrations_enabled`, `name` |
 | `station_members` | accounts a Station is shared with, with who added or removed them and when |
 | `station_challenges` | issued proof values, valid 10 minutes, single use |
-| `integrations` | Auth's `i-` client ID, owner, Station, scopes, state, `resume_state`, `r9_svc`, quota, expiry, `last_error` |
+| `integrations` | Auth's `i-` client ID, owner, Station, scopes, state, `resume_state`, `r9_svc`, quota, expiry, `last_error`, `paused_by` (who paused it, as Auth says: `owner`, `station` or `admin`), `owner_disabled_at` (while Agora.Build has the owner's account disabled) |
 | `integration_events` | every change, kept forever; also the Stations' change feed |
+| `auth_change_feed` | one row: where the Portal is in Auth's change feed (Auth's cursor) |
 
 Rows are never deleted: Stations get `removed_at`, members get `removed_at`,
 integrations end in `revoked`, and the event log only grows. `integration_events`

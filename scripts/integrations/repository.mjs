@@ -8,7 +8,9 @@ const updatable = {
   expiresAt: "expires_at",
   approvedBy: "approved_by",
   approvedAt: "approved_at",
-  lastError: "last_error"
+  lastError: "last_error",
+  pausedBy: "paused_by",
+  ownerDisabledAt: "owner_disabled_at"
 };
 
 function iso(value) {
@@ -23,6 +25,9 @@ function cursorNumber(cursor) {
   if (!Number.isSafeInteger(cursor) || cursor < 0) throw new TypeError("Cursor must be a non-negative integer.");
   return cursor;
 }
+
+// Auth's change feed cursor: opaque to the Portal, base64url as Auth hands it out.
+const AUTH_CURSOR = /^[A-Za-z0-9_-]{1,64}$/;
 
 function stationRow(row) {
   return {
@@ -57,6 +62,8 @@ function integrationRow(row) {
     approvedBy: row.approved_by,
     approvedAt: iso(row.approved_at),
     lastError: row.last_error,
+    pausedBy: row.paused_by ?? null,
+    ownerDisabledAt: iso(row.owner_disabled_at) ?? null,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at)
   };
@@ -197,7 +204,7 @@ export function createRepository(db) {
       const values = [id];
       for (const [key, value] of Object.entries(fields)) {
         if (!Object.hasOwn(updatable, key)) throw new TypeError("Cannot update integration field " + key + ".");
-        values.push(key === "expiresAt" || key === "approvedAt" ? (value === null ? null : when(value)) : value);
+        values.push(key === "expiresAt" || key === "approvedAt" || key === "ownerDisabledAt" ? (value === null ? null : when(value)) : value);
         assignments.push(updatable[key] + " = $" + values.length);
       }
       assignments.push("updated_at = now()");
@@ -235,6 +242,25 @@ export function createRepository(db) {
     async latestCursor(stationId, client) {
       const { rows } = await run(client, "SELECT COALESCE(MAX(id), 0) AS cursor FROM integration_events WHERE station_id = $1", [stationId]);
       return Number(rows[0].cursor);
+    },
+
+    // Where the Portal is in Auth's change feed (auth-changes.mjs): Auth's opaque cursor, or null before the first page.
+    async authChangeCursor(client) {
+      const { rows } = await run(client, "SELECT cursor FROM auth_change_feed WHERE id");
+      return rows[0]?.cursor ?? null;
+    },
+
+    async saveAuthChangeCursor(cursor, client) {
+      if (typeof cursor !== "string" || !AUTH_CURSOR.test(cursor)) throw new TypeError("An Auth change cursor is 1 to 64 base64url characters.");
+      await run(client, "UPDATE auth_change_feed SET cursor = $1, updated_at = now() WHERE id", [cursor]);
+    },
+
+    // Whether an entry of Auth's change feed was already applied to this integration: its cursor and time are kept in
+    // the details of the event it wrote (service.applyAuthChange). The time tells apart a cursor Auth hands out again
+    // after its database was restored from a backup.
+    async authChangeApplied(integrationId, cursor, at, client) {
+      const { rows } = await run(client, "SELECT 1 FROM integration_events WHERE integration_id = $1 AND details->>'authCursor' = $2 AND details->>'authAt' = $3 LIMIT 1", [integrationId, cursor, at]);
+      return rows.length > 0;
     }
   };
 }

@@ -221,3 +221,36 @@ test("countLiveIntegrations counts one account's integrations on one Station tha
   assert.equal(await repo.countLiveIntegrations("st1", "ab1", later(2000)), 3, "i-5 has expired");
   assert.equal(await repo.countLiveIntegrations("st1", "ab2", NOW), 1);
 });
+
+test("integrations carry who paused them and when Auth said their owner was disabled", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  await station(repo, "st1");
+  await repo.insertIntegration(sample("i-1"));
+  const fresh = await repo.integration("i-1");
+  assert.deepEqual([fresh.pausedBy, fresh.ownerDisabledAt], [null, null]);
+  await db.transaction((client) => repo.updateIntegration("i-1", { state: "paused", resumeState: "ready", pausedBy: "admin", ownerDisabledAt: NOW }, client));
+  const paused = await repo.integration("i-1");
+  assert.deepEqual([paused.state, paused.pausedBy, paused.ownerDisabledAt], ["paused", "admin", new Date(NOW).toISOString()]);
+  await repo.updateIntegration("i-1", { pausedBy: null, ownerDisabledAt: null });
+  const cleared = await repo.integration("i-1");
+  assert.deepEqual([cleared.pausedBy, cleared.ownerDisabledAt], [null, null]);
+  await assert.rejects(repo.updateIntegration("i-1", { pausedBy: "someone" }), { code: "23514" });
+});
+
+test("Auth's change feed cursor starts empty and is saved as given; an applied change is found by its cursor and time", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  assert.equal(await repo.authChangeCursor(), null);
+  await repo.saveAuthChangeCursor("YzEy");
+  assert.equal(await repo.authChangeCursor(), "YzEy");
+  for (const bad of ["", "has space", "x".repeat(65), 12, null]) await assert.rejects(repo.saveAuthChangeCursor(bad), TypeError, JSON.stringify(bad));
+  assert.equal(await repo.authChangeCursor(), "YzEy");
+  await station(repo, "st1");
+  const at = "2026-10-31T10:00:00.000Z";
+  assert.equal(await repo.authChangeApplied("i-1", "YzEy", at), false);
+  await db.transaction((client) => repo.appendEvent({ stationId: "st1", integrationId: "i-1", accountId: "ab1", actor: "system", kind: "integration_paused", details: { authCursor: "YzEy", authAt: at } }, client));
+  assert.equal(await repo.authChangeApplied("i-1", "YzEy", at), true);
+  assert.equal(await repo.authChangeApplied("i-1", "YzEy", "2026-10-31T11:00:00.000Z"), false, "the same cursor at another time is another change (Auth's database was restored)");
+  assert.equal(await repo.authChangeApplied("i-2", "YzEy", at), false);
+});
