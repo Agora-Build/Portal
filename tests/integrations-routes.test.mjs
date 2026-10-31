@@ -622,7 +622,8 @@ test("Auth's nudge is a bodiless POST that only asks for a read of Auth's feed: 
   const get = await fetch(app.base + "/auth/integration-changes");
   assert.deepEqual([get.status, get.headers.get("allow")], [405, "POST"]);
   assert.equal(nudges.length, 2, "only the bodiless POSTs asked for a read");
-  // The address's allowance is 60 a minute, every POST counted; refused ones ask for nothing.
+  // The address's allowance is 60 a minute, every POST counted. A refused one still asks for a read (reads run at
+  // most one a second however many ask), so Auth's real nudge is never lost to a forger who spends the allowance.
   let accepted = 0;
   let refused = null;
   for (let index = 0; index < 70; index += 1) {
@@ -632,7 +633,7 @@ test("Auth's nudge is a bodiless POST that only asks for a read of Auth's feed: 
   }
   assert.equal(accepted, 56, "four POSTs above already counted");
   assert.deepEqual([refused.status, refused.headers.get("retry-after")], [429, "60"]);
-  assert.equal(nudges.length, 58);
+  assert.equal(nudges.length, 72, "the 56 accepted and the 14 refused each asked for a read");
 });
 
 test("without Stations and integrations the nudge answers 404", async (t) => {

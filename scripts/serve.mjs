@@ -182,11 +182,12 @@ export function createAppServer(directory = root, options = {}) {
         // checks below. It carries nothing and proves nothing: all it does is ask for a read of Auth's change feed over
         // the Portal's own authenticated connection, and those reads are one at a time and at least a second apart
         // however many nudges arrive (integrations/auth-changes.mjs), so a forged one costs no more than an early
-        // poll. No body is ever read.
+        // poll. No body is ever read. A nudge over its address's allowance is answered 429 but still asks for a read, so
+        // Auth's real nudge is never lost to a forger who spends the allowance.
         const done = (status, headers = {}) => { response.writeHead(status, { "Cache-Control": "no-store", ...headers }).end(); };
         if (request.method !== "POST") { done(405, { Allow: "POST" }); return; }
         try { limit("nudge:" + clientAddress(request), NUDGES_PER_MINUTE, 60000); }
-        catch { done(429, { "Retry-After": "60" }); return; }
+        catch { integrations?.nudge(); done(429, { "Retry-After": "60" }); return; }
         if (request.headers["transfer-encoding"] !== undefined || (request.headers["content-length"] ?? "0") !== "0") { done(413, { Connection: "close" }); return; }
         if (!integrations) { done(404); return; }
         integrations.nudge();

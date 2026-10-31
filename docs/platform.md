@@ -633,13 +633,14 @@ integration's Station refuses still-valid tokens and closes open sessions at onc
   Portal answers 204 and reads Auth's change feed soon; it trusts nothing in the request. Like
   `/auth/backchannel-logout` it is server to server, so the same-origin checks of the `/api/` routes don't apply, and
   it is answered before any session lookup. Any other method answers 405, a request with a body 413 (the body is never
-  read and the connection closes), more than 60 a minute from one address 429, and a Portal without Stations and
-  integrations 404. Register it as the `portal` client's `changesNudgeUri` in Auth's clients file:
+  read and the connection closes), more than 60 a minute from one address 429 (it still asks for a read, so Auth's
+  real nudge is never lost to a forger who spends the allowance), and a Portal without Stations and integrations 404.
+  Register it as the `portal` client's `changesNudgeUri` in Auth's clients file:
   `https://agora.build/auth/integration-changes` (dev `https://dev.agora.build/auth/integration-changes`). A nudge
   never starts the Stations and integrations stack: before it is ready the nudge does nothing, and the reader reads at
   once when it starts. Behind a proxy set `TRUST_PROXY=1` (see "Storage And Deployment"). Without it every nudge shares
-  the proxy's address and its limit of 60 a minute, so a flood of forged nudges could make Auth's real ones answer 429.
-  Changes would still arrive by the 30-second poll.
+  the proxy's address and its limit of 60 a minute, so a flood of forged nudges could make Auth's real ones answer 429
+  and Auth log them as not accepted. Each of them still asks for a read, and the 30-second poll is there besides.
 - **The feed.** The Portal reads `GET /manage/v1/integration-changes` over its management connection after each
   nudge, every 30 seconds in case a nudge is lost, and whenever it answers a resume with `admin_paused`. One read runs
   at a time, and reads start at least a second apart however many nudges arrive, so a forged nudge costs no more than
