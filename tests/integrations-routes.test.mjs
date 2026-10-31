@@ -29,6 +29,13 @@ const R9 = "a".repeat(64);
 const UNAVAILABLE = "Stations and integrations need the Portal database.";
 const profile = (name = "Route tester") => ({ name, bio: "Building voice agents with Rust.", intent: "Build a language practice voice agent with natural interruptions.", lookingFor: "Audio engineers", skills: ["Rust", "Voice AI"], location: "Remote", contact: "https://example.com/builder", monitor: false });
 const publicJwk = () => generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey.export({ format: "jwk" });
+const waitFor = async (check, label, timeout = 3000) => {
+  const end = Date.now() + timeout;
+  while (!(await check())) {
+    if (Date.now() > end) throw new Error("timed out waiting for " + label);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+};
 let temporary;
 before(async () => { temporary = await mkdtemp(resolve(tmpdir(), "integrations-routes-")); });
 after(() => rm(temporary, { recursive: true, force: true }));
@@ -529,6 +536,71 @@ test("a successful built-in sync is repeated on the hourly schedule, with no pla
   await new Promise((resolve) => setTimeout(resolve, 80));
   assert.ok(listings >= 2, "synced again on the ok schedule (" + listings + ")");
   await integrations.close();
+});
+
+test("the stack reads Auth's change feed once it is ready and again on each nudge, following an admin's pause", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
+  const admin = accountId();
+  const owner = accountId();
+  const manage = fakeManage();
+  const built = manage.seedBuiltIn({ integrations: true, admins: [admin] });
+  const pushes = [];
+  // The test database closes its own pool when the test ends.
+  const integrations = createIntegrationStack({ db: { ...db, close: async () => {} }, manage, idp: null, log: () => {}, pushFetch: { async post(url) { pushes.push(url); return { status: 202 }; } }, authChanges: { pollMs: 3600000, minGapMs: 10 } });
+  const reads = () => manage.calls.filter((name) => name === "integrationChanges").length;
+  integrations.nudge(); // before ready(): nothing, not even preparing the stack (Ruling R-F)
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(manage.calls, [], "a nudge neither prepares the stack nor reads before it is ready");
+  await integrations.ready();
+  await waitFor(() => reads() === 1, "the first read, once ready");
+  const created = await integrations.service.createIntegration(owner, { stationId: built.id, name: "Hosted", scopes: [], publicJwk: publicJwk() });
+  manage.adminChange(created.id, { status: "paused", actor: admin, reason: "Spam" });
+  integrations.nudge();
+  await waitFor(async () => (await db.pool.query("SELECT paused_by FROM integrations WHERE id = $1", [created.id])).rows[0].paused_by === "admin", "the admin's pause in the Portal");
+  assert.equal(reads(), 2);
+  assert.equal((await db.pool.query("SELECT state FROM integrations WHERE id = $1", [created.id])).rows[0].state, "paused");
+  await waitFor(async () => (await db.pool.query("SELECT cursor FROM auth_change_feed")).rows[0]?.cursor === manage.feed.at(-1).cursor, "the cursor saved after the page");
+  await integrations.service._pushesIdle();
+  assert.ok(pushes.includes(built.origin + "/agora-build/v1/changes"), "the Station was pushed");
+  await integrations.close();
+});
+
+test("a nudge before the stack is ready asks for nothing: no ready() retries and no log per nudge while the database is down", async () => {
+  const calls = [];
+  const db = {
+    async migrate() { calls.push("migrate"); throw Object.assign(new Error("down"), { code: "ECONNREFUSED" }); },
+    async ensureEventPartitions() { calls.push("partitions"); return []; },
+    async close() {}
+  };
+  const manage = fakeManage();
+  const logs = [];
+  const integrations = createIntegrationStack({ db, manage, idp: null, log: (line) => logs.push(line), authChanges: { pollMs: 3600000, minGapMs: 5 } });
+  for (let index = 0; index < 20; index += 1) integrations.nudge();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual([calls, manage.calls, logs], [[], [], []]);
+  await assert.rejects(integrations.ready(), (error) => error.status === 503);
+  for (let index = 0; index < 20; index += 1) integrations.nudge();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual([calls, manage.calls], [["migrate"], []], "a failed ready() is retried by the next request, never by a nudge");
+  assert.deepEqual(logs, ["Portal database is not ready: ECONNREFUSED."]);
+  await integrations.close();
+});
+
+test("close() stops reading Auth's change feed", async () => {
+  // A database whose every query finds nothing: an empty cursor, no built-in Stations.
+  const db = { pool: { async query() { return { rows: [] }; } }, async migrate() { return []; }, async ensureEventPartitions() { return []; }, async close() {} };
+  const manage = fakeManage();
+  const reads = () => manage.calls.filter((name) => name === "integrationChanges").length;
+  const integrations = createIntegrationStack({ db, manage, idp: null, log: () => {}, authChanges: { pollMs: 20, minGapMs: 5 } });
+  await integrations.ready();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.ok(reads() >= 2, "it polls (" + reads() + " reads)");
+  await integrations.close();
+  const after = reads();
+  integrations.nudge();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(reads(), after, "no read after close(), nudged or not");
 });
 test("the built-in Station's own report token reports and reads a feed of every integration on it, and only those", async (t) => {
   const integrations = await stack(t);
