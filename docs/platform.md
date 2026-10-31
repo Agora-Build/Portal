@@ -110,7 +110,8 @@ The IdP's `sub` (`ab` followed by 26 Crockford base32 characters, for example
 `ab01M5KE40Z7VPK97NJS49W8QQSD`) is the
 Portal account ID, so one person has the same ID in every Agora Build app.
 `PLATFORM_ADMINS` and `platform-admin.mjs` take these `ab…` IDs (other
-`PLATFORM_ADMINS` entries are ignored and counted in the log). At each
+`PLATFORM_ADMINS` entries are ignored and counted in the log). `PLATFORM_ADMINS` now only gives admin rights in Stoa
+spaces; Agora.Build's admin powers over Stations and integrations are on the admin site. At each
 browser sign-in the account's name and picture are refreshed from the ID token;
 the email is kept only when the IdP marks it verified. The email is shown only to
 the owner's browser session (`/api/me`), never to bearer (app) callers. The first
@@ -569,7 +570,8 @@ Auth's clients file must be set up for this:
   approvals" in Auth's `docs/integrating.md` and `config/clients.example.json`);
 - exactly one resource lists `station.report`, the Portal's;
 - the `portal` client has `"manage": true`, `"exchange": true`,
-  `"stationScopes": ["station.read"]` and its `backchannelLogoutUri`.
+  `"stationScopes": ["station.read"]`, its `backchannelLogoutUri`, and
+  `"changesNudgeUri": "<SITE_URL>/auth/integration-changes"` (see "Admin Changes From Auth").
 
 ### The Built-in Station
 
@@ -593,14 +595,16 @@ Auth's clients file must be set up for this:
   `https://admin.dev.agora.build`; spec D26), which calls Auth, never in the Portal. In the Portal an admin is just
   another account: every listing shows an account its own integrations and those on custom Stations it owns, another
   account's integration on the built-in Station is 404 for everyone but its owner, and Auth refuses the Portal's
-  management calls that act across accounts.
+  management calls that act across accounts. Their changes reach the Portal through Auth's change feed (see "Admin
+  Changes From Auth").
 - **Reports and feed** use the same routes as any Station. Its report token's `sub` is its own `s-` client ID (it has
   no owner): the Portal accepts such a token only when `client_id` equals `sub`, `sub` is `s-` and 26 lower-case
   Crockford base32 characters, and the scope includes `station.report`. It reaches only the two report routes (403
   elsewhere) and is never a Portal account. Its feed lists every integration on it, each with `ownerAccount`, and
   nothing else; push hints go to its origin.
 - **Sync.** The Portal learns of built-in Stations from Auth itself: when the Stations and integrations stack becomes
-  ready (the first request to one of their routes, which waits for it) and then hourly, it reads Auth's listing of
+  ready (the server prepares it in the background as soon as it listens; a request to one of their routes waits for
+  it) and then hourly, it reads Auth's listing of
   built-in Stations, which names no account (`GET /manage/v1/built-in-stations`), and adds or updates them, never
   removing one. With Auth unreachable, or an Auth without that listing (404), the log says so by reason and the sync
   is tried again a minute later (hourly again once it succeeds); every account's own listing also syncs them. The
@@ -616,6 +620,132 @@ Auth's clients file must be set up for this:
   with several Portal instances two simultaneous creations could pass it by one (accepted, bounded by the creation
   rate limit). A creation Auth accepted but the Portal failed to record is not counted until an integration listing
   reconciles it, so the limit can also be passed by one for that time.
+
+### Admin Changes From Auth
+
+Agora.Build admins work on the admin site, which calls Auth directly. When an admin pauses, resumes or revokes an
+integration, or disables or enables an account that owns integrations, the change happens at Auth first: from then on
+Auth issues those integrations no token. The Portal then follows it, so that its history records it and the
+integration's Station refuses still-valid tokens and closes open sessions at once.
+
+- **The nudge.** Right after a change the Portal did not make (an admin's, or Auth's own, such as a built-in Station
+  retired by its configuration), Auth sends `POST /auth/integration-changes` with no body and no credentials. The
+  Portal answers 204 and reads Auth's change feed soon; it trusts nothing in the request. Like
+  `/auth/backchannel-logout` it is server to server, so the same-origin checks of the `/api/` routes don't apply, and
+  it is answered before any session lookup. Any other method answers 405, a request with a body 413 (the body is never
+  read and the connection closes), more than 60 a minute from one address 429, and a Portal without Stations and
+  integrations 404. Register it as the `portal` client's `changesNudgeUri` in Auth's clients file:
+  `https://agora.build/auth/integration-changes` (dev `https://dev.agora.build/auth/integration-changes`). A nudge
+  never starts the Stations and integrations stack: before it is ready the nudge does nothing, and the reader reads at
+  once when it starts. Behind a proxy set `TRUST_PROXY=1` (see "Storage And Deployment"). Without it every nudge shares
+  the proxy's address and its limit of 60 a minute, so a flood of forged nudges could make Auth's real ones answer 429.
+  Changes would still arrive by the 30-second poll.
+- **The feed.** The Portal reads `GET /manage/v1/integration-changes` over its management connection after each
+  nudge, every 30 seconds in case a nudge is lost, and when Auth refuses a resume with `admin_paused`. One read runs at
+  a time, and reads start at least a second apart however many nudges arrive, so a forged nudge costs no more than an
+  early poll. A read takes up to 10 pages of 100 changes and saves Auth's cursor after each page in
+  `auth_change_feed`, so a restart continues where it stopped; when every page was full, another read follows. The
+  server starts the reader in the background as soon as it listens (the stack is prepared then, and tried again after 5
+  s, 10 s, 20 s and so on up to a minute while that fails). Its first read ever goes through Auth's whole feed once.
+- **When a read fails** the cursor stays where it was and the next poll tries again, however long it lasts. The log
+  names the reason once when it starts, then at most once an hour, and says once when reads work again:
+  `Auth change feed read failed: <code>.` (Auth refused or was unreachable), `Auth change feed not available yet:
+  <code>.` (Auth answered 404: this Auth has no feed yet, as when the Portal was deployed first),
+  `Auth change not applied: <code>.` (a Portal database failure while following a change) and `Auth change feed failed:
+  <code>.`. No cursor, admin or reason is logged.
+- **Following a change.** Changes the Portal made itself (an account's pause, resume or revoke through the routes
+  below) are in the feed too; they are already recorded and are skipped. For each other change the Portal updates its
+  row, records an `integration_events` row with the admin as `actor` (`system` when Auth acted itself) and the reason
+  given (or Auth's code, such as `configuration`), appends it to the Station's feed and pushes the Station. A pause
+  pauses the integration and records who paused it (`paused_by`); a resume returns it to where it was; a revocation
+  sets it to `revoking` (or `revoked` before approval), as an owner's does. An owner's account being disabled sets
+  `owner_disabled_at` on each of its integrations that is not revoked: the account page and the Station's feed show
+  them `paused` until the account is enabled again, when each is back as it was (one its owner had paused stays
+  paused). Each change is applied once: its Auth cursor and time are kept in the event's details. An integration that
+  is already revoking or revoked is only recorded. A change for an integration the Portal does not know yet is dropped
+  (the log says so); the owner's next listing brings the integration in, and the admin and the reason stay only in
+  Auth's audit.
+- **An admin's pause locks.** An integration Agora.Build paused shows "Paused by Agora.Build" (`pausedBy` `admin`, also
+  while its owner's account is disabled) and offers no Resume. `POST /api/integrations/<id>/resume` answers 409
+  `{ "error": "Agora.Build paused this integration. Only Agora.Build can resume it.", "code": "admin_paused" }` without
+  asking Auth, and Auth answers the same when the Portal has not heard yet (the Portal then reads the feed at once).
+  While Agora.Build has the owner's account disabled, a resume answers 409 `owner_disabled`. Revoking, renewing, the
+  quota and keys stay the owner's. Only an admin lifts the pause, on the admin site; the Portal follows the resume
+  from the feed.
+- **What people and Stations see.** The admin's account and the reason they typed stay in the Portal's events and in
+  Auth's audit. An integration's history shows such a change as by `agora_build` (Agora.Build) without a reason, and
+  the Station's feed gives it the `reason` `agora_build` ("The change feed", under "For Station Builders", lists the
+  entry kinds for an owner's account being disabled or enabled; Stations act on `state` and `integration.state`, not
+  on `kind`).
+- **Clocks.** A resume from the feed is recorded but not applied when the Portal already has a newer pause, resume or
+  revocation of that integration (a pause or revocation always applies). That compares the change time Auth gives
+  with times from the Portal's own clock, so keep Auth's and the Portal's clocks in sync (NTP). Skewed clocks could
+  hold a resume back or let a late one through; the owner's next listing follows Auth again.
+- **A stale owner-disabled flag.** The flag clears when Auth enables the account (the feed's `owner_enabled`), and
+  also when Auth accepts a management call naming that owner as `actor` (Auth refuses a disabled account's calls, so
+  an accepted one proves it is enabled). That heals a missed `owner_enabled`: the Portal records
+  `integration_owner_enabled` (actor `system`, reason `reconciled`) and tells the Station. To check by hand, compare the
+  Portal's `SELECT id, owner_account, owner_disabled_at FROM integrations WHERE owner_disabled_at IS NOT NULL;` with
+  Auth's `accounts.disabled_at` for those owners. A flag on an account Auth shows enabled is stale.
+
+#### Rolling Out Admin Changes (Dev First)
+
+Dev Auth is one node. Production follows only after the admin site and passkeys are verified on dev, with the owner's
+approval.
+
+1. **Owner sign-off.** From step 3 until the admin site is live (step 7), admins cannot pause or revoke others'
+   integrations anywhere: Auth refuses the D24 Portal's admin calls (403), the D26 Portal does not offer them, and the
+   admin site does not exist yet.
+2. **Keep the way back.** Tag the running images (`portal:pre-d26`, `auth:pre-d26`), copy Auth's current clients file,
+   and dump the Portal's and Auth's databases.
+3. **Deploy Auth D26** (`feat/admin-mfa`) with the D24 clients file unchanged. Check that Auth starts and signs people
+   in, and that the Portal still lists Stations and integrations for an ordinary account.
+4. **Passkeys.** At least two of the built-in Station's admins add passkeys at Auth.
+5. **Deploy the Portal D26.** Migration 003 runs when the server starts. Set `TRUST_PROXY=1` behind the proxy. The
+   reader starts with an empty cursor and reads Auth's whole feed once. Check that the log has no `Auth change feed
+   read failed`, `Auth change feed not available yet` or `Built-in Station sync failed` line, and that
+   `curl -s -o /dev/null -w '%{http_code}\n' -X POST https://dev.agora.build/auth/integration-changes` prints 204 and
+   the same without `-X POST` prints 405. `PLATFORM_ADMINS` may stay set: it now only affects Stoa spaces.
+6. **Register the nudge and the admin client.** Back up Auth's clients file, add `changesNudgeUri`
+   (`https://dev.agora.build/auth/integration-changes`) to the `portal` client and the `admin` client entry with its
+   secret setting `ADMIN_CLIENT_SECRET` (the name only; the value goes into Auth's settings file, never into a
+   document), and restart Auth. Add `changesNudgeUri` only once the Portal serves its nudge (step 5) and the `admin`
+   entry only once the reader runs. Auth logs no "the Portal did not accept a change nudge" or "a change nudge did not
+   reach the Portal".
+7. **Deploy the admin site.**
+8. **Live checks with Astation.** With integrations on for the dev built-in Station and a disposable integration, an
+   admin's pause on the admin site shows in the Station's feed within seconds, the owner sees "Paused by Agora.Build"
+   with no Resume, the admin's lift and revocation follow, and so do disabling and enabling the owner's account.
+
+If Auth ever runs more than one node, upgrade all of them before the Portal's reader reads from it: an older node
+writes pause and revoke rows without the feed lock, so a reader could skip one. Then set the Portal's cursor back once
+(`UPDATE auth_change_feed SET cursor = NULL;` on the Portal database); changes it already applied are recognised and
+skipped, so reading again is safe. Do not use the admin site while any Auth node runs an image from before the change
+feed. If the Portal is deployed before Auth, its reader logs `Auth change feed not available yet: not_found.` and the
+built-in sync `Built-in Station sync failed: not_found.` each minute until Auth has both; Stations already in the
+Portal keep working.
+
+#### Rolling Back, And After Restoring Auth
+
+- **Roll Auth and the Portal back together.** Run `portal:pre-d26` (D24, commit `02e52ca`; it needs `PLATFORM_ADMINS`
+  set, since it syncs built-in Stations by listing as the first admin) and `auth:pre-d26` with the clients file Auth ran
+  before. Mixed versions break things:
+  - The D24 Portal has no feed reader and answers Auth's nudge with 405; Auth logs that it was not accepted. Migration
+    003 only added columns and a table, which that image ignores. Back on D26 the Portal continues from its saved
+    cursor and catches up.
+  - The D24 Auth has no `/manage/v1/built-in-stations` or feed (404), so a D26 Portal on it logs the two `not_found`
+    lines above and syncs nothing new.
+  - The D24 Auth refuses a clients file that contains the `admin` client or `changesNudgeUri`, so restore the previous
+    file together with the image.
+- **After Auth's migration 009** an older Auth image cannot resume an integration an admin paused: it answers 500 and
+  the Portal shows "Auth is unavailable". Until Auth rolls forward again an admin's pause cannot be lifted (revoking
+  and the settings still work, and so does resuming any other pause). Auth's rollback does not undo that migration.
+- **After any window with mixed Auth versions, and after restoring Auth's database** from a backup, set the Portal's
+  cursor back with `UPDATE auth_change_feed SET cursor = NULL;`. Auth hands out cursors again from the backup's point.
+  A cursor beyond Auth's newest change answers 409 `cursor_ahead`, and the Portal then logs a warning, forgets its
+  cursor and reads the feed from the start by itself. A cursor that new changes have since passed looks valid and would
+  skip changes, so reset it by hand after every restore.
+- **After restoring the Portal's database** the Stations' own feed refuses an old cursor (see "Cursors").
 
 ### Routes
 
@@ -837,8 +967,8 @@ never point it at production. The Stations and integrations tests
 (`tests/integrations-*.test.mjs`) cover the migrations and event partitions,
 the lifecycle states, proof of control and its address checks, the Auth
 management client, Station registration and sharing, integration changes,
-reports, the change feed and push, the routes and the account page; the ones that
-need PostgreSQL use the same variable and run in throwaway schemas.
+reports, the change feed and push, the reader of Auth's change feed, the nudge route and applying admin changes, the
+routes and the account page; the ones that need PostgreSQL use the same variable and run in throwaway schemas.
 
 `npm run test:e2e` runs the real Portal against the real auth.agora.build, loaded
 from an Agora-Build/Auth checkout (`AUTH_REPO`, default `../Auth`, with
@@ -849,7 +979,15 @@ back-channel logout, a billing client, a native app, the billing allowlist, key
 rotation, the IdP going down and cross-account isolation over real HTTP.
 `tests/e2e/built-in-station.e2e.mjs` runs the built-in Station: two accounts listing it, the refused actions, its
 `s-` report token, its feed, integrations off then on, the plan limit, and that an Agora.Build admin has no admin views or rights in the Portal.
-`scripts/browser-smoke-integrations.mjs` also checks its row and the Station selector.
+It also makes admin changes at Auth (Auth's integration store with `admin: true`, the call the admin site's request
+makes once Auth's step-up gate has passed): a pause reaches the Portal's events and the Station's feed through Auth's
+nudge, the owner cannot resume it in the Portal or at Auth, the admin's lift and revocation follow, and with the nudge
+lost the Portal's poll still brings a pause. It checks that the Station's feed, the owner's history and the Portal's
+log name neither the admin nor the reasons, and that an admin disabling and enabling an owner at Auth pauses and
+restores that owner's integrations. Those need an Auth checkout with the change feed and the admin pause lock (Auth
+`feat/admin-mfa`, Tasks 13 and 14) and are skipped otherwise.
+`scripts/browser-smoke-integrations.mjs` also checks its row and the Station selector, and the row of an integration
+an admin paused at Auth ("Paused by Agora.Build", no Resume).
 
 `node scripts/browser-smoke.mjs` drives a real headless Chromium through the same
 stack at desktop and mobile sizes: the keyboard-reachable "Sign in", the IdP page
