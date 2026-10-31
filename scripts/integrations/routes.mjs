@@ -19,11 +19,15 @@ const BUILT_IN_SYNC_AFTER = { ok: 3600000, failed: 60000 };
 // Registering a Station and creating an integration keep their own, stricter limits.
 const LISTS_PER_MINUTE = 60;
 const CHANGES_PER_MINUTE = 30;
+// Auth's nudge after an integration change the Portal did not make (spec §3.3.4): the path is the Portal client's
+// changesNudgeUri in Auth's clients file, and one address may send this many a minute.
+export const CHANGES_NUDGE_PATH = "/auth/integration-changes";
+export const NUDGES_PER_MINUTE = 60;
 
 export const integrationPath = (path) => /^\/api\/(stations|integrations)(\/|$)/.test(path);
 
-// The stack for a ready service (tests): nothing to prepare or close, and no reader for a nudge to wake.
-export const readyIntegrations = (service) => ({ service, ready: async () => service, nudge: () => {}, close: async () => {} });
+// The stack for a ready service (tests): nothing to prepare or close; `nudge` stands in for the reader's request.
+export const readyIntegrations = (service, nudge = () => {}) => ({ service, ready: async () => service, nudge, close: async () => {} });
 
 // The service over `db`. ready() migrates and creates the event partitions before the first request, once; a failure
 // answers 503 and the next request tries again. The partitions are then kept up hourly. `stationFetch` (proof of

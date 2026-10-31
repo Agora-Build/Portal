@@ -3,6 +3,7 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
+import { connect } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -47,6 +48,8 @@ function withoutDatabaseUrl(t) {
   t.after(() => { if (saved !== undefined) process.env.DATABASE_URL = saved; });
 }
 
+// The server's own log lines about the stack, not the unrelated ones it writes at startup.
+const stackLines = (app) => app.logs.filter((line) => !line.startsWith("Agora Console"));
 const close = (instance) => new Promise((done) => { instance.close(done); instance.closeIdleConnections(); });
 async function start(t, options = {}) {
   withoutDatabaseUrl(t);
@@ -57,11 +60,15 @@ async function start(t, options = {}) {
   const instance = createAppServer(root, {
     monitor: false, store, idp, siteUrl, billingClients: null, log: (line) => logs.push(line), models: createModelClient(modelConfig({})),
     calls: createAgoraCalls(agoraConfig(env)), signaling: createSignaling(signalingConfig(env)), channelSecret: env.SPACES_SIGNALING_SECRET,
-    ...("integrations" in options ? { integrations: options.integrations } : {})
+    ...("integrations" in options ? { integrations: options.integrations } : {}),
+    ...("integrationNudge" in options ? { integrationNudge: options.integrationNudge } : {}),
+    ...("integrationStack" in options ? { integrationStack: options.integrationStack } : {}),
+    ...("integrationRetryMs" in options ? { integrationRetryMs: options.integrationRetryMs } : {}),
+    ...("trustProxy" in options ? { trustProxy: options.trustProxy } : {})
   });
   await new Promise((done) => instance.listen(0, "127.0.0.1", done));
   t.after(() => close(instance));
-  return { fake, idp, store, logs, base: "http://127.0.0.1:" + instance.address().port };
+  return { fake, idp, store, logs, server: instance, stop: () => close(instance), base: "http://127.0.0.1:" + instance.address().port };
 }
 
 // A real service on the test database; null (and the test skipped) without PORTAL_TEST_DATABASE_URL.
@@ -592,6 +599,133 @@ test("an injected ready service takes a nudge and does nothing with it", async (
   const integrations = readyIntegrations(service);
   assert.equal(integrations.nudge(), undefined);
   assert.equal(await integrations.ready(), service);
+});
+
+test("an injected ready service hands a nudge to the function it was given", async () => {
+  const nudges = [];
+  const integrations = readyIntegrations({}, () => nudges.push("asked"));
+  integrations.nudge();
+  assert.deepEqual(nudges, ["asked"]);
+});
+
+test("Auth's nudge is a bodiless POST that only asks for a read of Auth's feed: no session, no same-origin check, 60 a minute", async (t) => {
+  const nudges = [];
+  const app = await start(t, { integrations: {}, integrationNudge: () => nudges.push(Date.now()) });
+  const nudge = (init = {}) => fetch(app.base + "/auth/integration-changes", { method: "POST", ...init });
+  const answer = await nudge();
+  assert.deepEqual([answer.status, await answer.text(), answer.headers.get("cache-control")], [204, "", "no-store"]);
+  assert.equal(nudges.length, 1);
+  // Server to server: another site's Origin and Sec-Fetch-Site don't matter, and nothing it sends is read.
+  assert.equal((await nudge({ headers: { Origin: "https://evil.example", "Sec-Fetch-Site": "cross-site" } })).status, 204);
+  for (const body of ["{}", "x"]) assert.equal((await nudge({ body, headers: { "Content-Type": "application/json" } })).status, 413, "a nudge carries no body");
+  const get = await fetch(app.base + "/auth/integration-changes");
+  assert.deepEqual([get.status, get.headers.get("allow")], [405, "POST"]);
+  assert.equal(nudges.length, 2, "only the bodiless POSTs asked for a read");
+  // The address's allowance is 60 a minute, every POST counted; refused ones ask for nothing.
+  let accepted = 0;
+  let refused = null;
+  for (let index = 0; index < 70; index += 1) {
+    const response = await nudge();
+    if (response.status === 204) accepted += 1;
+    else refused ??= response;
+  }
+  assert.equal(accepted, 56, "four POSTs above already counted");
+  assert.deepEqual([refused.status, refused.headers.get("retry-after")], [429, "60"]);
+  assert.equal(nudges.length, 58);
+});
+
+test("without Stations and integrations the nudge answers 404", async (t) => {
+  const app = await start(t, { integrations: null });
+  assert.equal((await fetch(app.base + "/auth/integration-changes", { method: "POST" })).status, 404);
+});
+
+test("the nudge refuses a body with 413 and Connection: close, without waiting for it", async (t) => {
+  const nudges = [];
+  const app = await start(t, { integrations: {}, integrationNudge: () => nudges.push(1) });
+  const { port } = app.server.address();
+  // A raw request: Transfer-Encoding: chunked with a body the server must not wait for, then Content-Length: 5 with none sent.
+  const raw = (head) => new Promise((resolve, reject) => {
+    const socket = connect(port, "127.0.0.1", () => socket.write(head));
+    let received = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => { received += chunk; });
+    socket.on("close", () => resolve(received));
+    socket.on("error", reject);
+    setTimeout(() => { socket.destroy(); }, 1000).unref();
+  });
+  for (const head of ["POST /auth/integration-changes HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", "POST /auth/integration-changes HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\n"]) {
+    const received = await raw(head);
+    assert.match(received, /^HTTP\/1\.1 413 /, "the body is refused before it arrives");
+    assert.match(received, /connection: close/i);
+  }
+  assert.deepEqual(nudges, []);
+});
+
+test("the nudge's allowance is per client address: behind TRUST_PROXY=1 the last X-Forwarded-For hop, never a leading one", async (t) => {
+  const app = await start(t, { integrations: {}, integrationNudge: () => {}, trustProxy: "1" });
+  const nudge = (forwardedFor) => fetch(app.base + "/auth/integration-changes", { method: "POST", headers: { "X-Forwarded-For": forwardedFor } });
+  for (let index = 0; index < 60; index += 1) assert.equal((await nudge("198.51.100." + (index % 250) + ", 203.0.113.9")).status, 204, "a spoofed leading hop earns nothing");
+  assert.equal((await nudge("192.0.2.1, 203.0.113.9")).status, 429, "the proxy-added hop is the client");
+  assert.equal((await nudge("203.0.113.10")).status, 204, "another address has its own allowance");
+});
+
+test("a nudge asks the running stack for a read: it never starts, retries or logs for the stack", async (t) => {
+  const calls = { ready: 0, nudge: 0 };
+  const stack = { service: {}, ready: async () => { calls.ready += 1; return stack.service; }, nudge: () => { calls.nudge += 1; }, close: async () => {} };
+  const app = await start(t, { integrationStack: stack });
+  await waitFor(() => calls.ready === 1, "the stack's start at server start");
+  for (let index = 0; index < 5; index += 1) assert.equal((await fetch(app.base + "/auth/integration-changes", { method: "POST" })).status, 204);
+  assert.deepEqual(calls, { ready: 1, nudge: 5 });
+  assert.deepEqual(stackLines(app), []);
+});
+
+test("the stack starts when the server starts, without holding up the server, and the start is retried until it succeeds", async (t) => {
+  const calls = [];
+  let failMigrate = true;
+  const db = {
+    pool: { async query() { return { rows: [] }; } },
+    async migrate() { calls.push("migrate"); if (failMigrate) { failMigrate = false; throw Object.assign(new Error("down"), { code: "ECONNREFUSED" }); } return []; },
+    async ensureEventPartitions() { return []; },
+    async close() { calls.push("close"); }
+  };
+  const manage = fakeManage();
+  const reads = () => manage.calls.filter((name) => name === "integrationChanges").length;
+  const stackLogs = [];
+  const stack = createIntegrationStack({ db, manage, idp: null, log: (line) => stackLogs.push(line), authChanges: { pollMs: 3600000, minGapMs: 5 } });
+  const app = await start(t, { integrationStack: stack, integrationRetryMs: { first: 20, max: 40 } });
+  // No request has asked for the stack: it started itself, failed once, and tried again.
+  await waitFor(() => reads() === 1, "the reader's first read");
+  assert.deepEqual(calls, ["migrate", "migrate"]);
+  assert.deepEqual(stackLogs, ["Portal database is not ready: ECONNREFUSED."]);
+  assert.deepEqual(stackLines(app), ["Stations and integrations did not start: error."], "a fixed message and a code, nothing from the error");
+  // Started, it is not started again.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(calls, ["migrate", "migrate"]);
+  assert.equal(stackLines(app).length, 1);
+  await app.stop();
+  await waitFor(() => calls.at(-1) === "close", "the stack's close");
+});
+
+test("a start that never finishes does not hold up the server", async (t) => {
+  const stack = { service: {}, ready: () => new Promise(() => {}), nudge: () => {}, close: async () => {} };
+  const app = await start(t, { integrationStack: stack });
+  const page = await fetch(app.base + "/");
+  assert.equal(page.status, 200);
+  await page.arrayBuffer();
+});
+
+test("closing the server stops the start's retries and closes the stack", async (t) => {
+  const calls = { ready: 0, close: 0 };
+  const stack = { service: {}, ready: async () => { calls.ready += 1; throw Object.assign(new Error("secret detail"), { code: "ECONNREFUSED" }); }, nudge: () => {}, close: async () => { calls.close += 1; } };
+  const app = await start(t, { integrationStack: stack, integrationRetryMs: { first: 15, max: 15 } });
+  await waitFor(() => calls.ready >= 3, "retries of the start");
+  assert.ok(stackLines(app).length >= 3);
+  assert.ok(stackLines(app).every((line) => line === "Stations and integrations did not start: ECONNREFUSED."), "a fixed message and the code only");
+  await app.stop();
+  await waitFor(() => calls.close === 1, "the stack's close");
+  const settled = { ...calls, logs: stackLines(app).length };
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.deepEqual({ ...calls, logs: stackLines(app).length }, settled, "no start after the server closed");
 });
 
 test("close() stops reading Auth's change feed", async () => {
