@@ -16,7 +16,7 @@ import { createRepository } from "../scripts/integrations/repository.mjs";
 import { createIntegrationService } from "../scripts/integrations/service.mjs";
 import { createIntegrationStack, integrationsFromEnv } from "../scripts/integrations/routes.mjs";
 import { accountId, createFakeIdp } from "./helpers/fake-idp.mjs";
-import { fakeManage } from "./helpers/fake-manage.mjs";
+import { BUILT_IN_REPORT_CLIENT, fakeManage } from "./helpers/fake-manage.mjs";
 import { testDatabase } from "./helpers/test-db.mjs";
 
 const root = new URL("../", import.meta.url).pathname;
@@ -467,4 +467,63 @@ test("the stack syncs the built-in Stations from Auth once when it becomes ready
   assert.deepEqual((await db.pool.query("SELECT id, built_in, report_client_id FROM stations")).rows, [{ id: built.id, built_in: true, report_client_id: built.reportClientId }]);
   await integrations.ready();
   assert.equal(listings(), 1, "memoised with ready()");
+});
+
+test("the built-in Station's own report token reports and reads a feed of every integration on it, and only those", async (t) => {
+  const admin = accountId();
+  const integrations = await stack(t, { admins: [admin] });
+  if (!integrations) return;
+  const built = integrations.manage.seedBuiltIn({ integrations: true, admins: [admin] });
+  const app = await start(t, { integrations: integrations.service });
+  const token = await app.fake.issueAccessToken({ sub: BUILT_IN_REPORT_CLIENT, client_id: BUILT_IN_REPORT_CLIENT, scope: "station.report" });
+  // A report client the Portal does not know is refused.
+  const strangerClient = "s-" + "0".repeat(24) + "bz";
+  const stranger = await call(app.base, "/api/v1/stations/changes?cursor=0", { bearer: await app.fake.issueAccessToken({ sub: strangerClient, client_id: strangerClient, scope: "station.report" }) });
+  assert.deepEqual([stranger.status, (await stranger.json()).code], [403, "station"]);
+  // The startup sync (the stack runs it at ready(); this test injects the service, so it runs it as the stack would)
+  // makes the built-in Station known before anyone has signed in.
+  assert.equal(await integrations.service.syncBuiltIn(), true);
+  const first = await call(app.base, "/api/v1/stations/changes?cursor=0", { bearer: token });
+  assert.equal(first.status, 200);
+  assert.deepEqual((await first.json()).integrations, []);
+  const ada = await signIn(app);
+  const bo = await signIn(app);
+  const custom = (await registerStation(app, integrations, ada.cookie)).station;
+  assert.equal((await call(app.base, "/api/stations", { cookie: ada.cookie })).status, 200);
+  const mine = await createIntegration(app, ada.cookie, built.id);
+  const theirs = await createIntegration(app, bo.cookie, built.id);
+  const elsewhere = await createIntegration(app, ada.cookie, custom.id);
+  const feed = await (await call(app.base, "/api/v1/stations/changes?cursor=0", { bearer: token })).json();
+  assert.deepEqual(feed.integrations.map((entry) => [entry.id, entry.ownerAccount]), [[mine.id, ada.sub], [theirs.id, bo.sub]]);
+  assert.ok(feed.changes.every((change) => change.integrationId !== elsewhere.id), "nothing of another Station");
+  await integrations.service.approve(ada.sub, mine.id, { r9Svc: R9 });
+  const reported = await call(app.base, "/api/v1/stations/reports", { bearer: token, method: "POST", data: { integrationId: mine.id, state: "waiting_for_host" } });
+  assert.deepEqual([reported.status, (await reported.json()).state], [200, "waiting_for_host"]);
+  const foreign = await call(app.base, "/api/v1/stations/reports", { bearer: token, method: "POST", data: { integrationId: elsewhere.id, state: "waiting_for_host" } });
+  assert.equal(foreign.status, 404, "another Station's integration is unknown to it");
+  assert.equal((await app.store.snapshot()).accounts.some((account) => account.id === BUILT_IN_REPORT_CLIENT), false, "no Portal account");
+  await integrations.service._pushesIdle();
+  const hints = integrations.pushes.filter((push) => push.url === "https://station.agora.test/agora-build/v1/changes");
+  assert.ok(hints.length > 0 && hints.every((push) => Number.isSafeInteger(push.body.cursor)), "push hints go to its origin");
+});
+
+test("the built-in Station answers 409 through the routes: built_in, origin_taken and not_supported", async (t) => {
+  const integrations = await stack(t);
+  if (!integrations) return;
+  const built = integrations.manage.seedBuiltIn({ integrations: false });
+  const app = await start(t, { integrations: integrations.service });
+  const ada = await signIn(app);
+  const bo = await signIn(app);
+  assert.equal((await call(app.base, "/api/stations", { cookie: ada.cookie })).status, 200);
+  const code = async (response, status, expected) => assert.deepEqual([response.status, (await response.json()).code], [status, expected]);
+  const path = "/api/stations/" + built.id;
+  await code(await call(app.base, path, { cookie: ada.cookie, method: "DELETE" }), 409, "built_in");
+  await code(await call(app.base, path + "/members/" + bo.sub, { cookie: ada.cookie, method: "PUT" }), 409, "built_in");
+  await code(await call(app.base, path + "/members/" + bo.sub, { cookie: ada.cookie, method: "DELETE" }), 409, "built_in");
+  await code(await call(app.base, path + "/members/" + ada.sub, { cookie: ada.cookie, method: "DELETE" }), 409, "built_in");
+  await code(await call(app.base, path + "/members", { cookie: ada.cookie }), 409, "built_in");
+  await code(await call(app.base, "/api/stations/challenges", { cookie: ada.cookie, method: "POST", data: { origin: built.origin } }), 409, "origin_taken");
+  const create = await call(app.base, "/api/integrations", { cookie: ada.cookie, method: "POST", data: { stationId: built.id, name: "My app", scopes: ["agent.view"], publicJwk: publicJwk() } });
+  await code(create, 409, "not_supported");
+  await integrations.service._pushesIdle();
 });
