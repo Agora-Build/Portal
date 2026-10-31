@@ -6,6 +6,35 @@ import { ManageError } from "../scripts/integrations/auth-manage.mjs";
 import { AUTH_CHANGES, createAuthChanges } from "../scripts/integrations/auth-changes.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// An array whose reached(n) resolves once it holds n items, so a test waits on what the reader did, not for a time.
+// Its timer only fails a reader that never gets there; being ref'd, unlike the reader's own timers, it also keeps the
+// event loop alive meanwhile. Both are non-enumerable: the array still compares equal to a plain one.
+function watched(list = []) {
+  const waiting = [];
+  Object.defineProperties(list, {
+    push: { value: (...items) => {
+      const length = Array.prototype.push.apply(list, items);
+      for (const wait of waiting.filter((entry) => length >= entry.count)) {
+        waiting.splice(waiting.indexOf(wait), 1);
+        wait.resolve();
+      }
+      return length;
+    } },
+    reached: { value: (count) => new Promise((resolve, reject) => {
+      if (list.length >= count) {
+        resolve();
+        return;
+      }
+      const timer = setTimeout(() => {
+        waiting.splice(waiting.indexOf(wait), 1);
+        reject(new Error("never reached " + count + " (" + list.length + ")"));
+      }, 5000);
+      const wait = { count, resolve: () => { clearTimeout(timer); resolve(); } };
+      waiting.push(wait);
+    }) }
+  });
+  return list;
+}
 const HOUR = 3600000;
 const RECOVERED = "Auth change feed read again.";
 const CURSOR_AHEAD = "Auth change feed cursor is ahead of Auth (restored from a backup?): reading the feed again from the start.";
@@ -20,25 +49,34 @@ function memoryCursor(cursor = null) {
   };
   return repository;
 }
-// Auth's feed with `count` entries c1, c2, …; each read is recorded with its cursor and start time. `hold` makes
-// reads wait until it resolves; `fail` makes them throw. A cursor it never handed out is beyond its newest change, as
-// after Auth was restored from a backup: 409 cursor_ahead.
+// Auth's feed with `count` entries c1, c2, …; each read is recorded with its cursor and start time (reads.reached(n)
+// waits for the nth), and `most` is the most reads it ever had in flight at once. `hold` makes reads wait until it
+// resolves; `fail` makes them throw. A cursor it never handed out is beyond its newest change, as after Auth was
+// restored from a backup: 409 cursor_ahead.
 function feedOf(count) {
   const entry = (n) => ({ cursor: "c" + n, kind: "paused", clientId: "i-" + n });
+  let inFlight = 0;
   const manage = {
     entries: Array.from({ length: count }, (_, index) => entry(index + 1)),
-    reads: [],
+    reads: watched(),
+    most: 0,
     hold: null,
     fail: null,
     add() { manage.entries.push(entry(manage.entries.length + 1)); },
     async integrationChanges({ after, limit }) {
-      manage.reads.push({ after: after ?? null, at: Date.now() });
-      if (manage.hold) await manage.hold;
-      if (manage.fail) throw manage.fail;
-      const place = manage.entries.findIndex((item) => item.cursor === after);
-      if (after !== undefined && place < 0) throw new ManageError(409, "cursor_ahead");
-      const changes = manage.entries.slice(place + 1, place + 1 + limit);
-      return { changes, nextCursor: changes.length ? changes.at(-1).cursor : after ?? null };
+      inFlight += 1;
+      manage.most = Math.max(manage.most, inFlight);
+      try {
+        manage.reads.push({ after: after ?? null, at: Date.now() });
+        if (manage.hold) await manage.hold;
+        if (manage.fail) throw manage.fail;
+        const place = manage.entries.findIndex((item) => item.cursor === after);
+        if (after !== undefined && place < 0) throw new ManageError(409, "cursor_ahead");
+        const changes = manage.entries.slice(place + 1, place + 1 + limit);
+        return { changes, nextCursor: changes.length ? changes.at(-1).cursor : after ?? null };
+      } finally {
+        inFlight -= 1;
+      }
     }
   };
   return manage;
@@ -91,20 +129,21 @@ test("requests coalesce: one read at a time, requests during it make exactly one
   manage.hold = new Promise((resolve) => { release = resolve; });
   const { feed } = reader(t, { manage, settings: { minGapMs: 60 } });
   feed.start();
-  await sleep(10);
-  assert.equal(manage.reads.length, 1, "the first read is in flight");
+  await manage.reads.reached(1); // the first read is in flight, held
   for (let index = 0; index < 20; index += 1) feed.request();
-  await sleep(10);
+  // Held past minGapMs, so a read started beside it would have started by now. A loaded machine only waits longer,
+  // which can never make a reader that keeps to one read at a time fail.
+  await sleep(120);
   assert.equal(manage.reads.length, 1, "nothing more while it runs");
   manage.hold = null;
   release();
   await feed.idle();
   assert.equal(manage.reads.length, 2, "twenty requests during the read made one more");
-  assert.ok(manage.reads[1].at - manage.reads[0].at >= 55, "spaced by minGapMs");
   for (let index = 0; index < 20; index += 1) feed.request();
   await feed.idle();
   assert.equal(manage.reads.length, 3, "a burst after it makes one read");
-  assert.ok(manage.reads[2].at - manage.reads[1].at >= 55);
+  assert.ok(manage.reads[2].at - manage.reads[1].at >= 55, "spaced by minGapMs from the read before");
+  assert.equal(manage.most, 1, "never two reads at once");
 });
 
 test("a read whose pages were all full asks for another read, after the gap", async (t) => {
@@ -121,23 +160,27 @@ test("a read whose pages were all full asks for another read, after the gap", as
 test("a failed read is logged when it starts and once when reads work again; the cursor stays and the next poll tries again", async (t) => {
   const manage = feedOf(2);
   manage.fail = new ManageError(503, "unavailable");
-  const logs = [];
+  const logs = watched();
   const { feed, applied, repository } = reader(t, { manage, log: (line) => logs.push(line), settings: { pollMs: 25, pageSize: 10 } });
+  // The next read: each poll's read reaches Auth's feed (the reads before it ended with the failure set before it).
+  const nextRead = async () => {
+    await manage.reads.reached(manage.reads.length + 1);
+    await feed.idle();
+  };
   feed.start();
-  await sleep(120);
-  assert.ok(manage.reads.length >= 3, "the poll kept trying");
+  await manage.reads.reached(3); // the poll kept trying
+  await feed.idle();
   assert.deepEqual(logs, ["Auth change feed read failed: unavailable."]);
   assert.deepEqual([applied, repository.saved], [[], []]);
   manage.fail = null;
-  await sleep(60);
-  await feed.idle();
+  await nextRead();
   assert.deepEqual(applied, ["c1", "c2"]);
   assert.deepEqual(logs, ["Auth change feed read failed: unavailable.", RECOVERED], "the end of the failure is logged once");
   manage.fail = new ManageError(404, "not_found");
-  await sleep(60);
+  await nextRead();
   manage.fail = null;
   repository.fail = Object.assign(new Error("down"), { code: "ECONNREFUSED" });
-  await sleep(60);
+  await logs.reached(4); // that read fails before it reaches Auth's feed
   assert.deepEqual(logs, ["Auth change feed read failed: unavailable.", RECOVERED, "Auth change feed not available yet: not_found.", "Auth change feed failed: ECONNREFUSED."]);
 });
 
