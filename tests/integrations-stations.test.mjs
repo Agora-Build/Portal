@@ -13,7 +13,7 @@ const MEMBER = "ab" + "0".repeat(25) + "2";
 const STRANGER = "ab" + "0".repeat(25) + "3";
 const REPORT_KEY = { kty: "EC", crv: "P-256", x: "test-x", y: "test-y" };
 
-async function setup(t, { wrap = (repository) => repository, admins = [] } = {}) {
+async function setup(t, { wrap = (repository) => repository } = {}) {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
   const repository = createRepository(db);
@@ -34,7 +34,7 @@ async function setup(t, { wrap = (repository) => repository, admins = [] } = {})
   const service = createIntegrationService({
     repository: wrap(repository), db, manage, stationFetch, exchange: exchangeFn,
     now: () => clock.now, challengeValue: () => "proof-value-" + (++counter), notify: (stationId) => notified.push(stationId),
-    admins, log: (line) => logs.push(line)
+    log: (line) => logs.push(line)
   });
   // Register a Station for an account the way the browser does: a challenge, then the served value.
   async function register(accountId = OWNER, origin = "https://one.example") {

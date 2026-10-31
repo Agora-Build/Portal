@@ -153,7 +153,7 @@ function feedIntegration(row, at) {
 
 export function createIntegrationService({
   repository, db, manage, stationFetch, exchange, now = Date.now, log = () => {}, ids = randomUUID,
-  challengeValue = () => randomBytes(32).toString("base64url"), pushFetch = createStationFetch({ timeoutMs: 3000 }), notify, admins = []
+  challengeValue = () => randomBytes(32).toString("base64url"), pushFetch = createStationFetch({ timeoutMs: 3000 }), notify
 }) {
   // Every transaction here appends events, so each takes the event lock before any row lock (see lockEvents).
   const appending = (work) => db.transaction(async (client) => {
@@ -412,15 +412,15 @@ export function createIntegrationService({
     return integrationView(row, role, (await repository.station(row.stationId))?.origin ?? null);
   }
 
-  // The row and the account's part in it: "owner"; "station_owner" (it owns the integration's custom Station);
-  // "station_admin" (an Agora.Build admin, on a built-in Station); or null.
+  // The row and the account's part in it: "owner", "station_owner" (it owns the integration's custom Station) or null.
+  // A built-in Station has no owner, so only the integration's owner finds it here: Agora.Build admins act on the
+  // admin site through Auth, never through the Portal (spec §3.3.4, D26).
   async function access(accountId, id) {
     const row = typeof id === "string" && id ? await repository.integration(id) : null;
     if (!row) throw notFound();
     if (row.ownerAccount === accountId) return { row, role: "owner" };
     const station = await repository.station(row.stationId);
-    if (station?.builtIn) return { row, role: admins.includes(accountId) ? "station_admin" : null };
-    return { row, role: station?.ownerAccount === accountId ? "station_owner" : null };
+    return { row, role: station && !station.builtIn && station.ownerAccount === accountId ? "station_owner" : null };
   }
 
   // An account that neither owns the integration nor its Station gets the same 404 as for an unknown ID, before any
@@ -671,9 +671,8 @@ export function createIntegrationService({
     },
 
     // The account's own integrations (reconciled with Auth's list of them) and, read from Portal only, the others on
-    // Stations it owns, which it may pause or revoke, and for Agora.Build admins the others on built-in Stations. Those
-    // are shown only with `asAdmin` (the admin's browser session), never to an app's token acting for the admin.
-    async integrations(accountId, { asAdmin = false } = {}) {
+    // custom Stations it owns, which it may pause or revoke. The same for a browser session and an app's token.
+    async integrations(accountId) {
       let listed;
       try {
         listed = await manage.integrations(accountId);
@@ -688,14 +687,6 @@ export function createIntegrationService({
         if (station.role !== "owner") continue;
         for (const row of await repository.integrationsOnStation(station.id)) {
           if (row.ownerAccount !== accountId) views.push(integrationView(row, "station_owner", station.origin));
-        }
-      }
-      // Agora.Build admins: every other account's integration on the built-in Stations, which they may pause or revoke.
-      if (asAdmin && admins.includes(accountId)) {
-        for (const station of await repository.builtInStations()) {
-          for (const row of await repository.integrationsOnStation(station.id)) {
-            if (row.ownerAccount !== accountId) views.push(integrationView(row, "station_admin", station.origin));
-          }
         }
       }
       return { integrations: views, stale: !listed };

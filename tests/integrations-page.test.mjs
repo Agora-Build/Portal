@@ -110,7 +110,7 @@ test("the built-in Station shows as Built in with Details only, and is offered f
   assert.doesNotMatch(row, /Remove|Share|Leave|membersPanel|confirmed\(/);
   assert.match(script, /\(!station\.builtIn \|\| station\.integrationsEnabled\)/);
   assert.match(script, /Integrations aren't available on the built-in Station yet\. Add your own Station to create one\./);
-  assert.match(script, /As an Agora\.Build admin you can pause or revoke it\./);
+  assert.doesNotMatch(script, /station_admin|As an Agora\.Build admin/, "admins act on the admin site, never here (D26)");
   assert.match(await read("account.html"), /Every account has the built-in Agora Station/);
   assert.match(await read("styles.css"), /\.state-badge--built-in \{/);
 });

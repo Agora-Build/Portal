@@ -58,7 +58,7 @@ async function start(t, options = {}) {
 }
 
 // A real service on the test database; null (and the test skipped) without PORTAL_TEST_DATABASE_URL.
-async function stack(t, { admins = [] } = {}) {
+async function stack(t) {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
   const manage = fakeManage();
@@ -68,7 +68,7 @@ async function stack(t, { admins = [] } = {}) {
   const pushFetch = { async post(url, body) { pushes.push({ url, body }); return { status: 202 }; } };
   const exchanges = [];
   const exchange = async (idToken, origin) => { exchanges.push({ idToken, origin }); return { accessToken: "station-read-token", expiresIn: 300 }; };
-  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, pushFetch, exchange, log: () => {}, admins });
+  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, pushFetch, exchange, log: () => {} });
   t.after(() => service._pushesIdle());
   return { db, manage, served, service, exchanges, pushes };
 }
@@ -463,9 +463,9 @@ test("renewing an expired integration on the built-in Station is checked against
   await integrations.service._pushesIdle();
 });
 
-test("an admin's bearer token lists only the admin's own built-in integrations; only the browser session shows others' and acts on them", async (t) => {
+test("an Agora.Build admin's browser session and tokens list only the admin's own integrations; others' on the built-in Station are 404", async (t) => {
   const admin = accountId();
-  const integrations = await stack(t, { admins: [admin] });
+  const integrations = await stack(t);
   if (!integrations) return;
   const built = integrations.manage.seedBuiltIn({ integrations: true, admins: [admin] });
   const app = await start(t, { integrations: integrations.service });
@@ -476,30 +476,12 @@ test("an admin's bearer token lists only the admin's own built-in integrations; 
   const theirs = await create(owner.cookie);
   const own = await create(boss.cookie);
   const roles = async (response) => (await response.json()).integrations.map((entry) => [entry.id, entry.role]);
-  assert.deepEqual(await roles(await call(app.base, "/api/integrations", { cookie: boss.cookie })), [[own, "owner"], [theirs, "station_admin"]]);
+  assert.deepEqual(await roles(await call(app.base, "/api/integrations", { cookie: boss.cookie })), [[own, "owner"]]);
   const bearer = await app.fake.issueAccessToken({ sub: admin, scope: "integrations:read integrations:approve" });
-  assert.deepEqual(await roles(await call(app.base, "/api/v1/integrations", { bearer })), [[own, "owner"]], "a token acting for an admin sees only the admin's own");
-  for (const action of ["pause", "revoke", "events"]) {
-    const method = action === "events" ? "GET" : "POST";
-    assert.equal((await call(app.base, "/api/v1/integrations/" + theirs + "/" + action, { bearer, method })).status, 404, action + " is not a v1 route");
-    assert.ok([401, 403].includes((await call(app.base, "/api/integrations/" + theirs + "/" + action, { bearer, method })).status), action + " needs the browser session");
-  }
+  assert.deepEqual(await roles(await call(app.base, "/api/v1/integrations", { bearer })), [[own, "owner"]]);
+  for (const action of ["pause", "revoke", "resume"]) assert.equal((await call(app.base, "/api/integrations/" + theirs + "/" + action, { cookie: boss.cookie, method: "POST" })).status, 404, action);
+  assert.equal((await call(app.base, "/api/integrations/" + theirs + "/events", { cookie: boss.cookie })).status, 404);
   assert.equal((await integrations.service.integrations(owner.sub)).integrations[0].state, "awaiting_approval", "nothing changed");
-  const paused = await call(app.base, "/api/integrations/" + theirs + "/revoke", { cookie: boss.cookie, method: "POST" });
-  assert.deepEqual([paused.status, (await paused.json()).role], [200, "station_admin"]);
-  await integrations.service._pushesIdle();
-});
-test("the stack hands the platform admins to the service", async (t) => {
-  const db = await testDatabase(t);
-  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
-  const owner = accountId();
-  const admin = accountId();
-  const manage = fakeManage();
-  const built = manage.seedBuiltIn({ integrations: true, admins: [admin] });
-  const integrations = createIntegrationStack({ db, manage, idp: null, log: () => {}, admins: [admin], pushFetch: { async post() { return { status: 202 }; } } });
-  await integrations.service.stations(owner);
-  const created = await integrations.service.createIntegration(owner, { stationId: built.id, name: "Hosted", scopes: [], publicJwk: publicJwk() });
-  assert.deepEqual((await integrations.service.integrations(admin, { asAdmin: true })).integrations.map((entry) => [entry.id, entry.role]), [[created.id, "station_admin"]]);
   await integrations.service._pushesIdle();
 });
 
@@ -549,10 +531,9 @@ test("a successful built-in sync is repeated on the hourly schedule, with no pla
   await integrations.close();
 });
 test("the built-in Station's own report token reports and reads a feed of every integration on it, and only those", async (t) => {
-  const admin = accountId();
-  const integrations = await stack(t, { admins: [admin] });
+  const integrations = await stack(t);
   if (!integrations) return;
-  const built = integrations.manage.seedBuiltIn({ integrations: true, admins: [admin] });
+  const built = integrations.manage.seedBuiltIn({ integrations: true });
   const app = await start(t, { integrations: integrations.service });
   const token = await app.fake.issueAccessToken({ sub: BUILT_IN_REPORT_CLIENT, client_id: BUILT_IN_REPORT_CLIENT, scope: "station.report" });
   // A report client the Portal does not know is refused.

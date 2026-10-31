@@ -27,9 +27,9 @@ export const readyIntegrations = (service) => ({ service, ready: async () => ser
 // The service over `db`. ready() migrates and creates the event partitions before the first request, once; a failure
 // answers 503 and the next request tries again. The partitions are then kept up hourly. `stationFetch` (proof of
 // control), `pushFetch` (change nudges) and `builtInSyncAfter` are only given by tests; production uses the defaults.
-export function createIntegrationStack({ db, manage, idp, log, stationFetch = createStationFetch(), pushFetch, admins = [], builtInSyncAfter = BUILT_IN_SYNC_AFTER }) {
+export function createIntegrationStack({ db, manage, idp, log, stationFetch = createStationFetch(), pushFetch, builtInSyncAfter = BUILT_IN_SYNC_AFTER }) {
   const exchange = (idToken, origin) => idp ? idp.exchangeForStation(idToken, origin) : Promise.reject(new TokenError(503, "unavailable"));
-  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, pushFetch, exchange, log, admins });
+  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, pushFetch, exchange, log });
   let pending = null;
   let prepared = false;
   const partitions = setInterval(() => {
@@ -67,7 +67,7 @@ export function createIntegrationStack({ db, manage, idp, log, stationFetch = cr
 
 // The stack from the environment: only with DATABASE_URL, and null (logged once, by setting name) when Auth's settings
 // are missing or invalid. Tests may pass `stationFetch` and `pushFetch` (see createIntegrationStack).
-export function integrationsFromEnv(env, { idp, log, stationFetch, pushFetch, admins }) {
+export function integrationsFromEnv(env, { idp, log, stationFetch, pushFetch }) {
   if (!env.DATABASE_URL) return null;
   let manage;
   try {
@@ -78,7 +78,7 @@ export function integrationsFromEnv(env, { idp, log, stationFetch, pushFetch, ad
     log("Stations and integrations are unavailable: " + (error instanceof TypeError ? error.message : "their settings are invalid") + ".");
     return null;
   }
-  return createIntegrationStack({ db: createDatabase(env.DATABASE_URL, { log }), manage, idp, log, stationFetch, pushFetch, admins });
+  return createIntegrationStack({ db: createDatabase(env.DATABASE_URL, { log }), manage, idp, log, stationFetch, pushFetch });
 }
 
 // Maps HTTP requests to the integration service. Returns null when the request is not an integration route. `caller`
@@ -106,9 +106,8 @@ export async function handleIntegrations({ path, method, url, read, service, cal
     const clientId = reporter(); limit("changes:" + clientId, 120, 60000);
     return ok(await service.changes(clientId, url.searchParams.get("cursor") ?? "0"));
   }
-  // Agora.Build admins see other accounts' built-in integrations only in their browser session, never through a token.
   if (path === "/api/integrations" && method === "GET") {
-    return ok(await service.integrations(listing("integrations", caller ? scoped("integrations:read") : await portalUser()), { asAdmin: !caller }));
+    return ok(await service.integrations(listing("integrations", caller ? scoped("integrations:read") : await portalUser())));
   }
   const integration = INTEGRATION.exec(path);
   if (integration?.[2] === "approval" && method === "POST") {

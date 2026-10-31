@@ -7,7 +7,7 @@ export const BUILT_IN_REPORT_CLIENT = "s-" + "0".repeat(24) + "bs";
 
 // An in-memory Auth /manage/v1 following the actor rules of Auth's docs/integrating.md, including built-in Stations
 // (seedBuiltIn): listed first for every account, with no owner or members (409 built_in), integrations only while
-// switched on (409 not_supported), and admins who may pause or revoke others' integrations on them. `failNext` makes
+// switched on (409 not_supported), and admins, who have no rights on them through the Portal (Auth D26 R12). `failNext` makes
 // the next call of that name fail with the given status and code (after the gate, so the call is still recorded).
 export function fakeManage({ now = Date.now } = {}) {
   const stations = [];
@@ -150,8 +150,9 @@ export function fakeManage({ now = Date.now } = {}) {
       const integration = auth.findIntegration(id);
       const others = [r9Svc, quotaPerSecond, expiresAt].some((value) => value !== undefined);
       const station = stations.find((entry) => entry.id === integration.stationId);
-      // The Station-owner rights: the owner of a custom Station, the configured admins of a built-in one.
-      const stationRights = station.builtIn ? station.admins : [station.owner];
+      // The Station-owner right: the owner of a custom Station may pause or revoke. A built-in Station's admins act
+      // through Auth's admin client only (Auth D26 R12): through the Portal an admin is just another account.
+      const stationRights = station.builtIn ? [] : [station.owner];
       const mayStop = (status === "paused" || status === "revoked") && !others;
       if (integration.owner !== actor && !(mayStop && stationRights.includes(actor))) fail(403, "forbidden");
       if (integration.status === "revoked") {

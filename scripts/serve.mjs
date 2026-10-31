@@ -134,7 +134,7 @@ export function createAppServer(directory = root, options = {}) {
   const spaces = options.spaces || createSpaces({ store, worlds, signaling, calls, secret: options.channelSecret ?? signalingConfig().secret, admins, plazaCapacity: options.plazaCapacity });
   // Stations and integrations: a ready service (tests), null (off), or built from DATABASE_URL; without it every
   // integration route answers 503. integrationOptions ({ stationFetch, pushFetch }) are for the end-to-end tests.
-  const integrations = "integrations" in options ? (options.integrations && readyIntegrations(options.integrations)) : integrationsFromEnv(process.env, { ...options.integrationOptions, idp, log, admins });
+  const integrations = "integrations" in options ? (options.integrations && readyIntegrations(options.integrations)) : integrationsFromEnv(process.env, { ...options.integrationOptions, idp, log });
   // The account's plan (scripts/plans.mjs), for the integration limits on the built-in Station.
   const planOf = async (accountId) => effectivePlan((await store.snapshot()).accounts.find((account) => account.id === accountId), clock());
   const windows = new Map();

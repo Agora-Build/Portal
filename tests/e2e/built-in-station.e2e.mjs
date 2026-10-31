@@ -45,8 +45,8 @@ describe("The built-in Station against the real auth.agora.build", { skip: skip 
   });
   after(async () => { await stack?.close(); });
 
-  // P-D1: the Portal syncs the built-in Station when its integration stack is ready, as the first PLATFORM_ADMINS
-  // account, so the Station's report token works before anyone has signed in to the Portal.
+  // P-D1: the Portal syncs the built-in Station when its integration stack is ready, from Auth's listing that names no
+  // account (D26; no PLATFORM_ADMINS is set), so the Station's report token works before anyone has signed in to the Portal.
   test("1. before anyone signs in to the Portal, the built-in Station's report token reads its feed", async () => {
     assert.equal((await stack.store.snapshot()).accounts.length, 0, "nobody has signed in to the Portal yet");
     const issued = await built.reportToken();
@@ -54,6 +54,7 @@ describe("The built-in Station against the real auth.agora.build", { skip: skip 
     const first = await feed(0, issued.body.access_token);
     assert.equal(first.status, 200);
     assert.deepEqual(first.body.integrations, []);
+    assert.ok(!stack.logs.some((line) => line.startsWith("Built-in Station sync")), "the sync ran without PLATFORM_ADMINS");
   });
 
   test("2. two accounts both list the built-in Station first, with no owner; Auth lists it the same way; both may read it", async () => {
@@ -147,30 +148,19 @@ describe("The built-in Station against the real auth.agora.build", { skip: skip 
     assert.equal((await create(state.ada.browser)).status, 201, "under the limit again");
   });
 
-  test("8. Agora.Build admins pause and revoke others' integrations on it; nobody else sees them", async () => {
+  test("8. an Agora.Build admin is just another account in the Portal: no views or actions on others' integrations", async () => {
     const cy = await portalSignIn(stack, person(7301, "Cy"));
     assert.equal((await meOf(cy.browser)).account.id, built.adminId);
-    const seen = (await (await cy.browser.api("/api/integrations")).json()).integrations;
-    assert.ok(seen.some((entry) => entry.id === state.boFirst.id && entry.role === "station_admin"));
-    assert.ok(seen.every((entry) => entry.role === "station_admin"));
-    const bosView = (await (await state.bo.browser.api("/api/integrations")).json()).integrations;
-    assert.ok(bosView.length > 0 && bosView.every((entry) => entry.role === "owner"), "Bo sees only his own");
-    const nudgesBefore = built.nudges.length;
-    const paused = await json(await cy.browser.api("/api/integrations/" + state.boFirst.id + "/pause", { method: "POST", json: {} }));
-    assert.deepEqual([paused.status, paused.body.state, paused.body.role], [200, "paused", "station_admin"]);
-    assert.equal((await manage("GET", "/integrations?account=" + state.boId)).body.integrations.find((entry) => entry.clientId === state.boFirst.id).status, "paused", "paused at Auth");
-    assert.deepEqual(await auditAtAuth(state.boFirst.id, "integration_paused"), [[state.boId, built.adminId]], "Auth recorded the admin as the actor on Bo's integration");
-    assert.equal((await cy.browser.api("/api/integrations/" + state.boFirst.id + "/resume", { method: "POST", json: {} })).status, 403, "only the owner resumes");
+    assert.deepEqual((await (await cy.browser.api("/api/integrations")).json()).integrations, [], "Cy owns none and sees nobody else's");
+    for (const action of ["pause", "revoke"]) {
+      const answer = await json(await cy.browser.api("/api/integrations/" + state.boFirst.id + "/" + action, { method: "POST", json: {} }));
+      assert.equal(answer.status, 404, action);
+    }
+    const atAuth = await manage("PATCH", "/integrations/" + state.boFirst.id, { status: "paused", actor: built.adminId });
+    assert.deepEqual([atAuth.status, atAuth.body.error], [403, "forbidden"], "Auth refuses the Portal acting for an admin across accounts");
+    assert.equal((await manage("GET", "/integrations?account=" + state.boId)).body.integrations.find((entry) => entry.clientId === state.boFirst.id).status, "active");
     const refused = await manage("PATCH", "/integrations/" + state.adaFirst.id, { status: "paused", actor: state.boId });
-    assert.deepEqual([refused.status, refused.body.error], [403, "forbidden"], "Auth refuses a non-admin pausing another's integration");
-    const refusedRevoke = await manage("PATCH", "/integrations/" + state.adaFirst.id, { status: "revoked", actor: state.boId });
-    assert.deepEqual([refusedRevoke.status, refusedRevoke.body.error], [403, "forbidden"], "and revoking it");
-    const revoked = await json(await cy.browser.api("/api/integrations/" + state.adaFirst.id + "/revoke", { method: "POST", json: {} }));
-    assert.deepEqual([revoked.status, revoked.body.state], [200, "revoked"]);
-    assert.equal((await manage("GET", "/integrations?account=" + state.adaId)).body.integrations.find((entry) => entry.clientId === state.adaFirst.id).status, "revoked", "revoked at Auth");
-    assert.deepEqual(await auditAtAuth(state.adaFirst.id, "integration_revoked"), [[state.adaId, built.adminId]], "Auth recorded the admin as the actor on Ada's integration");
-    assert.equal((await state.bo.browser.api("/api/integrations/" + state.adaFirst.id + "/pause", { method: "POST", json: {} })).status, 404, "an ordinary account can't find another's integration");
-    assert.ok(await eventually(() => built.nudges.length > nudgesBefore), "the changes were pushed to the Station");
+    assert.deepEqual([refused.status, refused.body.error], [403, "forbidden"], "nor a non-admin pausing another's integration");
     for (const value of Object.values(stack.secrets)) assert.ok(!stack.logs.join("\n").includes(value), "no secret in the Portal log");
   });
 });

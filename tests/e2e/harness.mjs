@@ -14,8 +14,8 @@
 // https://station.test:<port> on 127.0.0.1 and trusts tests/fixtures/tls/station-test.crt. Auth never connects to a
 // Station, so only the Portal needs that name resolved.
 // With `{ integrations: true, builtIn: { admin } }` Auth's clients document also has a built-in Station at
-// https://station.test:<port> (a stub here), the admin is signed in at Auth first and named in Auth's `admins` and the
-// Portal's `PLATFORM_ADMINS`, and `reconfigureAuth()` changes the entry as an Auth restart would.
+// https://station.test:<port> (a stub here), the admin is signed in at Auth first and named in Auth's `admins` (the
+// Portal does not know who the admins are), and `reconfigureAuth()` changes the entry as an Auth restart would.
 import dns from "node:dns";
 import { createServer, request as httpRequest } from "node:http";
 import { createServer as createHttpsServer, Agent as HttpsAgent } from "node:https";
@@ -257,14 +257,14 @@ const models = { config: modelConfig({}), chat: async () => "unused", speak: asy
 const signalingEnv = { AGORA_APP_ID: "a".repeat(32), AGORA_APP_CERTIFICATE: "b".repeat(32), SPACES_SIGNALING_SECRET: randomBytes(24).toString("hex") };
 
 // Starts a Portal server on `port` against `issuer`, with a temp data file and a billing file.
-async function startPortal({ issuer, port, directory, clientSecret, logs, databaseUrl, admins = [] }) {
+async function startPortal({ issuer, port, directory, clientSecret, logs, databaseUrl }) {
   const site = "http://127.0.0.1:" + port;
   const billingFile = resolve(directory, "billing-" + port + ".json");
   await writeFile(billingFile, JSON.stringify({ vox: { services: { evaluation: { credits: 3, maxUnits: 5 } } } }));
   const store = createStore(resolve(portalRoot, "data/people.json"), resolve(directory, "community-" + port + ".json"), { log: (line) => logs.push(line) });
   const server = withEnv({
     AUTH_ISSUER: issuer, PORTAL_CLIENT_ID: "portal", PORTAL_CLIENT_SECRET: clientSecret, SITE_URL: site, PORTAL_API_AUDIENCE: API,
-    PORTAL_BILLING_FILE: billingFile, AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64"), PLATFORM_ADMINS: admins.join(","),
+    PORTAL_BILLING_FILE: billingFile, AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64"),
     ...(databaseUrl ? { DATABASE_URL: databaseUrl } : {})
   }, () => createAppServer(portalRoot, {
     monitor: false, store, log: (line) => logs.push(line), models, modelLimit: 1000,
@@ -308,7 +308,7 @@ export async function startStack(lib, { integrations = false, builtIn = null } =
   if (adminId) await reconfigureAuth({ admins: [adminId] });
   const logs = [];
   const database = integrations ? await portalDatabase() : null;
-  const portal = await startPortal({ issuer, port: portalPort, directory, clientSecret: secrets.PORTAL_CLIENT_SECRET, logs, databaseUrl: database?.url, admins: adminId ? [adminId] : [] })
+  const portal = await startPortal({ issuer, port: portalPort, directory, clientSecret: secrets.PORTAL_CLIENT_SECRET, logs, databaseUrl: database?.url })
     .catch(async (error) => { await database?.drop(); throw error; });
   const closers = [];
   const stack = {

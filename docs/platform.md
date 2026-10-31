@@ -589,11 +589,11 @@ Auth's clients file must be set up for this:
   downgrade existing integrations keep working; new ones wait until the account is under its limit. Renewing an
   expired integration on a built-in Station counts as a creation (same check, same 403; the expired one is not
   counted yet); renewing a live one is always allowed. Custom Stations have no cap.
-- **Admins** are the accounts in `PLATFORM_ADMINS`, which must equal the Station's `admins` in Auth's clients file.
-  In their browser session (never through an app's token acting for them) they see every other account's integration
-  on it (`role` `station_admin`) and may read an integration and its history, pause it or revoke it, nothing else;
-  the history records reason `station_admin`. Through `GET /api/v1/integrations` an admin's token lists only the
-  admin's own integrations, like any account's; history, pause and revoke are browser routes only.
+- **Admins.** Agora.Build admins act on the admin site (`https://admin.agora.build`, dev
+  `https://admin.dev.agora.build`; spec D26), which calls Auth, never in the Portal. In the Portal an admin is just
+  another account: every listing shows an account its own integrations and those on custom Stations it owns, another
+  account's integration on the built-in Station is 404 for everyone but its owner, and Auth refuses the Portal's
+  management calls that act across accounts.
 - **Reports and feed** use the same routes as any Station. Its report token's `sub` is its own `s-` client ID (it has
   no owner): the Portal accepts such a token only when `client_id` equals `sub`, `sub` is `s-` and 26 lower-case
   Crockford base32 characters, and the scope includes `station.report`. It reaches only the two report routes (403
@@ -634,12 +634,12 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
 | `POST /api/stations/<id>/read-token` | browser | a 5-minute `station.read` token for that Station: `{ accessToken, expiresIn, origin }` |
 | `POST /api/integrations` `{ stationId, name, scopes, publicJwk, quotaPerSecond, expiresInDays }` | browser | create; 201; on a built-in Station: only while its integrations are on, within the plan limit |
 | `POST /api/integrations/<id>/keys` `{ publicJwk }` | browser | add a key; 201 `{ kid, overlapEndsAt }` |
-| `POST /api/integrations/<id>/pause`, `resume`, `revoke` | browser | pause and revoke also by the Station's owner, or on a built-in Station by an Agora.Build admin |
+| `POST /api/integrations/<id>/pause`, `resume`, `revoke` | browser | pause and revoke also by the owner of the integration's custom Station |
 | `POST /api/integrations/<id>/renew` `{ expiresInDays }` | browser | new expiry counted from now; an expired one on a built-in Station within the plan limit |
 | `POST /api/integrations/<id>/settings` `{ quotaPerSecond }` | browser | change the quota |
 | `GET /api/integrations/<id>/events` | browser | history (`actor` is `you` for your own changes) |
-| `GET /api/integrations` | browser | the account's integrations, and others on Stations it owns; for an Agora.Build admin also others on built-in Stations |
-| `GET /api/v1/integrations` | token, `integrations:read` | the same list, except that an admin's token never sees other accounts' built-in integrations |
+| `GET /api/integrations` | browser | the account's integrations, and others on custom Stations it owns |
+| `GET /api/v1/integrations` | token, `integrations:read` | the same list |
 | `POST /api/v1/integrations/<id>/approval` `{ r9Svc }` | token, `integrations:approve` | native approval; `r9Svc` is 64 lower-case hex characters |
 | `POST /api/v1/stations/reports` | token, `station.report` | a Station's report |
 | `GET /api/v1/stations/changes?cursor=` | token, `station.report` | the Station's change feed |
@@ -832,7 +832,7 @@ helpers create and drop their own schemas. It drives sign-in, SSO, sign-out,
 back-channel logout, a billing client, a native app, the billing allowlist, key
 rotation, the IdP going down and cross-account isolation over real HTTP.
 `tests/e2e/built-in-station.e2e.mjs` runs the built-in Station: two accounts listing it, the refused actions, its
-`s-` report token, its feed, integrations off then on, the plan limit and admin pause and revoke.
+`s-` report token, its feed, integrations off then on, the plan limit, and that an Agora.Build admin has no admin views or rights in the Portal.
 `scripts/browser-smoke-integrations.mjs` also checks its row and the Station selector.
 
 `node scripts/browser-smoke.mjs` drives a real headless Chromium through the same

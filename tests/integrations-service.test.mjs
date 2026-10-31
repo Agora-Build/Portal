@@ -15,7 +15,7 @@ const R9 = "a".repeat(64);
 
 const publicJwk = () => generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey.export({ format: "jwk" });
 
-async function setup(t, { wrap = (repository) => repository, admins = [] } = {}) {
+async function setup(t, { wrap = (repository) => repository } = {}) {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
   const repository = createRepository(db);
@@ -28,7 +28,7 @@ async function setup(t, { wrap = (repository) => repository, admins = [] } = {})
   let counter = 0;
   const service = createIntegrationService({
     repository: wrap(repository), db, manage, stationFetch, exchange: async () => ({}), now: () => clock.now, log: (line) => logs.push(line),
-    challengeValue: () => "proof-value-" + (++counter), notify: (stationId) => notified.push(stationId), admins
+    challengeValue: () => "proof-value-" + (++counter), notify: (stationId) => notified.push(stationId)
   });
   async function register(accountId = OWNER, origin = "https://one.example") {
     const challenge = await service.createChallenge(accountId, origin);
@@ -530,29 +530,19 @@ test("renewing an expired integration on a custom Station is never capped", asyn
   for (let i = 0; i < 5; i += 1) await s.create(OWNER);
   for (const id of ids) assert.equal((await s.service.renew(OWNER, id, { expiresInDays: 30 }, { plan: "basic" })).state, "awaiting_approval");
 });
-test("Agora.Build admins see others' integrations on the built-in Station and may pause or revoke them, nothing else", async (t) => {
-  const s = await setup(t, { admins: [ADMIN] });
+test("an Agora.Build admin is just another account in the Portal: their own integrations only, no rights on others' on the built-in Station", async (t) => {
+  const s = await setup(t);
   if (!s) return;
   const built = await builtIn(s);
   const theirs = await onBuiltIn(s, built, OWNER);
-  const other = await onBuiltIn(s, built, MEMBER);
-  const custom = await s.create(OWNER);
-  assert.deepEqual((await s.service.integrations(ADMIN, { asAdmin: true })).integrations.map((entry) => [entry.id, entry.role]), [[theirs.id, "station_admin"], [other.id, "station_admin"]]);
-  assert.deepEqual((await s.service.integrations(ADMIN)).integrations, [], "without asAdmin (a token acting for the admin) only the admin's own");
-  assert.deepEqual((await s.service.integrations(STRANGER)).integrations, [], "nobody else sees them");
-  await assert.rejects(s.service.pause(ADMIN, custom.id), refused(404, "not_found"), "no rights on custom Stations");
-  await assert.rejects(s.service.pause(STRANGER, theirs.id), refused(404, "not_found"));
-  await s.service.approve(OWNER, theirs.id, { r9Svc: R9 });
-  const paused = await s.service.pause(ADMIN, theirs.id);
-  assert.deepEqual([paused.state, paused.role], ["paused", "station_admin"]);
-  assert.equal(s.record(theirs.id).status, "paused", "Auth accepted the admin's pause");
-  for (const call of [() => s.service.resume(ADMIN, theirs.id), () => s.service.renew(ADMIN, theirs.id, { expiresInDays: 10 }), () => s.service.settings(ADMIN, theirs.id, { quotaPerSecond: 5 }), () => s.service.rotateKey(ADMIN, theirs.id, { publicJwk: publicJwk() })]) {
-    await assert.rejects(call(), refused(403, "forbidden"));
+  const own = await onBuiltIn(s, built, ADMIN);
+  assert.deepEqual((await s.service.integrations(ADMIN)).integrations.map((entry) => [entry.id, entry.role]), [[own.id, "owner"]]);
+  const calls = s.manage.calls.length;
+  for (const call of [() => s.service.pause(ADMIN, theirs.id), () => s.service.revoke(ADMIN, theirs.id), () => s.service.resume(ADMIN, theirs.id), () => s.service.history(ADMIN, theirs.id)]) {
+    await assert.rejects(call(), refused(404, "not_found"));
   }
-  await assert.rejects(s.service.approve(ADMIN, other.id, { r9Svc: R9 }), refused(404, "not_found"), "never approves");
-  assert.equal((await s.service.revoke(ADMIN, other.id)).state, "revoked");
-  assert.deepEqual((await s.events()).filter((event) => event.actor === ADMIN).map((event) => [event.kind, event.account_id, event.reason]), [
-    ["integration_paused", OWNER, "station_admin"], ["integration_revoked", MEMBER, "station_admin"]
-  ]);
-  assert.ok((await s.service.history(ADMIN, theirs.id)).events.length > 0);
+  assert.equal(s.manage.calls.length, calls, "Auth is not asked");
+  // Auth refuses the Portal acting for an admin on someone else's integration (Auth D26 R12).
+  await assert.rejects(s.manage.changeIntegration(theirs.id, { status: "paused" }, ADMIN), (error) => error.status === 403 && error.code === "forbidden");
+  assert.equal(s.record(theirs.id).status, "active");
 });

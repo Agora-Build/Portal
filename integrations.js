@@ -314,8 +314,8 @@ stationForm.addEventListener("submit", (event) => {
   });
 });
 
-// Integrations: the account's own, others on Stations it owns (which it may pause or revoke), and for Agora.Build admins
-// others on the built-in Station.
+// Integrations: the account's own, and others on custom Stations it owns (which it may pause or revoke). Agora.Build
+// admins act on the admin site, never here (spec D26).
 const integrationStatus = document.querySelector("#integration-status");
 const createKey = keyField(document.querySelector("#integration-key"), () => integrationForm.elements.name.value);
 const BUILT_IN_OFF = "Integrations aren't available on the built-in Station yet. Add your own Station to create one.";
@@ -452,7 +452,7 @@ function integrationRow(integration) {
   const fact = (term, value) => value ? [el("dt", { text: term }), el("dd", { text: value })] : [];
   return el("article", { class: "account-card integration-item", "data-row": integration.id }, [
     el("div", { class: "integration-heading" }, [el("h3", { text: integration.name }), badge]),
-    ...(owner ? [] : [el("p", { class: "muted", text: integration.role === "station_admin" ? "Another account's integration on the built-in Station. As an Agora.Build admin you can pause or revoke it." : "Another account's integration on your Station. You can pause or revoke it." })]),
+    ...(owner ? [] : [el("p", { class: "muted", text: "Another account's integration on your Station. You can pause or revoke it." })]),
     el("dl", { class: "integration-facts" }, [
       ...fact("Station", integration.stationOrigin || ""),
       ...fact("Scopes", (integration.scopes || []).join(", ")),
