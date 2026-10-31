@@ -177,3 +177,47 @@ test("feed ordering: ids follow commit order and a cursor never skips", async (t
   assert.deepEqual(all.map((e) => e.kind), ["first_started", "second_started"]);
   assert.deepEqual((await repo.changesSince("st1", cursor)).map((e) => e.id), [resultB.id]);
 });
+
+test("built-in Stations: no owner, listed for every account first with role built_in, and following Auth", async (t) => {
+  const { repo } = await setup(t);
+  if (!repo) return;
+  await station(repo, "st1", "ab1");
+  assert.equal(await repo.insertStation({ id: "stb", origin: "https://station.agora.test", reportClientId: "s-stb", verifiedAt: NOW, builtIn: true, integrationsEnabled: false, name: "Agora Station" }), true);
+  const built = await repo.station("stb");
+  assert.deepEqual([built.builtIn, built.ownerAccount, built.access, built.integrationsEnabled, built.name], [true, null, "any_account", false, "Agora Station"]);
+  const custom = await repo.station("st1");
+  assert.deepEqual([custom.builtIn, custom.access, custom.integrationsEnabled, custom.name], [false, "members", true, null]);
+  assert.deepEqual((await repo.stationsFor("ab1")).map((s) => [s.id, s.role]), [["stb", "built_in"], ["st1", "owner"]]);
+  assert.deepEqual((await repo.stationsFor("ab9")).map((s) => [s.id, s.role]), [["stb", "built_in"]]);
+  assert.deepEqual((await repo.builtInStations()).map((s) => s.id), ["stb"]);
+  assert.equal(await repo.updateBuiltInStation("stb", { name: "Agora Station", integrationsEnabled: false }), false, "nothing to change");
+  assert.equal(await repo.updateBuiltInStation("stb", { name: "Agora Station", integrationsEnabled: true }), true);
+  assert.equal((await repo.station("stb")).integrationsEnabled, true);
+  assert.equal(await repo.updateBuiltInStation("st1", { name: "Renamed", integrationsEnabled: false }), false, "custom Stations are not touched");
+  await assert.rejects(repo.insertStation({ id: "stx", origin: "https://x.example", reportClientId: "s-stx", verifiedAt: NOW }), { code: "23514" }, "a custom Station needs an owner");
+  await assert.rejects(repo.insertStation({ id: "sty", origin: "https://y.example", ownerAccount: "ab1", reportClientId: "s-sty", verifiedAt: NOW, builtIn: true, name: "Y" }), { code: "23514" }, "a built-in Station has no owner");
+  await assert.rejects(repo.insertStation({ id: "stz", origin: "https://z.example", reportClientId: "s-stz", verifiedAt: NOW, builtIn: true, name: "z".repeat(61) }), { code: "23514" }, "names are 1 to 60 characters, as at Auth");
+  await repo.markStationRemoved("stb", later(1000));
+  assert.deepEqual(await repo.stationsFor("ab9"), []);
+  assert.deepEqual(await repo.builtInStations(), []);
+});
+
+test("countLiveIntegrations counts one account's integrations on one Station that are neither revoked nor expired", async (t) => {
+  const { repo } = await setup(t);
+  if (!repo) return;
+  await station(repo, "st1", "ab1");
+  await station(repo, "st2", "ab1");
+  await repo.insertIntegration(sample("i-1"));
+  await repo.insertIntegration(sample("i-2"));
+  await repo.updateIntegration("i-2", { state: "paused" });
+  await repo.insertIntegration(sample("i-3"));
+  await repo.updateIntegration("i-3", { state: "revoking" });
+  await repo.insertIntegration(sample("i-4"));
+  await repo.updateIntegration("i-4", { state: "revoked" });
+  await repo.insertIntegration(sample("i-5", { expiresAt: later(1000) }));
+  await repo.insertIntegration(sample("i-6", { ownerAccount: "ab2" }));
+  await repo.insertIntegration(sample("i-7", { stationId: "st2" }));
+  assert.equal(await repo.countLiveIntegrations("st1", "ab1", NOW), 4, "awaiting, paused, revoking and the short one");
+  assert.equal(await repo.countLiveIntegrations("st1", "ab1", later(2000)), 3, "i-5 has expired");
+  assert.equal(await repo.countLiveIntegrations("st1", "ab2", NOW), 1);
+});
