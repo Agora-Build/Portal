@@ -714,17 +714,33 @@ approval.
    reader starts with an empty cursor and reads Auth's whole feed once. Check that the log has no `Auth change feed
    read failed`, `Auth change feed not available yet` or `Built-in Station sync failed` line, and that
    `curl -s -o /dev/null -w '%{http_code}\n' -X POST https://dev.agora.build/auth/integration-changes` prints 204 and
-   the same without `-X POST` prints 405. `PLATFORM_ADMINS` may stay set: it now only affects Stoa spaces.
+   the same without `-X POST` prints 405. On the Portal's database `SELECT version FROM portal_migrations;` lists
+   `003_auth_changes.sql`, and after the first read `SELECT cursor IS NOT NULL, updated_at FROM auth_change_feed;`
+   shows `t` and the time of that read (`f` while Auth's feed has no change yet). `PLATFORM_ADMINS` may stay set: it
+   now only affects Stoa spaces.
 6. **Register the nudge and the admin client.** Back up Auth's clients file, add `changesNudgeUri`
    (`https://dev.agora.build/auth/integration-changes`) to the `portal` client and the `admin` client entry with its
    secret setting `ADMIN_CLIENT_SECRET` (the name only; the value goes into Auth's settings file, never into a
    document), and restart Auth. Add `changesNudgeUri` only once the Portal serves its nudge (step 5) and the `admin`
    entry only once the reader runs. Auth logs no "the Portal did not accept a change nudge" or "a change nudge did not
-   reach the Portal".
+   reach the Portal". From Auth's host, over the public path its nudge takes,
+   `curl -s -o /dev/null -w '%{http_code}\n' -X POST https://dev.agora.build/auth/integration-changes` prints 204.
+   Confirm that the last `X-Forwarded-For` hop the Portal gets (the one `TRUST_PROXY=1` uses) is the one its proxy
+   appends, the address that connected to the proxy, so Auth's host has its own nudge allowance.
 7. **Deploy the admin site.**
 8. **Live checks with Astation.** With integrations on for the dev built-in Station and a disposable integration, an
    admin's pause on the admin site shows in the Station's feed within seconds, the owner sees "Paused by Agora.Build"
    with no Resume, the admin's lift and revocation follow, and so do disabling and enabling the owner's account.
+
+Alert on the reader's log lines `Auth change feed read failed`, `Auth change not applied` and, once Auth D26 runs,
+`Auth change feed not available yet`. While the reader is stalled an admin's change holds at Auth, which issues the
+integration no new token, but the Station is not told: an admin's pause is then enforced only by token expiry (at most
+300 seconds).
+
+Pauses an admin made through the D24 Portal's admin views, before Auth's migration 009, are not locks in the Portal
+either: Auth recorded nobody as their pauser, so `paused_by` is NULL and the owner may resume them. Pause again on the
+admin site any that should stay locked (`SELECT id, owner_account FROM integrations WHERE state = 'paused' AND paused_by
+IS NULL;` on the Portal lists them, with owners' pauses from before Auth recorded who paused).
 
 If Auth ever runs more than one node, upgrade all of them before the Portal's reader reads from it: an older node
 writes pause and revoke rows without the feed lock, so a reader could skip one. Then set the Portal's cursor back once
@@ -736,12 +752,17 @@ Portal keep working.
 
 #### Rolling Back, And After Restoring Auth
 
+- **Rolling back only the Portal.** First take the admin site down, or remove the `admin` client from Auth's clients
+  file and restart Auth. A Portal without the feed reader never hears of an admin's change: it stops at Auth's refusal
+  of the integration's tokens, and the Station is not told.
 - **Roll Auth and the Portal back together.** Run `portal:pre-d26` (D24, commit `02e52ca`; it needs `PLATFORM_ADMINS`
   set, since it syncs built-in Stations by listing as the first admin) and `auth:pre-d26` with the clients file Auth ran
   before. Mixed versions break things:
   - The D24 Portal has no feed reader and answers Auth's nudge with 405; Auth logs that it was not accepted. Migration
-    003 only added columns and a table, which that image ignores. Back on D26 the Portal continues from its saved
-    cursor and catches up.
+    003 only added columns and a table, which that image ignores, so on D24 owner-disabled flags and admin pause marks
+    are invisible. Back on D26 the Portal continues from its saved cursor and catches up, and an owner's listing
+    corrects a `paused_by` that is out of date; then run the stale-flag check by hand ("A stale owner-disabled
+    flag").
   - The D24 Auth has no `/manage/v1/built-in-stations` or feed (404), so a D26 Portal on it logs the two `not_found`
     lines above and syncs nothing new.
   - The D24 Auth refuses a clients file that contains the `admin` client or `changesNudgeUri`, so restore the previous
@@ -754,7 +775,8 @@ Portal keep working.
   A cursor beyond Auth's newest change answers 409 `cursor_ahead`, and the Portal then logs a warning, forgets its
   cursor and reads the feed from the start by itself. A cursor that new changes have since passed looks valid and would
   skip changes, so reset it by hand after every restore.
-- **After restoring the Portal's database** the Stations' own feed refuses an old cursor (see "Cursors").
+- **After restoring the Portal's database** the Stations' own feed refuses an old cursor (see "Cursors"). The reader
+  continues from the backup's cursor and applies again, by itself, the admin changes Auth made since the backup.
 
 ### Routes
 
