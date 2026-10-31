@@ -290,28 +290,32 @@ test("an integration's newest pause, resume or revocation counts at Auth's time,
   await station(repo, "st1");
   await repo.insertIntegration(sample("i-1"));
   await repo.insertIntegration(sample("i-2"));
-  assert.equal(await repo.latestStatusAt("i-1"), null);
-  const append = (kind, details, integrationId = "i-1") => db.transaction((client) => repo.appendEvent({ stationId: "st1", integrationId, accountId: "ab1", actor: "system", kind, details }, client));
+  assert.deepEqual(await repo.latestStatus("i-1"), { at: null, id: null });
+  assert.equal(await repo.latestEventId(), 0);
+  const append = async (kind, details, integrationId = "i-1") => (await db.transaction((client) => repo.appendEvent({ stationId: "st1", integrationId, accountId: "ab1", actor: "system", kind, details }, client))).id;
   await append("integration_paused", { authCursor: "YzE", authAt: "2020-01-01T10:00:00.000Z" });
-  assert.equal(await repo.latestStatusAt("i-1"), "2020-01-01T10:00:00.000Z", "an entry of Auth's feed at Auth's time, not when it was recorded");
-  await append("integration_resumed", { seenAt: "2020-01-01T09:00:00.000Z" });
-  assert.equal(await repo.latestStatusAt("i-1"), "2020-01-01T10:00:00.000Z", "the newest time, not the newest event");
-  await append("integration_reconciled", { seenAt: "2020-01-01T12:00:00.000Z" });
-  await append("integration_paused", { seenAt: "2020-01-01T13:00:00.000Z" }, "i-2");
-  assert.equal(await repo.latestStatusAt("i-1"), "2020-01-01T10:00:00.000Z", "only this integration's status changes");
+  assert.equal((await repo.latestStatus("i-1")).at, "2020-01-01T10:00:00.000Z", "an entry of Auth's feed at Auth's time, not when it was recorded");
+  const resumed = await append("integration_resumed", { seenAt: "2020-01-01T09:00:00.000Z" });
+  assert.deepEqual(await repo.latestStatus("i-1"), { at: "2020-01-01T10:00:00.000Z", id: resumed }, "the newest time, and the newest event's ID");
+  const reconciled = await append("integration_reconciled", { seenAt: "2020-01-01T12:00:00.000Z" });
+  const other = await append("integration_paused", { seenAt: "2020-01-01T13:00:00.000Z" }, "i-2");
+  assert.deepEqual(await repo.latestStatus("i-1"), { at: "2020-01-01T10:00:00.000Z", id: resumed }, "only this integration's status changes");
+  assert.equal(await repo.latestEventId(), other);
+  assert.ok(other > reconciled);
   await append("integration_revoked", { seenAt: "2020-01-01T11:00:00.000Z" });
-  assert.equal(await repo.latestStatusAt("i-1"), "2020-01-01T11:00:00.000Z");
+  assert.equal((await repo.latestStatus("i-1")).at, "2020-01-01T11:00:00.000Z");
   await append("integration_paused", { authCursor: "YzI", authAt: "not a time" });
-  assert.ok(Date.parse(await repo.latestStatusAt("i-1")) > Date.parse("2020-01-02T00:00:00.000Z"), "without a usable time, when it was recorded");
+  assert.ok(Date.parse((await repo.latestStatus("i-1")).at) > Date.parse("2020-01-02T00:00:00.000Z"), "without a usable time, when it was recorded");
 });
 
-test("an account's owner-disabled integrations are listed with the time of the disable", async (t) => {
+test("an account's owner-disabled integrations that are not revoked are listed with the time of the disable", async (t) => {
   const { repo } = await setup(t);
   if (!repo) return;
   await station(repo, "st1");
   for (const [id, ownerAccount] of [["i-1", "ab1"], ["i-2", "ab1"], ["i-3", "ab2"]]) await repo.insertIntegration(sample(id, { ownerAccount }));
   assert.deepEqual(await repo.ownerDisabledIntegrations("ab1"), []);
+  await repo.updateIntegration("i-1", { state: "revoked", ownerDisabledAt: NOW });
   await repo.updateIntegration("i-2", { ownerDisabledAt: NOW });
   await repo.updateIntegration("i-3", { ownerDisabledAt: NOW });
-  assert.deepEqual(await repo.ownerDisabledIntegrations("ab1"), [{ id: "i-2", ownerDisabledAt: new Date(NOW).toISOString() }]);
+  assert.deepEqual(await repo.ownerDisabledIntegrations("ab1"), [{ id: "i-2", ownerDisabledAt: new Date(NOW).toISOString() }], "not another account's, nor a revoked one");
 });

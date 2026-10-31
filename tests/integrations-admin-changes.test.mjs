@@ -245,21 +245,20 @@ test("an admin's pause read after the owner revoked the integration is recorded,
 
 // Ruling R-D: Auth refuses a call that names a disabled account as actor, so a call it accepts proves the account is
 // enabled, and an owner-disabled flag whose owner_enabled the Portal never read is cleared.
-test("Auth accepting the owner's own call clears a stale owner-disabled flag; a listing or a refused call does not", async (t) => {
+test("Auth accepting the owner's own call clears a stale owner-disabled flag; a listing or a call Auth refuses does not", async (t) => {
   const s = await setup(t);
   if (!s) return;
   const live = await s.ready();
   const other = await s.ready();
   s.manage.setOwnerDisabled(OWNER, true, { actor: ADMIN, reason: "Abuse" });
   await s.follow();
+  await assert.rejects(s.service.settings(OWNER, live, { quotaPerSecond: 50 }), (error) => error instanceof AppError && error.status === 400 && error.details.code === "invalid_request");
+  assert.ok((await s.repository.integration(live)).ownerDisabledAt, "Auth refuses a disabled owner's call, which proves nothing");
   // Enabled again with no entry the Portal reads, as an enable made in Auth's database would be.
   s.manage.setOwnerDisabled(OWNER, false, { actor: ADMIN, reason: "Appeal" });
   s.manage.feed.splice(-2);
   await s.service.integrations(OWNER);
-  assert.ok((await s.repository.integration(live)).ownerDisabledAt, "Auth lists a disabled account's integrations too");
-  s.manage.failNext.changeIntegration = { status: 400, code: "invalid_request" };
-  await assert.rejects(s.service.settings(OWNER, live, { quotaPerSecond: 50 }), (error) => error instanceof AppError && error.status === 400);
-  assert.ok((await s.repository.integration(live)).ownerDisabledAt, "a call Auth refuses proves nothing");
+  assert.ok((await s.repository.integration(live)).ownerDisabledAt, "nor does a listing: Auth lists a disabled account's integrations too");
   s.notified.length = 0;
   assert.equal((await s.service.settings(OWNER, live, { quotaPerSecond: 50 })).quotaPerSecond, 50);
   const feed = await s.stationFeed();
@@ -275,39 +274,110 @@ test("Auth accepting the owner's own call clears a stale owner-disabled flag; a 
   assert.deepEqual([latest.kind, latest.actor, latest.reason], ["integration_owner_enabled", "system", "reconciled"]);
 });
 
-test("a disable the feed brings in while the owner's call runs is newer than the call, and stays", async (t) => {
+test("a disable the feed brings in after Auth accepted the owner's call is newer than the call, and stays", async (t) => {
   const s = await setup(t);
   if (!s) return;
   const live = await s.ready();
   const change = s.manage.changeIntegration;
-  let during = () => {};
+  let during = async () => {};
   s.manage.changeIntegration = async (...args) => {
     const answer = await change(...args);
     await during();
     return answer;
   };
-  // Not disabled when the call began, disabled before it ended.
-  during = async () => {
-    s.clock.now += 1000;
-    s.manage.setOwnerDisabled(OWNER, true, { actor: ADMIN, reason: "Abuse" });
-    await s.follow();
-  };
-  await s.service.settings(OWNER, live, { quotaPerSecond: 60 });
-  const first = (await s.repository.integration(live)).ownerDisabledAt;
-  assert.ok(first);
-  // Disabled when the call began, then enabled and disabled again before it ended.
-  during = async () => {
+  const flag = async () => (await s.repository.integration(live)).ownerDisabledAt;
+  // Enabled again with no entry the Portal reads, so the Portal keeps a stale flag.
+  const missedEnable = () => {
     s.clock.now += 1000;
     s.manage.setOwnerDisabled(OWNER, false, { actor: ADMIN, reason: "Appeal" });
+    s.manage.feed.splice(-1);
+  };
+  s.manage.setOwnerDisabled(OWNER, true, { actor: ADMIN, reason: "Abuse" });
+  await s.follow();
+  missedEnable();
+  const stale = await flag();
+  // Disabled anew after Auth accepted the call, and read before the Portal clears the stale flag.
+  during = async () => {
     s.clock.now += 1000;
     s.manage.setOwnerDisabled(OWNER, true, { actor: ADMIN, reason: "Abuse again" });
     await s.follow();
   };
-  await s.service.settings(OWNER, live, { quotaPerSecond: 70 });
-  const second = (await s.repository.integration(live)).ownerDisabledAt;
-  assert.ok(second && second !== first, "the newer disable stays");
+  await s.service.settings(OWNER, live, { quotaPerSecond: 60 });
+  assert.equal(await flag(), s.manage.feed.at(-1).at, "the flag holds the new disable's time");
+  assert.notEqual(await flag(), stale);
   assert.equal(stateOf(await s.stationFeed(), live), "paused");
-  s.manage.changeIntegration = change;
+  assert.equal((await s.events(live)).filter((event) => event.kind === "integration_owner_enabled").length, 0);
+  // Enabled and disabled again while the call runs: the newer disable stays too.
+  missedEnable();
+  during = async () => {
+    s.clock.now += 1000;
+    s.manage.setOwnerDisabled(OWNER, false, { actor: ADMIN, reason: "Appeal" });
+    s.clock.now += 1000;
+    s.manage.setOwnerDisabled(OWNER, true, { actor: ADMIN, reason: "Abuse once more" });
+    await s.follow();
+  };
+  await s.service.settings(OWNER, live, { quotaPerSecond: 70 });
+  assert.equal(await flag(), s.manage.feed.at(-1).at);
+  assert.equal(stateOf(await s.stationFeed(), live), "paused");
+});
+
+// A listing is Auth's state when it was fetched: a pause the feed applied after that is newer, and stays.
+test("a listing fetched before an admin's pause the feed applied first leaves it paused; a later listing follows Auth", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const id = await s.ready();
+  s.manage.integrationRecords.find((entry) => entry.clientId === id).quotaPerSecond = 9;
+  const list = s.manage.integrations;
+  s.manage.integrations = async (account) => {
+    const listed = await list(account);
+    s.manage.integrations = list;
+    s.manage.adminChange(id, { status: "paused", actor: ADMIN, reason: "Spam" });
+    await s.follow();
+    return listed;
+  };
+  await s.service.integrations(OWNER);
+  const row = await s.repository.integration(id);
+  assert.deepEqual([row.state, row.pausedBy, row.quotaPerSecond], ["paused", "admin", 9], "its settings are still followed");
+  assert.equal(stateOf(await s.stationFeed(), id), "paused");
+  assert.equal((await s.events(id)).filter((event) => event.kind === "integration_resumed").length, 0);
+  // A listing fetched later follows Auth as usual, here an admin's lift the feed has not brought yet.
+  s.manage.adminChange(id, { status: "active", actor: ADMIN, reason: "Cleared" });
+  await s.service.integrations(OWNER);
+  assert.deepEqual([(await s.repository.integration(id)).state, stateOf(await s.stationFeed(), id)], ["ready", "ready"]);
+  const event = (await s.events(id)).at(-1);
+  assert.deepEqual([event.kind, event.actor, event.reason], ["integration_resumed", "system", "reconciled"]);
+});
+
+test("a listing fetched before an admin took over the owner's pause leaves it the admin's", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const id = await s.ready();
+  await s.service.pause(OWNER, id);
+  const list = s.manage.integrations;
+  s.manage.integrations = async (account) => {
+    const listed = await list(account);
+    s.manage.integrations = list;
+    s.manage.adminChange(id, { status: "paused", actor: ADMIN, reason: "Spam" });
+    await s.follow();
+    return listed;
+  };
+  await s.service.integrations(OWNER);
+  assert.equal((await s.repository.integration(id)).pausedBy, "admin");
+  await assert.rejects(s.service.resume(OWNER, id), (error) => error instanceof AppError && error.details.code === "admin_paused");
+});
+
+test("an entry whose time is not written as Auth writes it is skipped", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const id = await s.ready();
+  s.manage.adminChange(id, { status: "paused", actor: ADMIN, reason: "Spam" });
+  const [entry] = (await s.manage.integrationChanges()).changes;
+  for (const at of [entry.at.slice(0, 19) + "Z", entry.at.slice(0, -1) + "+00:00", new Date(entry.at).toUTCString(), "2026-02-30T00:00:00.000Z"]) {
+    assert.equal(await s.service.applyAuthChange({ ...entry, at }), "skipped", at);
+  }
+  assert.ok(s.logs.includes("Auth change skipped: not a change entry."));
+  assert.equal((await s.repository.integration(id)).state, "ready");
+  assert.equal(await s.service.applyAuthChange(entry), "applied");
 });
 
 // The Station's report answer says what its feed says: who paused an integration stays with the Portal and its owner.

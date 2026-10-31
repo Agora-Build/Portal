@@ -177,13 +177,21 @@ function pausedByOf(row, state) {
   return row.state === "paused" && PAUSED_BY.includes(row.pausedBy) ? row.pausedBy : null;
 }
 
+// A time exactly as Auth writes it (toISOString): with the cursor it tells feed entries apart, and it is safe to cast
+// in SQL (repository.latestStatus).
+function authTime(value) {
+  const parsed = typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+}
+
 // What an entry of Auth's change feed does to the Portal's row: the event kind and the fields to write. Auth is
 // authoritative, so following it is not held back by expiry: transitions are checked at time 0, as in reconcile. A
 // stopped integration is revoked at Auth, which changes it no more, so an entry about it is older than that and is
 // only recorded (Ruling R-A): it is not paused, resumed, disabled or enabled again. An owner's account being disabled
 // is its own flag, not a pause of the row (effectiveState shows it as paused), so enabling it restores each
-// integration as it was.
-function authEffect(row, entry, at) {
+// integration as it was. The flag holds the time of the latest disable, written again by every disable, so a flag
+// the Portal saw before an owner's call (byActor) is told apart from one that came after it.
+function authEffect(row, entry) {
   const stopped = STOPPED.includes(row.state);
   if (entry.kind === "revoked") return { kind: "integration_revoked", fields: stopped ? {} : { ...step(row, "revoke", 0), pausedBy: null } };
   if (stopped) return { kind: "integration_" + entry.kind, fields: {} };
@@ -193,10 +201,7 @@ function authEffect(row, entry, at) {
     return { kind: "integration_paused", fields: row.pausedBy === pausedBy ? {} : { pausedBy } };
   }
   if (entry.kind === "resumed") return { kind: "integration_resumed", fields: row.state === "paused" ? { ...step(row, "resume", 0), pausedBy: null } : {} };
-  if (entry.kind === "owner_disabled") {
-    const when = Date.parse(entry.at);
-    return { kind: "integration_owner_disabled", fields: row.ownerDisabledAt ? {} : { ownerDisabledAt: Number.isFinite(when) ? when : at } };
-  }
+  if (entry.kind === "owner_disabled") return { kind: "integration_owner_disabled", fields: row.ownerDisabledAt === entry.at ? {} : { ownerDisabledAt: entry.at } };
   return { kind: "integration_owner_enabled", fields: row.ownerDisabledAt ? { ownerDisabledAt: null } : {} };
 }
 
@@ -291,9 +296,11 @@ export function createIntegrationService({
   const seen = () => ({ seenAt: new Date(now()).toISOString() });
 
   // A management call naming accountId as actor. Auth refuses one whose actor is disabled (400 invalid_request), so a
-  // call it accepts proves the account enabled (Ruling R-D): an owner-disabled flag the account's integrations already
-  // had before the call is stale (its owner_enabled was missed, or not read yet) and is cleared, and the Station told.
-  // A flag the feed set or changed while the call ran may be a newer disable, so it stays.
+  // call it accepts proves the account was enabled at some moment after the call began (Ruling R-D). An owner-disabled
+  // flag the Portal already had before the call is older than that moment, so it is stale (its owner_enabled was
+  // missed, or is not read yet): it is cleared, and the Station told. A flag is cleared only while it still holds the
+  // disable time read before the call. Every disable the feed applies writes its own time, so a disable read after
+  // that (while the call ran, or before the clear) changes the flag and stays; one read after the clear sets it again.
   async function byActor(accountId, call) {
     const flagged = await repository.ownerDisabledIntegrations(accountId);
     const answer = await viaAuth(call);
@@ -567,12 +574,13 @@ export function createIntegrationService({
   // What following Auth's entry changes on Portal's row: the fields to write, the status event ([transition, kind]) or
   // null, and the settings that changed. Auth is authoritative, so following it is not held back by expiry:
   // transitions are checked at time 0. Who paused it (pausedBy, from Auth's admin pause lock on) goes with a status
-  // change, and on its own while both sides have it paused.
-  function difference(row, entry) {
+  // change, and on its own while both sides have it paused. With status false, only the settings are followed.
+  function difference(row, entry, { status = true } = {}) {
     const fields = {};
     if (entry.expiresAt && new Date(entry.expiresAt).getTime() !== new Date(row.expiresAt).getTime()) fields.expiresAt = entry.expiresAt;
     if (entry.quotaPerSecond !== undefined && entry.quotaPerSecond !== row.quotaPerSecond) fields.quotaPerSecond = entry.quotaPerSecond;
     if ((entry.r9Svc ?? null) !== row.r9Svc) fields.r9Svc = entry.r9Svc ?? null;
+    if (!status) return { fields, event: null, settings: Object.keys(fields) };
     let event = null;
     if (entry.status === "revoked" && !STOPPED.includes(row.state)) event = ["revoke", "integration_revoked"];
     else if (entry.status === "paused" && row.state !== "paused" && !STOPPED.includes(row.state)) event = ["pause", "integration_paused"];
@@ -586,8 +594,11 @@ export function createIntegrationService({
 
   // Brings Portal's integrations in line with Auth's list of the account's own. Rows are compared first without a
   // lock, so a listing that changes nothing locks nothing. A change of settings alone (expiry, quota, R9 binding) is
-  // recorded as integration_reconciled, so the Station's feed carries the new values.
-  async function reconcileIntegrations(listed) {
+  // recorded as integration_reconciled, so the Station's feed carries the new values. The listing is Auth's state when
+  // it was fetched: a pause, resume or revocation recorded after listedAfter (the newest event before the fetch; the
+  // feed's, or the owner's own call) may be newer, so that row's status and who paused it are left as they are, and
+  // only its settings are followed. The feed and the next listing bring the rest.
+  async function reconcileIntegrations(listed, listedAfter) {
     for (const entry of listed) {
       const id = entry.clientId;
       let touched = false;
@@ -610,7 +621,8 @@ export function createIntegrationService({
       }
       const followed = Object.keys(difference(row, entry).fields).length > 0 && await appending(async (client) => {
         const current = await repository.integrationForUpdate(id, client);
-        const { fields, event, settings } = difference(current, entry);
+        const newer = ((await repository.latestStatus(id, client)).id ?? 0) > listedAfter;
+        const { fields, event, settings } = difference(current, entry, { status: !newer });
         if (!Object.keys(fields).length) return false;
         await repository.updateIntegration(id, fields, client);
         const recorded = { stationId: current.stationId, integrationId: id, accountId: current.ownerAccount, actor: "system", reason: "reconciled" };
@@ -771,13 +783,14 @@ export function createIntegrationService({
     // custom Stations it owns, which it may pause or revoke. The same for a browser session and an app's token.
     async integrations(accountId) {
       let listed;
+      const listedAfter = await repository.latestEventId();
       try {
         listed = await manage.integrations(accountId);
       } catch (error) {
         if (!(error instanceof ManageError) || fromManage(error).status !== 503) throw fromManage(error);
         log("Integration list served from Portal: Auth " + error.code + ".");
       }
-      if (listed) await reconcileIntegrations(listed);
+      if (listed) await reconcileIntegrations(listed, listedAfter);
       const views = [];
       for (const row of await repository.integrationsFor(accountId)) views.push(await viewOf(row, "owner"));
       for (const station of await repository.stationsFor(accountId)) {
@@ -957,11 +970,11 @@ export function createIntegrationService({
     // The feed may be read after the Portal already followed a newer change (an owner's listing, the owner's own call,
     // or a revocation). Such an entry is still recorded, and a pause or revocation still applies: a pause that is out
     // of date errs on the safe side, and the owner's next listing follows Auth again. A resume applies only if it is not older
-    // than the newest pause, resume or revocation the row has recorded (repository.latestStatusAt); otherwise the row
+    // than the newest pause, resume or revocation the row has recorded (repository.latestStatus); otherwise the row
     // keeps its state and the event says so (details.superseded), so a resume read late never undoes a newer pause
     // (Ruling R-A). Auth's clock and the Portal's are compared here, so they are kept in sync.
     async applyAuthChange(entry) {
-      if (!plainObject(entry) || !AUTH_KINDS.includes(entry.kind) || typeof entry.clientId !== "string" || typeof entry.cursor !== "string" || !AUTH_CURSOR.test(entry.cursor) || typeof entry.at !== "string" || !Number.isFinite(Date.parse(entry.at))) {
+      if (!plainObject(entry) || !AUTH_KINDS.includes(entry.kind) || typeof entry.clientId !== "string" || typeof entry.cursor !== "string" || !AUTH_CURSOR.test(entry.cursor) || !authTime(entry.at)) {
         log("Auth change skipped: not a change entry.");
         return "skipped";
       }
@@ -976,10 +989,10 @@ export function createIntegrationService({
       const applied = await appending(async (client) => {
         const row = await repository.integrationForUpdate(entry.clientId, client);
         if (!row || await repository.authChangeApplied(row.id, entry.cursor, entry.at, client)) return null;
-        const effect = authEffect(row, entry, now());
+        const effect = authEffect(row, entry);
         let superseded = false;
         if (entry.kind === "resumed" && Object.keys(effect.fields).length) {
-          const latest = await repository.latestStatusAt(row.id, client);
+          const { at: latest } = await repository.latestStatus(row.id, client);
           superseded = latest !== null && Date.parse(latest) > Date.parse(entry.at);
         }
         const fields = superseded ? {} : effect.fields;

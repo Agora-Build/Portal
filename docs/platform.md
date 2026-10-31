@@ -785,7 +785,10 @@ while it is disabled, and its `state` is `paused` until it is enabled again),
 and for the Station itself `station_registered`, `station_reconciled`,
 `member_added` and `member_removed`, which have no integration. New kinds may
 be added; treat an unknown one as a reason to act on the `integration` it
-carries. A change Agora.Build made (an admin's, on the admin site) has the
+carries. Act on `state` and `integration.state`, never on `kind` alone: some
+changes are only recorded and change nothing, such as an older
+`integration_resumed` that reaches the Portal after a newer pause: it comes with
+the integration's actual state, `paused`. A change Agora.Build made (an admin's, on the admin site) has the
 `reason` `agora_build`. As soon as an integration's `state` is `paused`,
 `revoking`, `revoked` or `expired`, refuse its still-valid tokens and close its
 open sessions and streams; its tokens are never trusted past their 300-second

@@ -28,7 +28,8 @@ function cursorNumber(cursor) {
 
 // Auth's change feed cursor: opaque to the Portal, base64url as Auth hands it out.
 export const AUTH_CURSOR = /^[A-Za-z0-9_-]{1,64}$/;
-// A time as Auth and the Portal write it into an event's details (toISOString), safe to cast in SQL.
+// A time as toISOString writes it, which is all the Portal keeps in an event's details (authAt, which applyAuthChange
+// takes only in that form, and seenAt): latestStatus casts only such strings, so a stored value can't make it fail.
 const ISO_TIME = "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$";
 const STATUS_KINDS = ["integration_paused", "integration_resumed", "integration_revoked"];
 
@@ -197,9 +198,10 @@ export function createRepository(db) {
       return rows.map(integrationRow);
     },
 
-    // The account's integrations Auth's change feed has as owner-disabled: [{ id, ownerDisabledAt }].
+    // The account's integrations that are not revoked and that Auth's change feed has as owner-disabled:
+    // [{ id, ownerDisabledAt }].
     async ownerDisabledIntegrations(accountId, client) {
-      const { rows } = await run(client, "SELECT id, owner_disabled_at FROM integrations WHERE owner_account = $1 AND owner_disabled_at IS NOT NULL ORDER BY created_at, id", [accountId]);
+      const { rows } = await run(client, "SELECT id, owner_disabled_at FROM integrations WHERE owner_account = $1 AND owner_disabled_at IS NOT NULL AND state NOT IN ('revoking', 'revoked') ORDER BY created_at, id", [accountId]);
       return rows.map((row) => ({ id: row.id, ownerDisabledAt: iso(row.owner_disabled_at) }));
     },
 
@@ -275,16 +277,24 @@ export function createRepository(db) {
       return rows.length > 0;
     },
 
-    // The newest time of a pause, resume or revocation recorded for the integration, as an ISO string, or null when
-    // there is none (service.applyAuthChange, Ruling R-A). An entry of Auth's change feed counts at Auth's time
-    // (details.authAt); a change the Portal saw through its own call or an owner's listing at the time it saw it
-    // (details.seenAt), which is no earlier than Auth made it; an older event without either at the time it was
-    // recorded.
-    async latestStatusAt(integrationId, client) {
+    // The pauses, resumes and revocations recorded for the integration: { at, id }, both null when there is none.
+    // `at` is the newest time of one, as an ISO string (service.applyAuthChange, Ruling R-A): an entry of Auth's change
+    // feed counts at Auth's time (details.authAt); a change the Portal saw through its own call or an owner's listing
+    // at the time it saw it (details.seenAt), which is no earlier than Auth made it; an older event without either at
+    // the time it was recorded. `id` is the newest one's event ID, which latestEventId orders (a listing's
+    // reconcile).
+    async latestStatus(integrationId, client) {
       const { rows } = await run(client,
-        "SELECT max(CASE WHEN details ? 'authCursor' AND details->>'authAt' ~ $3 THEN (details->>'authAt')::timestamptz WHEN details->>'seenAt' ~ $3 THEN (details->>'seenAt')::timestamptz ELSE at END) AS latest FROM integration_events WHERE integration_id = $1 AND kind = ANY($2)",
+        "SELECT max(CASE WHEN details ? 'authCursor' AND details->>'authAt' ~ $3 THEN (details->>'authAt')::timestamptz WHEN details->>'seenAt' ~ $3 THEN (details->>'seenAt')::timestamptz ELSE at END) AS latest, max(id) AS id FROM integration_events WHERE integration_id = $1 AND kind = ANY($2)",
         [integrationId, STATUS_KINDS, ISO_TIME]);
-      return iso(rows[0].latest);
+      return { at: iso(rows[0].latest), id: rows[0].id === null ? null : Number(rows[0].id) };
+    },
+
+    // The newest event ID of all, or 0. Events are appended under one lock, so any event committed later has a
+    // greater ID.
+    async latestEventId(client) {
+      const { rows } = await run(client, "SELECT COALESCE(MAX(id), 0) AS id FROM integration_events");
+      return Number(rows[0].id);
     }
   };
 }

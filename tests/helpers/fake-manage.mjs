@@ -15,6 +15,8 @@ export const BUILT_IN_REPORT_CLIENT = "s-" + "0".repeat(24) + "bs";
 export function fakeManage({ now = Date.now } = {}) {
   const stations = [];
   const integrations = [];
+  // Accounts an admin has disabled (setOwnerDisabled): Auth refuses them as actor.
+  const disabledAccounts = new Set();
   let next = 0;
   let nextIntegration = 0;
   const valid = (account) => typeof account === "string" && /^ab[0-9A-HJKMNP-TV-Z]{26}$/.test(account);
@@ -73,8 +75,14 @@ export function fakeManage({ now = Date.now } = {}) {
         fail(failure.status, failure.code);
       }
     },
+    // A call naming an actor (and maybe other accounts): each must be well-formed, and the actor not disabled, or Auth
+    // answers 400 invalid_request.
     async gate(name, actor, ...accounts) {
-      await auth.open(name, () => { if (![actor, ...accounts].every(valid)) fail(400, "invalid_request"); });
+      await auth.open(name, () => { if (![actor, ...accounts].every(valid) || disabledAccounts.has(actor)) fail(400, "invalid_request"); });
+    },
+    // A listing for an account (?account=), which Auth answers for a disabled account too.
+    async listing(name, account) {
+      await auth.open(name, () => { if (!valid(account)) fail(400, "invalid_request"); });
     },
     revokeWhere(pick, by = {}) {
       for (const integration of integrations) {
@@ -101,7 +109,7 @@ export function fakeManage({ now = Date.now } = {}) {
       return { id: station.id, origin, owner, status: "active", reportClientId: station.reportClientId };
     },
     async stations(account) {
-      await auth.gate("stations", account);
+      await auth.listing("stations", account);
       const active = stations.filter((entry) => entry.status === "active");
       return [...active.filter((entry) => entry.builtIn), ...active.filter((entry) => !entry.builtIn && uses(entry, account))].map(listedStation);
     },
@@ -133,8 +141,10 @@ export function fakeManage({ now = Date.now } = {}) {
       await auth.gate("removeMember", actor, account);
       const station = notBuiltIn(auth.find(id));
       if (station.owner !== actor && account !== actor) fail(403, "forbidden");
-      station.members = station.members.filter((member) => member.account !== account);
-      auth.revokeWhere((integration) => integration.stationId === id && integration.owner === account, { actor, reason: "member_removed" });
+      // As at Auth, the account's integrations there are revoked only if it was a member.
+      const member = station.members.some((entry) => entry.account === account);
+      station.members = station.members.filter((entry) => entry.account !== account);
+      if (member) auth.revokeWhere((integration) => integration.stationId === id && integration.owner === account, { actor, reason: "member_removed" });
     },
     async createIntegration({ owner, stationId, name, scopes, publicJwk, r9Svc = null, quotaPerSecond = 200, expiresAt, actor }) {
       await auth.gate("createIntegration", actor, owner);
@@ -154,7 +164,7 @@ export function fakeManage({ now = Date.now } = {}) {
       return { clientId: integration.clientId, status: integration.status, expiresAt: integration.expiresAt };
     },
     async integrations(account) {
-      await auth.gate("integrations", account);
+      await auth.listing("integrations", account);
       return integrations.filter((entry) => entry.owner === account).map(listed);
     },
     async addKey(id, publicJwk, actor) {
@@ -229,9 +239,12 @@ export function fakeManage({ now = Date.now } = {}) {
       recordChange(integration, "revoked", { reason });
       auth.onNudge?.();
     },
-    // An admin disabling or enabling an account: one owner_disabled or owner_enabled entry per integration it owns
-    // that is not revoked, each with that integration's status (Auth D26 R24).
+    // An admin disabling or enabling an account: Auth then refuses it as actor, or accepts it again, and writes one
+    // owner_disabled or owner_enabled entry per integration it owns that is not revoked, each with that integration's
+    // status (Auth D26 R24).
     setOwnerDisabled(account, disabled, { actor = null, reason = null } = {}) {
+      if (disabled) disabledAccounts.add(account);
+      else disabledAccounts.delete(account);
       let written = 0;
       for (const integration of integrations) {
         if (integration.owner !== account || integration.status === "revoked") continue;
