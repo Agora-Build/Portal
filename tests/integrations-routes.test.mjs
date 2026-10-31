@@ -536,6 +536,16 @@ test("the stack is ready even when the first built-in sync fails, retries it a m
   await new Promise((resolve) => setTimeout(resolve, 60));
   assert.equal(listings, after, "no sync after close()");
 });
+
+test("without platform admins the skipped sync keeps the hourly schedule, so it is logged at most once an hour", async () => {
+  const db = { async migrate() { return []; }, async ensureEventPartitions() { return []; }, async close() {} };
+  const logs = [];
+  const integrations = createIntegrationStack({ db, manage: fakeManage(), idp: null, log: (line) => logs.push(line), builtInSyncAfter: { ok: 3600000, failed: 20 } });
+  await integrations.ready();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.deepEqual(logs, ["Built-in Station sync skipped: no PLATFORM_ADMINS."], "not retried a minute later");
+  await integrations.close();
+});
 test("the built-in Station's own report token reports and reads a feed of every integration on it, and only those", async (t) => {
   const admin = accountId();
   const integrations = await stack(t, { admins: [admin] });
