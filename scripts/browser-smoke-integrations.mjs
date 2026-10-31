@@ -1,6 +1,6 @@
 // Drives a real headless Chromium through the Stations and Integrations sections of /account/ for a signed-in account,
-// at a desktop (1280×800) and a mobile (390×844) viewport. Not part of `npm test`, and no dependency of this package,
-// like scripts/browser-smoke.mjs: point it at an existing playwright-core install and Chromium binary.
+// at a desktop (1280×800) and two mobile (390×844, 375×812) viewports. Not part of `npm test`, and no dependency of
+// this package, like scripts/browser-smoke.mjs: point it at an existing playwright-core install and Chromium binary.
 //
 // It runs against the end-to-end stack with Stations and integrations (tests/e2e/harness.mjs): the real
 // auth.agora.build from an Agora-Build/Auth checkout, the real Portal with its own PostgreSQL schema, and Station stubs
@@ -20,13 +20,14 @@
 // accessible names, Enter and Space, the dialogs' focus); reduced motion; and the built-in Station: its row (Built in,
 // its origin, Details only, nothing else reachable by Tab), the selector leaving it out while its integrations are off
 // and offering it once they are on, the Basic plan's limit of 4 there, and an integration an Agora.Build admin paused
-// at Auth ("Paused by Agora.Build", no Resume). With SCREENSHOT_DIR set, it saves <viewport>-<what>.png there.
+// at Auth ("Paused by Agora.Build", no Resume; skipped, with the reason, on an Auth checkout without the admin pause
+// lock). With SCREENSHOT_DIR set, it saves <viewport>-<what>.png there.
 import { createRequire } from "node:module";
 import { createServer } from "node:https";
 import { mkdir, readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { exportJWK, generateKeyPair } from "jose";
-import { API, clientCredentials as harnessClientCredentials, interactionUid, integrationsSkipReason, loadAuth, person, portalSignIn, skipReason, startStack, STATION_HOST, stationTls } from "../tests/e2e/harness.mjs";
+import { API, authHasAdminPauseLock, authHasChangeFeed, clientCredentials as harnessClientCredentials, interactionUid, integrationsSkipReason, loadAuth, person, portalSignIn, skipReason, startStack, STATION_HOST, stationTls } from "../tests/e2e/harness.mjs";
 
 const { PLAYWRIGHT_CORE: playwrightPath, CHROMIUM_PATH: chromiumPath, SCREENSHOT_DIR: screenshotDir } = process.env;
 if (!playwrightPath || !chromiumPath) {
@@ -54,7 +55,14 @@ async function step(label, run) {
 }
 const shot = async (target, name) => { if (screenshotDir) await target.screenshot({ path: resolve(screenshotDir, name + ".png"), ...(target.url ? { fullPage: true } : {}) }); };
 
-const VIEWPORTS = [{ name: "desktop", width: 1280, height: 800 }, { name: "mobile", width: 390, height: 844 }];
+// Each with its own account and member (people), so every viewport starts from the same state.
+const VIEWPORTS = [
+  { name: "desktop", width: 1280, height: 800, mobile: false, people: ["Grace", "Bo"] },
+  { name: "mobile", width: 390, height: 844, mobile: true, people: ["Mary", "Kai"] },
+  { name: "small", width: 375, height: 812, mobile: true, people: ["Nell", "Lu"] }
+];
+// An Agora.Build admin's pause needs Auth's change feed and admin pause lock (Auth D26 Tasks 13 and 14).
+const adminPauseSkip = !authHasChangeFeed ? "the Auth checkout has no change feed (Auth D26 Task 13)" : !authHasAdminPauseLock ? "the Auth checkout has no admin pause lock (Auth D26 Task 14)" : null;
 const SCOPES = ["agent.view", "agent.prompt"];
 
 const lib = await loadAuth();
@@ -141,7 +149,7 @@ async function setUp(user, memberUser) {
 // the IdP's GitHub redirect goes to Auth's stand-in GitHub, as in scripts/browser-smoke.mjs.
 const UPSTREAM_GITHUB = /^\/interaction\/[^/]+\/upstream\/github$/;
 async function newContext(viewport, user) {
-  const context = await browser.newContext({ viewport: { width: viewport.width, height: viewport.height }, isMobile: viewport.name === "mobile", hasTouch: viewport.name === "mobile", acceptDownloads: true });
+  const context = await browser.newContext({ viewport: { width: viewport.width, height: viewport.height }, isMobile: viewport.mobile, hasTouch: viewport.mobile, acceptDownloads: true });
   await context.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.origin === stack.issuer && route.request().method() === "POST" && UPSTREAM_GITHUB.test(url.pathname)) {
@@ -175,8 +183,8 @@ const ring = (handle) => handle.evaluate((node) => { const style = getComputedSt
 
 async function flow(viewport, index) {
   const tag = viewport.name + ": ";
-  const user = person(7300 + index, viewport.name === "desktop" ? "Grace" : "Mary");
-  const setup = await setUp(user, person(7310 + index, viewport.name === "desktop" ? "Bo" : "Kai"));
+  const user = person(7300 + index, viewport.people[0]);
+  const setup = await setUp(user, person(7310 + index, viewport.people[1]));
   const context = await newContext(viewport, user);
   const page = await context.newPage();
   const errors = [];
@@ -532,25 +540,31 @@ async function flow(viewport, index) {
         await integration(page, "Built-in app").waitFor({ timeout: 8000 }).catch(async (error) => { throw new Error(error.message.split("\n")[0] + " (the form says \"" + await page.locator("#integration-status").textContent() + "\")"); });
         check(new RegExp("Station\\s+" + stack.builtIn.origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(await integration(page, "Built-in app").locator(".integration-facts").innerText()), tag + "an integration created in the browser lands on the built-in Station");
         // An Agora.Build admin pauses it at Auth (the admin site's call): the page shows it as Agora.Build's, with no Resume.
-        const builtInApp = (await json(await setup.owner.api("/api/integrations"))).body.integrations.find((entry) => entry.name === "Built-in app");
-        await stack.adminChange(builtInApp.id, { status: "paused", reason: "Browser smoke" });
-        await page.goto(stack.site + "/account/");
-        await integration(page, "Built-in app").waitFor({ timeout: 8000 });
-        await until(async () => (await badgeOf(page, "Built-in app")) === "Paused by Agora.Build", "Paused by Agora.Build");
-        const locked = integration(page, "Built-in app");
-        check(await locked.getByRole("button", { name: "Resume", exact: true }).count() === 0, tag + "an admin's pause offers no Resume");
-        check(await locked.getByRole("button", { name: "Revoke", exact: true }).count() === 1, tag + "Revoke is still offered");
-        check(/Only Agora\.Build can resume it/.test(await locked.innerText()), tag + "the row says only Agora.Build can resume it");
-        // Keyboard: from the row's heading, Tab reaches Revoke, History and the owner's panels, and no Pause or Resume.
-        await locked.locator("h3").click();
-        const lockedStops = [];
-        for (let presses = 0; presses < 5; presses += 1) {
-          await page.keyboard.press("Tab");
-          lockedStops.push(await page.evaluate(() => document.activeElement?.closest(".integration-item") ? document.activeElement.textContent.trim() : "(left the row)"));
+        if (adminPauseSkip) note(tag + "skipped the admin pause checks: " + adminPauseSkip + ".");
+        else {
+          const builtInApp = (await json(await setup.owner.api("/api/integrations"))).body.integrations.find((entry) => entry.name === "Built-in app");
+          await stack.adminChange(builtInApp.id, { status: "paused", reason: "Browser smoke" });
+          await page.goto(stack.site + "/account/");
+          await integration(page, "Built-in app").waitFor({ timeout: 8000 });
+          await until(async () => (await badgeOf(page, "Built-in app")) === "Paused by Agora.Build", "Paused by Agora.Build");
+          const locked = integration(page, "Built-in app");
+          check(await locked.getByRole("button", { name: "Resume", exact: true }).count() === 0, tag + "an admin's pause offers no Resume");
+          check(await locked.getByRole("button", { name: "Revoke", exact: true }).count() === 1, tag + "Revoke is still offered");
+          check(/Only Agora\.Build can resume it/.test(await locked.innerText()), tag + "the row says only Agora.Build can resume it");
+          // Keyboard: from the row's heading, Tab reaches Revoke, History and the owner's panels, never Resume.
+          await locked.locator("h3").click();
+          const lockedStops = [];
+          for (let presses = 0; presses < 5; presses += 1) {
+            await page.keyboard.press("Tab");
+            lockedStops.push(await page.evaluate(() => document.activeElement?.closest(".integration-item") ? document.activeElement.textContent.trim() : "(left the row)"));
+          }
+          check(lockedStops.join(" → ") === "Revoke → History → Renew → Quota → Rotate key", tag + "Tab through the paused row: " + lockedStops.join(" → "));
+          const [badgeBox, rowBox] = [await locked.locator(".state-badge").boundingBox(), await locked.boundingBox()];
+          const inside = badgeBox && rowBox && badgeBox.x >= rowBox.x - 0.5 && badgeBox.y >= rowBox.y - 0.5 && badgeBox.x + badgeBox.width <= rowBox.x + rowBox.width + 0.5 && badgeBox.y + badgeBox.height <= rowBox.y + rowBox.height + 0.5;
+          check(Boolean(inside), tag + "the badge sits inside its row (badge " + JSON.stringify(badgeBox) + ", row " + JSON.stringify(rowBox) + ")");
+          await overflowCheck(page, tag, "with an integration Agora.Build paused");
+          await shot(locked, viewport.name + "-paused-by-agora-build");
         }
-        check(lockedStops.join(" → ") === "Revoke → History → Renew → Quota → Rotate key", tag + "Tab through the paused row: " + lockedStops.join(" → "));
-        await overflowCheck(page, tag, "with an integration Agora.Build paused");
-        await shot(locked, viewport.name + "-paused-by-agora-build");
         expectedErrors.push(/^Failed to load resource: the server responded with a status of 403/);
         await fillAndSubmit("One too many");
         await page.locator("#integration-status").filter({ hasText: /./ }).waitFor({ timeout: 8000 });

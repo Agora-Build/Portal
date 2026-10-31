@@ -13,6 +13,11 @@ if (skip) console.log("# Skipping the built-in Station end-to-end suite: " + ski
 // The D26 flows need Auth's change feed and admin pause lock (Auth feat/admin-mfa Tasks 13 and 14).
 const d26Skip = !authHasChangeFeed ? "the Auth checkout has no change feed (Auth D26 Task 13)" : !authHasAdminPauseLock ? "the Auth checkout has no admin pause lock (Auth D26 Task 14)" : false;
 const ADMIN_PAUSED = "Agora.Build paused this integration. Only Agora.Build can resume it.";
+// Disabling and enabling an owner needs only the change feed (Auth D26 Task 13): Auth records owner_disabled and
+// owner_enabled for each of the account's integrations and nudges the Portal.
+const ownerSkip = !authHasChangeFeed ? "the Auth checkout has no change feed (Auth D26 Task 13)" : false;
+// The admin's reasons in tests 9 and 10, which stay in the Portal's integration_events only.
+const REASONS = ["Spam in #general", "Cleared after review", "Confirmed abuse"];
 
 const SCOPES = ["agent.view", "agent.prompt"];
 const REPORT_CLIENT = /^s-[0-9a-hjkmnp-tv-z]{26}$/;
@@ -171,13 +176,16 @@ describe("The built-in Station against the real auth.agora.build", { skip: skip 
     const id = state.boFirst.id;
     const token = (await built.reportToken()).body.access_token;
     const start = (await feed(0, token)).body.cursor;
+    Object.assign(state, { feedStart: start, logStart: stack.logs.length });
     const pushes = built.nudges.length;
+    const portalNudges = stack.portal.nudges;
     const paused = await stack.adminChange(id, { status: "paused", reason: "Spam in #general" });
     assert.deepEqual([paused.status, paused.pausedBy], ["paused", "admin"], "paused at Auth");
     // The Portal reads Auth's feed only on nudges here, and the Station's feed does not reconcile from Auth.
     const change = await eventually(async () => (await feed(start, token)).body.changes.find((entry) => entry.integrationId === id && entry.kind === "integration_paused"));
     assert.ok(change, "the Station's feed has the pause");
     assert.deepEqual([change.reason, change.integration.state], ["agora_build", "paused"]);
+    assert.ok(stack.portal.nudges >= portalNudges + 1, "Auth's nudge reached the Portal");
     assert.ok(await eventually(() => built.nudges.length > pushes), "and the Station was pushed");
     const [recorded] = (await stack.portalQuery("SELECT actor, reason, details FROM integration_events WHERE integration_id = $1 AND kind = 'integration_paused' ORDER BY id DESC LIMIT 1", [id])).rows;
     assert.deepEqual([recorded.actor, recorded.reason, recorded.details.admin, recorded.details.pausedBy], [built.adminId, "Spam in #general", true, "admin"], "recorded with the admin as actor and the reason");
@@ -197,13 +205,81 @@ describe("The built-in Station against the real auth.agora.build", { skip: skip 
     const token = (await built.reportToken()).body.access_token;
     const start = (await feed(0, token)).body.cursor;
     await stack.adminChange(id, { status: "active", reason: "Cleared after review" });
-    assert.ok(await eventually(async () => (await feed(start, token)).body.changes.some((entry) => entry.integrationId === id && entry.kind === "integration_resumed")), "the lift reaches the Station");
+    const lift = await eventually(async () => (await feed(start, token)).body.changes.find((entry) => entry.integrationId === id && entry.kind === "integration_resumed"));
+    assert.ok(lift, "the lift reaches the Station");
+    assert.deepEqual([lift.reason, lift.state, lift.integration.state], ["agora_build", "awaiting_approval", "awaiting_approval"]);
     const back = (await (await state.bo.browser.api("/api/integrations")).json()).integrations.find((entry) => entry.id === id);
     assert.deepEqual([back.state, back.pausedBy], ["awaiting_approval", null]);
     await stack.adminChange(id, { status: "revoked", reason: "Confirmed abuse" });
-    assert.ok(await eventually(async () => (await stack.portalQuery("SELECT state FROM integrations WHERE id = $1", [id])).rows[0].state === "revoked"), "never approved, so revoked at once");
+    const revocation = await eventually(async () => (await feed(start, token)).body.changes.find((entry) => entry.integrationId === id && entry.kind === "integration_revoked"));
+    assert.ok(revocation, "the revocation reaches the Station");
+    assert.deepEqual([revocation.reason, revocation.state, revocation.integration.state], ["agora_build", "revoked", "revoked"], "never approved, so revoked at once");
+    assert.equal((await stack.portalQuery("SELECT state FROM integrations WHERE id = $1", [id])).rows[0].state, "revoked");
     const rows = (await stack.portalQuery("SELECT kind, reason FROM integration_events WHERE integration_id = $1 AND actor = $2 ORDER BY id", [id, built.adminId])).rows;
     assert.deepEqual(rows.map((row) => [row.kind, row.reason]), [["integration_paused", "Spam in #general"], ["integration_resumed", "Cleared after review"], ["integration_revoked", "Confirmed abuse"]]);
+  });
+
+  test("11. the Station's feed, the owner's history and the Portal's log name neither the admin nor the reasons", { skip: d26Skip }, async () => {
+    const token = (await built.reportToken()).body.access_token;
+    const shown = [
+      ["the Station's feed", JSON.stringify((await feed(0, token)).body) + JSON.stringify((await feed(state.feedStart, token)).body)],
+      ["Bo's history", (await state.bo.browser.api("/api/integrations/" + state.boFirst.id + "/events")).text],
+      ["the Portal's log", stack.logs.join("\n")]
+    ];
+    for (const [where, text] of shown) {
+      assert.ok(!text.includes(built.adminId), where + " names the admin");
+      for (const reason of REASONS) assert.ok(!text.includes(reason), where + " has the reason " + JSON.stringify(reason));
+    }
+  });
+
+  test("12. an admin disabling an owner at Auth pauses its integrations at the Portal and the Station; enabling restores each", { skip: ownerSkip }, async () => {
+    const fay = await portalSignIn(stack, person(7313, "Fay"));
+    const fayId = (await meOf(fay.browser)).account.id;
+    const live = await create(fay.browser, "Fay live");
+    const held = await create(fay.browser, "Fay held");
+    assert.deepEqual([live.status, held.status], [201, 201]);
+    assert.equal((await json(await fay.browser.api("/api/integrations/" + held.body.id + "/pause", { method: "POST", json: {} }))).status, 200);
+    const ids = [live.body.id, held.body.id];
+    const token = (await built.reportToken()).body.access_token;
+    const start = (await feed(0, token)).body.cursor;
+    const portalNudges = stack.portal.nudges;
+    await stack.adminAccount(fayId, { disabled: true, reason: "Account review" });
+    const disabled = await eventually(async () => {
+      const { changes } = (await feed(start, token)).body;
+      const found = ids.map((id) => changes.find((entry) => entry.integrationId === id && entry.kind === "integration_owner_disabled"));
+      return found.every(Boolean) && found;
+    });
+    assert.ok(disabled, "both reach the Station's feed, shown paused, as Agora.Build's");
+    assert.deepEqual(disabled.map((entry) => [entry.reason, entry.state, entry.integration.state]), [["agora_build", "paused", "paused"], ["agora_build", "paused", "paused"]]);
+    assert.ok(stack.portal.nudges >= portalNudges + 1, "Auth's nudge reached the Portal");
+    // The Portal keeps each integration's own state under the flag, and records the admin and the reason.
+    const flagged = (await stack.portalQuery("SELECT id, state, paused_by, owner_disabled_at IS NOT NULL AS disabled FROM integrations WHERE owner_account = $1 ORDER BY created_at, id", [fayId])).rows;
+    assert.deepEqual(flagged.map((row) => [row.id, row.state, row.paused_by, row.disabled]), [[ids[0], "awaiting_approval", null, true], [ids[1], "paused", "owner", true]]);
+    const recorded = (await stack.portalQuery("SELECT integration_id, actor, reason FROM integration_events WHERE kind = 'integration_owner_disabled' AND integration_id = ANY($1) ORDER BY integration_id", [ids])).rows;
+    assert.deepEqual(recorded.map((row) => [row.actor, row.reason]), [[built.adminId, "Account review"], [built.adminId, "Account review"]]);
+    // Disabling ended Fay's sessions (Auth's back-channel logout), so her resume is refused at the Portal, and at Auth.
+    const resumed = await json(await fay.browser.api("/api/integrations/" + held.body.id + "/resume", { method: "POST", json: {} }));
+    assert.equal(resumed.status, 401, "signed out");
+    const atAuth = await manage("PATCH", "/integrations/" + held.body.id, { status: "active", actor: fayId });
+    assert.deepEqual([atAuth.status, atAuth.body.error], [400, "invalid_request"], "Auth refuses a disabled actor");
+    const middle = (await feed(start, token)).body.cursor;
+    await stack.adminAccount(fayId, { disabled: false, reason: "Review done" });
+    const enabled = await eventually(async () => {
+      const { changes } = (await feed(middle, token)).body;
+      const found = ids.map((id) => changes.find((entry) => entry.integrationId === id && entry.kind === "integration_owner_enabled"));
+      return found.every(Boolean) && found;
+    });
+    assert.ok(enabled, "enabling reaches the Station's feed");
+    assert.deepEqual(enabled.map((entry) => [entry.reason, entry.integration.state]), [["agora_build", "awaiting_approval"], ["agora_build", "paused"]], "each back as it was");
+    assert.deepEqual((await stack.portalQuery("SELECT owner_disabled_at FROM integrations WHERE id = ANY($1)", [ids])).rows.map((row) => row.owner_disabled_at), [null, null]);
+    const again = await portalSignIn(stack, person(7313, "Fay"));
+    const mine = (await (await again.browser.api("/api/integrations")).json()).integrations.filter((entry) => ids.includes(entry.id));
+    assert.deepEqual(mine.map((entry) => [entry.id, entry.state, entry.pausedBy]).sort(), [[ids[0], "awaiting_approval", null], [ids[1], "paused", "owner"]].sort(), "Fay sees each as it was");
+    const history = (await again.browser.api("/api/integrations/" + held.body.id + "/events")).text;
+    assert.deepEqual(JSON.parse(history).events.slice(0, 2).map((event) => [event.kind, event.actor, event.reason]), [["integration_owner_enabled", "agora_build", null], ["integration_owner_disabled", "agora_build", null]]);
+    for (const text of [history, JSON.stringify((await feed(start, token)).body)]) assert.ok(!text.includes(built.adminId) && !text.includes("Account review") && !text.includes("Review done"), "neither the admin nor the reasons");
+    const back = await json(await again.browser.api("/api/integrations/" + held.body.id + "/resume", { method: "POST", json: {} }));
+    assert.deepEqual([back.status, back.body.state], [200, "awaiting_approval"], "her own pause is still hers to lift");
   });
 });
 
@@ -230,5 +306,6 @@ describe("Admin changes reach the Portal by its poll when Auth's nudge is lost",
     assert.deepEqual([change.reason, change.integration.state], ["agora_build", "paused"]);
     const [recorded] = (await lost.portalQuery("SELECT actor, reason FROM integration_events WHERE integration_id = $1 AND kind = 'integration_paused'", [created.body.id])).rows;
     assert.deepEqual([recorded.actor, recorded.reason], [lost.builtIn.adminId, "Spam"]);
+    assert.equal(lost.portal.nudges, 0, "no nudge reached the Portal");
   });
 });

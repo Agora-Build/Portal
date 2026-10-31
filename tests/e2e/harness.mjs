@@ -18,7 +18,8 @@
 // Portal does not know who the admins are), and `reconfigureAuth()` changes the entry as an Auth restart would.
 // With integrations, Auth's clients file gives the Portal client a changesNudgeUri (when the Auth checkout has the
 // change feed): the Portal's own /auth/integration-changes, or with `nudge: "lost"` a port nobody listens on, so only
-// the Portal's poll brings Auth's changes. `stack.adminChange()` makes an Agora.Build admin's change at Auth.
+// the Portal's poll brings Auth's changes. `stack.adminChange()` makes an Agora.Build admin's change at Auth, and
+// `stack.adminAccount()` disables or enables an account there.
 import dns from "node:dns";
 import { createServer, request as httpRequest } from "node:http";
 import { createServer as createHttpsServer, Agent as HttpsAgent } from "node:https";
@@ -82,12 +83,15 @@ export async function integrationsSkipReason() {
 const authModule = (path) => import(pathToFileURL(resolve(authRepo, path)).href);
 export async function loadAuth() {
   // openid-client comes from the Auth checkout too: its relyingParty() builds Configurations of that copy.
-  const [server, flows, admin, keys, policy, oidc, app] = await Promise.all([
+  const [server, flows, admin, keys, policy, oidc, app, logout] = await Promise.all([
     authModule("tests/helpers/server.mjs"), authModule("tests/helpers/flows.mjs"),
     authModule("src/admin.mjs"), authModule("src/keys.mjs"), authModule("src/policy.mjs"), authModule("node_modules/openid-client/build/index.js"),
-    authModule("src/app.mjs")
+    authModule("src/app.mjs"), authModule("src/logout.mjs")
   ]);
-  return { ...server, ...flows, oidc, keysCommand: admin.keysCommand, createKeyStore: keys.createKeyStore, createAudit: policy.createAudit, createApp: app.createApp };
+  return {
+    ...server, ...flows, oidc, keysCommand: admin.keysCommand, setAccountDisabled: admin.setAccountDisabled, createKeyStore: keys.createKeyStore,
+    createAudit: policy.createAudit, createApp: app.createApp, createLogout: logout.createLogout
+  };
 }
 
 const secret = () => randomBytes(36).toString("base64url");
@@ -201,6 +205,8 @@ export async function clientCredentials(stack, { clientId, privateKey, resource,
   return { status: response.status, body: await response.json() };
 }
 
+// Where startStack's `nudge` option sends Auth's change nudge (see startStack).
+const NUDGES = ["portal", "lost", null];
 // Auth refuses an empty admins list; the stack starts with this placeholder, then names the admin it signed in.
 const PLACEHOLDER_ADMIN = "ab" + "0".repeat(26);
 
@@ -242,7 +248,8 @@ async function portalDatabase() {
   const schema = "e2e_" + randomBytes(6).toString("hex");
   const admin = new pg.Client({ connectionString: url });
   await admin.connect();
-  await admin.query("CREATE SCHEMA " + schema);
+  try { await admin.query("CREATE SCHEMA " + schema); }
+  catch (error) { await admin.end().catch(() => {}); throw error; }
   const scoped = new URL(url);
   scoped.searchParams.set("options", "-c statement_timeout=30000 -c search_path=" + schema);
   return {
@@ -265,7 +272,8 @@ function withEnv(values, build) {
 const models = { config: modelConfig({}), chat: async () => "unused", speak: async () => Buffer.from(""), research: async () => ({ items: [] }), search: async (people) => people };
 const signalingEnv = { AGORA_APP_ID: "a".repeat(32), AGORA_APP_CERTIFICATE: "b".repeat(32), SPACES_SIGNALING_SECRET: randomBytes(24).toString("hex") };
 
-// Starts a Portal server on `port` against `issuer`, with a temp data file and a billing file.
+// Starts a Portal server on `port` against `issuer`, with a temp data file and a billing file. `nudges` counts the
+// change nudges it received.
 async function startPortal({ issuer, port, directory, clientSecret, logs, databaseUrl, authChanges }) {
   const site = "http://127.0.0.1:" + port;
   const billingFile = resolve(directory, "billing-" + port + ".json");
@@ -280,8 +288,12 @@ async function startPortal({ issuer, port, directory, clientSecret, logs, databa
     calls: createAgoraCalls(agoraConfig(signalingEnv)), signaling: createSignaling(signalingConfig(signalingEnv)), channelSecret: signalingEnv.SPACES_SIGNALING_SECRET,
     ...(databaseUrl ? { integrationOptions: { ...stationFetches(), ...(authChanges ? { authChanges } : {}) } } : {})
   }));
-  await listen(server, port, "127.0.0.1");
-  return { site, store, server, close: () => shut(server) };
+  // The nudges Auth sent this Portal (POST /auth/integration-changes), counted beside the Portal's own handler.
+  let nudges = 0;
+  server.on("request", (request) => { if (request.method === "POST" && request.url === CHANGES_NUDGE_PATH) nudges += 1; });
+  // A server that never listened still emits "close", which stops what createAppServer started (its timers).
+  await listen(server, port, "127.0.0.1").catch((error) => { server.close(); throw error; });
+  return { site, store, server, close: () => shut(server), get nudges() { return nudges; } };
 }
 
 // One IdP + one Portal. Returns everything a flow needs; close() tears it all down. `integrations` turns on Stations
@@ -292,84 +304,112 @@ async function startPortal({ issuer, port, directory, clientSecret, logs, databa
 // Portal's reader timing (scripts/integrations/auth-changes.mjs).
 export async function startStack(lib, { integrations = false, builtIn = null, nudge = authHasChangeFeed ? "portal" : null, authChanges } = {}) {
   if (builtIn && !integrations) throw new TypeError("builtIn needs integrations: true");
-  const directory = await mkdtemp(resolve(tmpdir(), "portal-e2e-"));
-  const front = createFront();
-  await front.start();
-  const issuer = "http://auth.localhost:" + front.port;
-  const portalPort = await freePort();
-  const site = "http://127.0.0.1:" + portalPort;
-  const nudgeUri = !integrations || !nudge ? null : nudge === "lost" ? "http://127.0.0.1:" + (await freePort()) + CHANGES_NUDGE_PATH : site + CHANGES_NUDGE_PATH;
-  const secrets = { PORTAL_CLIENT_SECRET: secret(), SAMPLE_CLIENT_SECRET: secret(), VOX_CLIENT_SECRET: secret(), NOTES_CLIENT_SECRET: secret() };
-  const station = builtIn ? await startBuiltInStation() : null;
-  let entry = station ? { origin: station.origin, reportJwk: station.reportJwk, integrations: false, admins: [PLACEHOLDER_ADMIN] } : null;
-  const auth = await lib.startAuth({ issuer, clients: clientsDocument(site, { integrations, builtIn: entry, nudgeUri }), env: secrets });
-  front.point(auth.origin);
-  // What the relying-party helpers need: the issuer, reached over real HTTP through its public address.
-  const idp = { issuer, fake: auth.fake, fetch: (input, init) => fetch(input, init) };
-  // Another Auth instance on the same database with a changed built-in entry (Auth re-seeds it at startup), as a
-  // restart with an edited clients file; the front then sends everything there.
-  const instances = [];
-  async function reconfigureAuth(changes) {
-    entry = { ...entry, ...changes };
-    const app = await lib.createApp({ config: auth.app.services.config, db: auth.db, clientsDocument: clientsDocument(site, { integrations, builtIn: entry, nudgeUri }), upstream: auth.app.services.upstream, timers: false, listen: false });
-    const server = createServer(app.handler);
-    await listen(server, 0, "127.0.0.1");
-    instances.push({ app, server });
-    front.point("http://127.0.0.1:" + server.address().port);
-  }
-  const adminId = builtIn ? await signInAtAuth(lib, { issuer, site, idp, secrets }, builtIn.admin) : null;
-  if (adminId) await reconfigureAuth({ admins: [adminId] });
-  const logs = [];
-  const database = integrations ? await portalDatabase() : null;
-  const portal = await startPortal({ issuer, port: portalPort, directory, clientSecret: secrets.PORTAL_CLIENT_SECRET, logs, databaseUrl: database?.url, authChanges })
-    .catch(async (error) => { await database?.drop(); throw error; });
-  const closers = [];
-  let portalClient = null;
-  const stack = {
-    issuer, site, auth, idp, front, portal, store: portal.store, logs, secrets, directory, reconfigureAuth, builtIn: null,
-    // Another Portal against the same issuer (for example one started while the IdP is down).
-    async extraPortal() {
-      const extra = await startPortal({ issuer, port: await freePort(), directory, clientSecret: secrets.PORTAL_CLIENT_SECRET, logs });
-      closers.push(extra.close);
-      return extra;
-    },
-    // An Agora.Build admin's change at Auth, as the admin site's call makes it once Auth's step-up gate has passed:
-    // Auth's integration store with admin: true and a reason, which writes the change feed and sends the nudge (spec
-    // §3.3.4; the gate itself is Auth's own test coverage). Needs `builtIn`, whose admin acts.
-    adminChange(clientId, { status, reason }) {
-      if (!adminId) throw new TypeError("adminChange needs the builtIn option");
-      return auth.app.services.integrations.change(clientId, { status }, { actor: adminId, admin: true, reason });
-    },
-    // A query on this Portal's own database schema (integrations only), for what the Portal's API does not show.
-    async portalQuery(text, values) {
-      if (!database) throw new TypeError("portalQuery needs the integrations option");
-      if (!portalClient) {
-        portalClient = new pg.Client({ connectionString: database.url });
-        await portalClient.connect();
-      }
-      return portalClient.query(text, values);
-    },
-    async close() {
-      for (const close of closers) await close();
-      await station?.close();
-      await portal.close();
-      await portalClient?.end();
-      await database?.drop();
-      for (const { app, server } of instances) { await shut(server); await app.close(); }
-      await front.stop();
-      await auth.close();
-      await rm(directory, { recursive: true, force: true });
+  if (!NUDGES.includes(nudge)) throw new TypeError("nudge is \"portal\", \"lost\" or null");
+  // What to undo, newest first: each step adds its closer as soon as it holds something, so a step that fails (here,
+  // or a later reconfigureAuth() or extraPortal()) leaves no server, timer, schema or directory behind to keep the
+  // test process alive. close() runs them all and throws the first error.
+  const cleanups = [];
+  async function undo() {
+    const errors = [];
+    while (cleanups.length) {
+      try { await cleanups.pop()(); } catch (error) { errors.push(error); }
     }
-  };
-  if (station) {
-    const answer = await fetch(issuer + "/manage/v1/stations?account=" + adminId, { headers: { Authorization: "Basic " + Buffer.from("portal:" + encodeURIComponent(secrets.PORTAL_CLIENT_SECRET)).toString("base64"), Accept: "application/json" } });
-    const seeded = (await answer.json()).stations.find((listed) => listed.builtIn);
-    stack.builtIn = {
-      id: seeded.id, origin: station.origin, reportClientId: seeded.reportClientId, adminId, nudges: station.nudges, close: station.close,
-      reportToken: ({ resource = API, scope = "station.report" } = {}) => clientCredentials(stack, { clientId: seeded.reportClientId, privateKey: station.privateKey, resource, scope })
-    };
+    return errors;
   }
-  return stack;
+  try {
+    const directory = await mkdtemp(resolve(tmpdir(), "portal-e2e-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const front = createFront();
+    cleanups.push(() => front.stop());
+    await front.start();
+    const issuer = "http://auth.localhost:" + front.port;
+    const portalPort = await freePort();
+    const site = "http://127.0.0.1:" + portalPort;
+    const nudgeUri = !integrations || !nudge ? null : nudge === "lost" ? "http://127.0.0.1:" + (await freePort()) + CHANGES_NUDGE_PATH : site + CHANGES_NUDGE_PATH;
+    const secrets = { PORTAL_CLIENT_SECRET: secret(), SAMPLE_CLIENT_SECRET: secret(), VOX_CLIENT_SECRET: secret(), NOTES_CLIENT_SECRET: secret() };
+    const station = builtIn ? await startBuiltInStation() : null;
+    if (station) cleanups.push(() => station.close());
+    let entry = station ? { origin: station.origin, reportJwk: station.reportJwk, integrations: false, admins: [PLACEHOLDER_ADMIN] } : null;
+    const auth = await lib.startAuth({ issuer, clients: clientsDocument(site, { integrations, builtIn: entry, nudgeUri }), env: secrets });
+    cleanups.push(() => auth.close());
+    front.point(auth.origin);
+    // What the relying-party helpers need: the issuer, reached over real HTTP through its public address.
+    const idp = { issuer, fake: auth.fake, fetch: (input, init) => fetch(input, init) };
+    // Another Auth instance on the same database with a changed built-in entry (Auth re-seeds it at startup), as a
+    // restart with an edited clients file; the front then sends everything there.
+    async function reconfigureAuth(changes) {
+      entry = { ...entry, ...changes };
+      const app = await lib.createApp({ config: auth.app.services.config, db: auth.db, clientsDocument: clientsDocument(site, { integrations, builtIn: entry, nudgeUri }), upstream: auth.app.services.upstream, timers: false, listen: false });
+      cleanups.push(() => app.close());
+      const server = createServer(app.handler);
+      cleanups.push(() => shut(server));
+      await listen(server, 0, "127.0.0.1");
+      front.point("http://127.0.0.1:" + server.address().port);
+    }
+    const adminId = builtIn ? await signInAtAuth(lib, { issuer, site, idp, secrets }, builtIn.admin) : null;
+    if (adminId) await reconfigureAuth({ admins: [adminId] });
+    const logs = [];
+    const database = integrations ? await portalDatabase() : null;
+    if (database) cleanups.push(() => database.drop());
+    const portal = await startPortal({ issuer, port: portalPort, directory, clientSecret: secrets.PORTAL_CLIENT_SECRET, logs, databaseUrl: database?.url, authChanges });
+    cleanups.push(() => portal.close());
+    let portalClient = null;
+    const stack = {
+      issuer, site, auth, idp, front, portal, store: portal.store, logs, secrets, directory, reconfigureAuth, builtIn: null,
+      // Another Portal against the same issuer (for example one started while the IdP is down).
+      async extraPortal() {
+        const extra = await startPortal({ issuer, port: await freePort(), directory, clientSecret: secrets.PORTAL_CLIENT_SECRET, logs });
+        cleanups.push(() => extra.close());
+        return extra;
+      },
+      // An Agora.Build admin's change at Auth, as the admin site's call makes it once Auth's step-up gate has passed:
+      // Auth's integration store with admin: true and a reason, which writes the change feed and sends the nudge (spec
+      // §3.3.4; the gate itself is Auth's own test coverage). Needs `builtIn`, whose admin acts.
+      adminChange(clientId, { status, reason }) {
+        if (!adminId) throw new TypeError("adminChange needs the builtIn option");
+        return auth.app.services.integrations.change(clientId, { status }, { actor: adminId, admin: true, reason });
+      },
+      // An Agora.Build admin disables or enables an account at Auth, as the admin site's call does once the step-up
+      // gate has passed: Auth's setAccountDisabled with the admin and a reason, which ends the account's sessions
+      // (back-channel logout to the Portal), writes owner_disabled or owner_enabled to the change feed for each of its
+      // integrations and sends the nudge. Needs `builtIn`, whose admin acts.
+      adminAccount(accountId, { disabled, reason }) {
+        if (!adminId) throw new TypeError("adminAccount needs the builtIn option");
+        const services = { ...auth.app.services, logout: lib.createLogout({ ...auth.app.services, getProvider: () => auth.app.provider }) };
+        return lib.setAccountDisabled(services, accountId, disabled, { actorAccountId: adminId, reason });
+      },
+      // A query on this Portal's own database schema (integrations only), for what the Portal's API does not show.
+      async portalQuery(text, values) {
+        if (!database) throw new TypeError("portalQuery needs the integrations option");
+        if (!portalClient) {
+          const client = new pg.Client({ connectionString: database.url });
+          client.on("error", () => {});
+          await client.connect();
+          cleanups.push(() => client.end());
+          portalClient = client;
+        }
+        return portalClient.query(text, values);
+      },
+      async close() {
+        const errors = await undo();
+        if (errors.length) throw errors[0];
+      }
+    };
+    if (station) {
+      const answer = await fetch(issuer + "/manage/v1/stations?account=" + adminId, { headers: { Authorization: "Basic " + Buffer.from("portal:" + encodeURIComponent(secrets.PORTAL_CLIENT_SECRET)).toString("base64"), Accept: "application/json" } });
+      const seeded = (await answer.json()).stations.find((listed) => listed.builtIn);
+      stack.builtIn = {
+        id: seeded.id, origin: station.origin, reportClientId: seeded.reportClientId, adminId, nudges: station.nudges, close: station.close,
+        reportToken: ({ resource = API, scope = "station.report" } = {}) => clientCredentials(stack, { clientId: seeded.reportClientId, privateKey: station.privateKey, resource, scope })
+      };
+    }
+    return stack;
+  } catch (error) {
+    // Only the error's stack: never the settings, which hold the secrets.
+    console.error("# The end-to-end stack did not start: " + (error?.stack || String(error)));
+    await undo();
+    throw error;
+  }
 }
 
 let nextAddress = 0;
