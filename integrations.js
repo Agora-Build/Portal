@@ -438,7 +438,7 @@ function integrationRow(integration) {
       try { await change("resume"); }
       catch (error) {
         // Agora.Build paused it since this list was loaded: say so, and show the list as it is now.
-        if (error.code !== "admin_paused") throw error;
+        if (error.code !== "admin_paused" && error.code !== "owner_disabled") throw error;
         notify(error.message);
         await loadIntegrations();
       }

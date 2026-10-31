@@ -123,7 +123,7 @@ test("an integration Agora.Build paused shows Paused by Agora.Build, offers no R
   assert.match(script, /text: locked \? PAUSED_BY_AGORA : stateLabel\(state\)/);
   assert.match(script, /Agora\.Build paused this integration\. Only Agora\.Build can resume it; you can still revoke it\./);
   // A resume refused because Agora.Build paused it meanwhile says so and shows the list as it is now.
-  assert.match(script, /if \(error\.code !== "admin_paused"\) throw error;/);
+  assert.match(script, /if \(error\.code !== "admin_paused" && error\.code !== "owner_disabled"\) throw error;/);
   assert.match(script, /entry\.actor === "agora_build" \? "Agora\.Build" : entry\.actor/);
   assert.equal((script.match(/confirmed\(\w+, output, \[/g) || []).length, 4, "no new confirmation");
 });
