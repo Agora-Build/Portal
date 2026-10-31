@@ -671,8 +671,9 @@ export function createIntegrationService({
     },
 
     // The account's own integrations (reconciled with Auth's list of them) and, read from Portal only, the others on
-    // Stations it owns, which it may pause or revoke, and for Agora.Build admins the others on built-in Stations.
-    async integrations(accountId) {
+    // Stations it owns, which it may pause or revoke, and for Agora.Build admins the others on built-in Stations. Those
+    // are shown only with `asAdmin` (the admin's browser session), never to an app's token acting for the admin.
+    async integrations(accountId, { asAdmin = false } = {}) {
       let listed;
       try {
         listed = await manage.integrations(accountId);
@@ -690,7 +691,7 @@ export function createIntegrationService({
         }
       }
       // Agora.Build admins: every other account's integration on the built-in Stations, which they may pause or revoke.
-      if (admins.includes(accountId)) {
+      if (asAdmin && admins.includes(accountId)) {
         for (const station of await repository.builtInStations()) {
           for (const row of await repository.integrationsOnStation(station.id)) {
             if (row.ownerAccount !== accountId) views.push(integrationView(row, "station_admin", station.origin));

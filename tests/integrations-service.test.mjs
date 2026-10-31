@@ -511,7 +511,8 @@ test("Agora.Build admins see others' integrations on the built-in Station and ma
   const theirs = await onBuiltIn(s, built, OWNER);
   const other = await onBuiltIn(s, built, MEMBER);
   const custom = await s.create(OWNER);
-  assert.deepEqual((await s.service.integrations(ADMIN)).integrations.map((entry) => [entry.id, entry.role]), [[theirs.id, "station_admin"], [other.id, "station_admin"]]);
+  assert.deepEqual((await s.service.integrations(ADMIN, { asAdmin: true })).integrations.map((entry) => [entry.id, entry.role]), [[theirs.id, "station_admin"], [other.id, "station_admin"]]);
+  assert.deepEqual((await s.service.integrations(ADMIN)).integrations, [], "without asAdmin (a token acting for the admin) only the admin's own");
   assert.deepEqual((await s.service.integrations(STRANGER)).integrations, [], "nobody else sees them");
   await assert.rejects(s.service.pause(ADMIN, custom.id), refused(404, "not_found"), "no rights on custom Stations");
   await assert.rejects(s.service.pause(STRANGER, theirs.id), refused(404, "not_found"));

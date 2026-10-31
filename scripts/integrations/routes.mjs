@@ -105,7 +105,10 @@ export async function handleIntegrations({ path, method, url, read, service, cal
     const clientId = reporter(); limit("changes:" + clientId, 120, 60000);
     return ok(await service.changes(clientId, url.searchParams.get("cursor") ?? "0"));
   }
-  if (path === "/api/integrations" && method === "GET") return ok(await service.integrations(listing("integrations", caller ? scoped("integrations:read") : await portalUser())));
+  // Agora.Build admins see other accounts' built-in integrations only in their browser session, never through a token.
+  if (path === "/api/integrations" && method === "GET") {
+    return ok(await service.integrations(listing("integrations", caller ? scoped("integrations:read") : await portalUser()), { asAdmin: !caller }));
+  }
   const integration = INTEGRATION.exec(path);
   if (integration?.[2] === "approval" && method === "POST") {
     if (!caller) throw invalidToken("Approving an integration needs an auth.agora.build access token.");

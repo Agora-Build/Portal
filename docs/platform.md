@@ -589,8 +589,10 @@ Auth's clients file must be set up for this:
   expired integration on a built-in Station counts as a creation (same check, same 403; the expired one is not
   counted yet); renewing a live one is always allowed. Custom Stations have no cap.
 - **Admins** are the accounts in `PLATFORM_ADMINS`, which must equal the Station's `admins` in Auth's clients file.
-  They see every other account's integration on it (`role` `station_admin`) and may read an integration and its history, pause it
-  or revoke it, nothing else; the history records reason `station_admin`.
+  In their browser session (never through an app's token acting for them) they see every other account's integration
+  on it (`role` `station_admin`) and may read an integration and its history, pause it or revoke it, nothing else;
+  the history records reason `station_admin`. Through `GET /api/v1/integrations` an admin's token lists only the
+  admin's own integrations, like any account's; history, pause and revoke are browser routes only.
 - **Reports and feed** use the same routes as any Station. Its report token's `sub` is its own `s-` client ID (it has
   no owner): the Portal accepts such a token only when `client_id` equals `sub`, `sub` is `s-` and 26 lower-case
   Crockford base32 characters, and the scope includes `station.report`. It reaches only the two report routes (403
@@ -635,8 +637,8 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
 | `POST /api/integrations/<id>/renew` `{ expiresInDays }` | browser | new expiry counted from now; an expired one on a built-in Station within the plan limit |
 | `POST /api/integrations/<id>/settings` `{ quotaPerSecond }` | browser | change the quota |
 | `GET /api/integrations/<id>/events` | browser | history (`actor` is `you` for your own changes) |
-| `GET /api/integrations` | browser | the account's integrations, and others on Stations it owns |
-| `GET /api/v1/integrations` | token, `integrations:read` | the same list |
+| `GET /api/integrations` | browser | the account's integrations, and others on Stations it owns; for an Agora.Build admin also others on built-in Stations |
+| `GET /api/v1/integrations` | token, `integrations:read` | the same list, except that an admin's token never sees other accounts' built-in integrations |
 | `POST /api/v1/integrations/<id>/approval` `{ r9Svc }` | token, `integrations:approve` | native approval; `r9Svc` is 64 lower-case hex characters |
 | `POST /api/v1/stations/reports` | token, `station.report` | a Station's report |
 | `GET /api/v1/stations/changes?cursor=` | token, `station.report` | the Station's change feed |

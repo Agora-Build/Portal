@@ -462,6 +462,33 @@ test("renewing an expired integration on the built-in Station is checked against
   assert.equal((await renew(old[0])).status, 200, "a Fellow has no cap");
   await integrations.service._pushesIdle();
 });
+
+test("an admin's bearer token lists only the admin's own built-in integrations; only the browser session shows others' and acts on them", async (t) => {
+  const admin = accountId();
+  const integrations = await stack(t, { admins: [admin] });
+  if (!integrations) return;
+  const built = integrations.manage.seedBuiltIn({ integrations: true, admins: [admin] });
+  const app = await start(t, { integrations: integrations.service });
+  const owner = await signIn(app);
+  const boss = await signIn(app, admin);
+  assert.equal((await call(app.base, "/api/stations", { cookie: owner.cookie })).status, 200);
+  const create = async (cookie) => (await (await call(app.base, "/api/integrations", { cookie, method: "POST", data: { stationId: built.id, name: "Hosted", scopes: ["agent.view"], publicJwk: publicJwk() } })).json()).id;
+  const theirs = await create(owner.cookie);
+  const own = await create(boss.cookie);
+  const roles = async (response) => (await response.json()).integrations.map((entry) => [entry.id, entry.role]);
+  assert.deepEqual(await roles(await call(app.base, "/api/integrations", { cookie: boss.cookie })), [[own, "owner"], [theirs, "station_admin"]]);
+  const bearer = await app.fake.issueAccessToken({ sub: admin, scope: "integrations:read integrations:approve" });
+  assert.deepEqual(await roles(await call(app.base, "/api/v1/integrations", { bearer })), [[own, "owner"]], "a token acting for an admin sees only the admin's own");
+  for (const action of ["pause", "revoke", "events"]) {
+    const method = action === "events" ? "GET" : "POST";
+    assert.equal((await call(app.base, "/api/v1/integrations/" + theirs + "/" + action, { bearer, method })).status, 404, action + " is not a v1 route");
+    assert.ok([401, 403].includes((await call(app.base, "/api/integrations/" + theirs + "/" + action, { bearer, method })).status), action + " needs the browser session");
+  }
+  assert.equal((await integrations.service.integrations(owner.sub)).integrations[0].state, "awaiting_approval", "nothing changed");
+  const paused = await call(app.base, "/api/integrations/" + theirs + "/revoke", { cookie: boss.cookie, method: "POST" });
+  assert.deepEqual([paused.status, (await paused.json()).role], [200, "station_admin"]);
+  await integrations.service._pushesIdle();
+});
 test("the stack hands the platform admins to the service", async (t) => {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
@@ -472,7 +499,7 @@ test("the stack hands the platform admins to the service", async (t) => {
   const integrations = createIntegrationStack({ db, manage, idp: null, log: () => {}, admins: [admin], pushFetch: { async post() { return { status: 202 }; } } });
   await integrations.service.stations(owner);
   const created = await integrations.service.createIntegration(owner, { stationId: built.id, name: "Hosted", scopes: [], publicJwk: publicJwk() });
-  assert.deepEqual((await integrations.service.integrations(admin)).integrations.map((entry) => [entry.id, entry.role]), [[created.id, "station_admin"]]);
+  assert.deepEqual((await integrations.service.integrations(admin, { asAdmin: true })).integrations.map((entry) => [entry.id, entry.role]), [[created.id, "station_admin"]]);
   await integrations.service._pushesIdle();
 });
 
