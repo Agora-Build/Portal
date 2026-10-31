@@ -241,7 +241,7 @@ the browser:
 | `POST /platform/credits/reserve`, `/settle` | not accepted | `credits`, from a client in `PORTAL_BILLING_FILE` |
 | `GET /integrations` | account | `integrations:read` |
 | `POST /integrations/<id>/approval` | not accepted | `integrations:approve` |
-| `POST /stations/reports`, `GET /stations/changes` | not accepted | `station.report`, from a Station's `s-` client |
+| `POST /stations/reports`, `GET /stations/changes` | not accepted | `station.report`, from a Station's `s-` client (`sub` is the Station's owner, or for the built-in Station the `s-` client itself) |
 | Billing account, checkout and manage | account | not accepted |
 | Stoa spaces (create, own, admin), profile, radar, signaling | account (spaces) or guest | not accepted |
 
@@ -250,6 +250,7 @@ Bearer errors:
 - missing, invalid or expired token: 401 with `WWW-Authenticate: Bearer error="invalid_token"`;
 - missing scope: 403 with `WWW-Authenticate: Bearer error="insufficient_scope", scope="<scope>"`;
 - a browser-only route (billing, profile, radar, Stoa spaces): 403, whatever the scopes;
+- a built-in Station's own report token (`sub` = its `s-` client) on any other route: 403;
 - the IdP's keys unreachable for an unknown key ID: 503 (retry later).
 
 A token for one account can only read and spend that account's data.
@@ -520,6 +521,11 @@ decides who can get tokens; the Portal keeps the accounts' view, the history and
 the change feed the Stations read. Account deletion (with its waiting period)
 and the Discord apps come later and are not covered here.
 
+Every account also has the **built-in Station** (`https://station.agora.build`; on dev
+`https://station-dev.agora.build`), which Agora.Build runs (spec D24). Auth admits it from the `stations` list in
+its clients file instead of proof of control; nobody owns it, every signed-in account may use it, and nobody can
+remove it through any page or API.
+
 ### Database And Settings
 
 Stations and integrations need PostgreSQL (`DATABASE_URL`). Without it every
@@ -536,7 +542,7 @@ The tables:
 
 | Table | Holds |
 | --- | --- |
-| `stations` | Auth's Station ID, origin, owner, report client ID, `active` or `removed` |
+| `stations` | Auth's Station ID, origin, owner (none for a built-in Station), report client ID, `active` or `removed`, `built_in`, `access` (`members` or `any_account`), `integrations_enabled`, `name` |
 | `station_members` | accounts a Station is shared with, with who added or removed them and when |
 | `station_challenges` | issued proof values, valid 10 minutes, single use |
 | `integrations` | Auth's `i-` client ID, owner, Station, scopes, state, `resume_state`, `r9_svc`, quota, expiry, `last_error` |
@@ -564,6 +570,41 @@ Auth's clients file must be set up for this:
 - the `portal` client has `"manage": true`, `"exchange": true`,
   `"stationScopes": ["station.read"]` and its `backchannelLogoutUri`.
 
+### The Built-in Station
+
+- **Listing.** `GET /api/stations` lists it first for every account, with `role` `built_in`, `builtIn: true`,
+  `ownerAccount: null`, its `name` and `integrationsEnabled`, and no `reportClientId`. Each listing follows Auth's
+  `integrations` setting and name. A listing from Auth that lacks it changes nothing (it is never removed and its
+  integrations are never revoked because of that; the log says so); the Portal retires it only when Auth lists a new
+  Station at its origin.
+- **Refused without asking Auth** (as Auth refuses them): remove, share, unshare, leave and its member list answer
+  409 `built_in`; a check value for, or registration of, its origin 409 `origin_taken`. Any account gets a
+  `station.read` token for it.
+- **Integrations** are offered only while `integrationsEnabled` is true; otherwise creation answers 409
+  `not_supported`. Each is owned by and visible to its creator, with the usual approval in Astation. **Plan limits**
+  apply here only: Basic 4, Premium 10, Principal and Fellow no cap, counting the account's integrations on it in every
+  state except `revoked` and not expired. At the limit creation answers 403 `{ "error": "Your plan allows N integrations
+  on the built-in Station. Revoke one, upgrade, or use your own Station.", "code": "plan_limit", "limit": N }`. After a
+  downgrade existing integrations keep working; new ones wait until the account is under its limit. Custom Stations
+  have no cap.
+- **Admins** are the accounts in `PLATFORM_ADMINS`, which must equal the Station's `admins` in Auth's clients file.
+  They see every other account's integration on it (`role` `station_admin`) and may pause or revoke them, nothing
+  else; the history records reason `station_admin`.
+- **Reports and feed** use the same routes as any Station. Its report token's `sub` is its own `s-` client ID (it has
+  no owner): the Portal accepts such a token only when `client_id` equals `sub`, `sub` is `s-` and 26 lower-case
+  Crockford base32 characters, and the scope includes `station.report`. It reaches only the two report routes (403
+  elsewhere) and is never a Portal account. Its feed lists every integration on it, each with `ownerAccount`, and
+  nothing else; push hints go to its origin.
+- **Sync.** The Portal learns of built-in Stations from Auth itself: when the Stations and integrations stack becomes
+  ready (the first request to one of their routes, which waits for it) and then hourly, it lists Stations at Auth as
+  the first account in `PLATFORM_ADMINS` (which must exist at Auth) and adds or updates the built-in ones, never
+  removing one. Without `PLATFORM_ADMINS`, or with Auth unreachable, the log says so by reason and the next hour
+  tries again; every account's own listing also syncs them. A report client the Portal does not know answers 403
+  `station`.
+- **Limits across replicas.** The plan limit is checked one creation at a time per account in each Portal process;
+  with several Portal instances two simultaneous creations could pass it by one (accepted, bounded by the creation
+  rate limit).
+
 ### Routes
 
 Browser routes use the session cookie and are not accepted with tokens. Request
@@ -572,16 +613,16 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
 
 | Route | Who | What |
 | --- | --- | --- |
-| `GET /api/stations` | browser | the account's Stations (`role` `owner` or `member`) |
+| `GET /api/stations` | browser | the account's Stations (`role` `built_in`, `owner` or `member`) |
 | `POST /api/stations/challenges` `{ origin }` | browser | issue a proof value; 201 `{ challengeId, origin, value, url, expiresAt }`; 10 per hour |
 | `POST /api/stations` `{ challengeId, reportKey }` | browser | check the proof, register with Auth; 201 with the Station |
 | `DELETE /api/stations/<id>` | browser | remove (owner only); revokes its integrations |
 | `GET /api/stations/<id>/members` | browser | owner and members |
 | `PUT`, `DELETE /api/stations/<id>/members/<ab...>` | browser | share (owner only) and unshare (the owner, or a member removing themself); unsharing revokes that member's integrations there |
 | `POST /api/stations/<id>/read-token` | browser | a 5-minute `station.read` token for that Station: `{ accessToken, expiresIn, origin }` |
-| `POST /api/integrations` `{ stationId, name, scopes, publicJwk, quotaPerSecond, expiresInDays }` | browser | create; 201 |
+| `POST /api/integrations` `{ stationId, name, scopes, publicJwk, quotaPerSecond, expiresInDays }` | browser | create; 201; on a built-in Station: only while its integrations are on, within the plan limit |
 | `POST /api/integrations/<id>/keys` `{ publicJwk }` | browser | add a key; 201 `{ kid, overlapEndsAt }` |
-| `POST /api/integrations/<id>/pause`, `resume`, `revoke` | browser | pause and revoke also by the Station's owner |
+| `POST /api/integrations/<id>/pause`, `resume`, `revoke` | browser | pause and revoke also by the Station's owner, or on a built-in Station by an Agora.Build admin |
 | `POST /api/integrations/<id>/renew` `{ expiresInDays }` | browser | new expiry counted from now |
 | `POST /api/integrations/<id>/settings` `{ quotaPerSecond }` | browser | change the quota |
 | `GET /api/integrations/<id>/events` | browser | history (`actor` is `you` for your own changes) |
@@ -626,7 +667,7 @@ account from using a large share of it. If Auth answers 429, it shows as 503
 Common error codes: `not_found` (404), `forbidden` (403), `invalid_state` and
 `expired` (409, the action does not fit the current state), `revoked` (409),
 `origin_taken` and `duplicate_key` (409, from Auth), `challenge` (400, expired or
-used), `proof` (422), `station` (403, the report client is not a registered Station), `exchange` (403, Auth refused the read token), `unavailable` (503, Auth unreachable); too many challenges or requests are 429. Field mistakes are
+used), `proof` (422), `station` (403, the report client is not a registered Station), `exchange` (403, Auth refused the read token), `unavailable` (503, Auth unreachable), `built_in` (409, the built-in Station can't be removed, shared or left), `not_supported` (409, integrations are off on the built-in Station), `plan_limit` (403, the plan's limit on the built-in Station); too many challenges or requests are 429. Field mistakes are
 400 with `name`, `scopes`, `quota`, `expiry`, `jwk`, `private_key`, `account`,
 `report_key`, `r9_svc`, `reason`, `state`, `report` or `cursor`.
 
@@ -778,6 +819,9 @@ from an Agora-Build/Auth checkout (`AUTH_REPO`, default `../Auth`, with
 helpers create and drop their own schemas. It drives sign-in, SSO, sign-out,
 back-channel logout, a billing client, a native app, the billing allowlist, key
 rotation, the IdP going down and cross-account isolation over real HTTP.
+`tests/e2e/built-in-station.e2e.mjs` runs the built-in Station: two accounts listing it, the refused actions, its
+`s-` report token, its feed, integrations off then on, the plan limit and admin pause and revoke.
+`scripts/browser-smoke-integrations.mjs` also checks its row and the Station selector.
 
 `node scripts/browser-smoke.mjs` drives a real headless Chromium through the same
 stack at desktop and mobile sizes: the keyboard-reachable "Sign in", the IdP page
