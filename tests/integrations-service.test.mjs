@@ -616,6 +616,33 @@ test("an owner's listing follows who paused an integration at Auth, recorded lik
   assert.equal((await s.events("integration_reconciled")).length, 1, "nothing more to record");
 });
 
+// Least disclosure: Agora.Build disabling or enabling an integration's owner account is the owner's business. Its
+// custom Station's owner and the Station see Agora.Build's pause and lift; the owner and integration_events keep it.
+test("a custom Station's owner and its feed see an owner's account disabled and enabled as Agora.Build's pause and lift", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await s.service.share(OWNER, s.station.id, MEMBER);
+  const { id } = await s.create(MEMBER);
+  let seen;
+  const follow = async () => {
+    const { changes, nextCursor } = await s.manage.integrationChanges({ after: seen });
+    seen = nextCursor ?? undefined;
+    for (const change of changes) await s.service.applyAuthChange(change);
+  };
+  s.manage.setOwnerDisabled(MEMBER, true, { actor: ADMIN, reason: "Abuse" });
+  await follow();
+  s.clock.now += 1000;
+  s.manage.setOwnerDisabled(MEMBER, false, { actor: ADMIN, reason: "Appeal" });
+  await follow();
+  const shown = async (accountId) => (await s.service.history(accountId, id)).events.slice(0, 2).map((event) => [event.kind, event.state, event.actor, event.reason]);
+  assert.deepEqual(await shown(OWNER), [["integration_resumed", "awaiting_approval", "agora_build", null], ["integration_paused", "paused", "agora_build", null]], "the Station's owner sees Agora.Build's pause and lift");
+  assert.deepEqual(await shown(MEMBER), [["integration_owner_enabled", "awaiting_approval", "agora_build", null], ["integration_owner_disabled", "paused", "agora_build", null]], "the integration's owner sees what it was");
+  const feed = (await s.service.changes(s.station.reportClientId, "0")).changes.filter((change) => change.integrationId === id);
+  assert.deepEqual(feed.slice(-2).map((change) => [change.kind, change.state, change.reason]), [["integration_paused", "paused", "agora_build"], ["integration_resumed", "awaiting_approval", "agora_build"]]);
+  assert.equal(JSON.stringify(feed).includes("Abuse") || JSON.stringify(feed).includes(ADMIN), false);
+  assert.deepEqual((await s.events()).filter((event) => event.integration_id === id).slice(-2).map((event) => [event.kind, event.actor, event.reason]), [["integration_owner_disabled", ADMIN, "Abuse"], ["integration_owner_enabled", ADMIN, "Appeal"]], "integration_events keeps what it was");
+});
+
 test("while Agora.Build has its owner's account disabled, an integration shows as paused by Agora.Build and cannot be resumed", async (t) => {
   const s = await setup(t);
   if (!s) return;

@@ -50,6 +50,10 @@ const AUTH_REASON_MAX = 500;
 // How the Station's feed and an integration's history name a change an Agora.Build admin made (spec §3.3.4): the admin
 // and the reason they gave stay in the Portal's event (actor, reason) and in Auth's audit.
 const AGORA_BUILD = "agora_build";
+// Agora.Build disabling or enabling an integration's owner account is between Agora.Build and the owner (least
+// disclosure): the Station's feed and the custom Station owner's history show it as Agora.Build's pause and lift, each
+// with the state it recorded. integration_events and the owner's own history keep these kinds.
+const OWNER_EVENTS = { integration_owner_disabled: "integration_paused", integration_owner_enabled: "integration_resumed" };
 
 const MANAGE_CONFLICTS = {
   origin_taken: "This Station is already registered.",
@@ -935,7 +939,8 @@ export function createIntegrationService({
       const current = new Map(rows.map((row) => [row.id, row]));
       const changes = events.map(({ id, at: when, integrationId, kind, state, reason, details }) => {
         // Agora.Build's changes say only that: the admin and their reason stay in the Portal's event (spec §3.3.4).
-        const change = { id, at: when, integrationId, kind, state, reason: details?.admin === true ? AGORA_BUILD : reason };
+        const masked = Object.hasOwn(OWNER_EVENTS, kind);
+        const change = { id, at: when, integrationId, kind: masked ? OWNER_EVENTS[kind] : kind, state, reason: masked || details?.admin === true ? AGORA_BUILD : reason };
         const row = integrationId ? current.get(integrationId) : null;
         if (row) change.integration = feedIntegration(row, at);
         return change;
@@ -1028,13 +1033,15 @@ export function createIntegrationService({
     },
 
     // Newest first. The reader's own changes show as "you". An Agora.Build admin's change shows as Agora.Build's: the
-    // admin's account and their reason stay in the event, for the audit (spec §3.3.4).
+    // admin's account and their reason stay in the event, for the audit (spec §3.3.4). The custom Station's owner sees
+    // the owner's account being disabled or enabled as Agora.Build's pause and lift (OWNER_EVENTS).
     async history(accountId, id) {
-      const { row } = await visible(accountId, id);
+      const { row, role } = await visible(accountId, id);
       const events = await repository.eventsFor(row.id);
-      return { events: events.map(({ at, kind, state, reason, actor, details }) => details?.admin === true
-        ? { at, kind, state, reason: null, actor: AGORA_BUILD }
-        : { at, kind, state, reason, actor: actor === accountId ? "you" : actor }) };
+      return { events: events.map(({ at, kind, state, reason, actor, details }) => {
+        if (role === "station_owner" && Object.hasOwn(OWNER_EVENTS, kind)) return { at, kind: OWNER_EVENTS[kind], state, reason: null, actor: AGORA_BUILD };
+        return details?.admin === true ? { at, kind, state, reason: null, actor: AGORA_BUILD } : { at, kind, state, reason, actor: actor === accountId ? "you" : actor };
+      }) };
     }
   };
 }

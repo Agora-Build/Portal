@@ -659,10 +659,11 @@ integration's Station refuses still-valid tokens and closes open sessions at onc
   given (or Auth's code, such as `configuration`), appends it to the Station's feed and pushes the Station. A pause
   pauses the integration and records who paused it (`paused_by`); a resume returns it to where it was; a revocation
   sets it to `revoking` (or `revoked` before approval), as an owner's does. An owner's account being disabled sets
-  `owner_disabled_at` on each of its integrations that is not revoked: the account page and the Station's feed show
-  them `paused` until the account is enabled again, when each is back as it was (one its owner had paused stays
-  paused). Each change is applied once: its Auth cursor and time are kept in the event's details. An integration that
-  is already revoking or revoked is only recorded. A change for an integration the Portal does not know yet is dropped
+  `owner_disabled_at` on each of its integrations that is not revoked and records `integration_owner_disabled`: the
+  account page and the Station's feed show them `paused` until the account is enabled again
+  (`integration_owner_enabled`), when each is back as it was (one its owner had paused stays paused). Each change is
+  applied once: its Auth cursor and time are kept in the event's details. An integration that is already revoking or
+  revoked is only recorded. A change for an integration the Portal does not know yet is dropped
   (the log says so); the owner's next listing brings the integration in, and the admin and the reason stay only in
   Auth's audit.
 - **An admin's pause locks.** An integration Agora.Build paused shows "Paused by Agora.Build" (`pausedBy` `admin`, also
@@ -677,9 +678,11 @@ integration's Station refuses still-valid tokens and closes open sessions at onc
   from the feed.
 - **What people and Stations see.** The admin's account and the reason they typed stay in the Portal's events and in
   Auth's audit. An integration's history shows such a change as by `agora_build` (Agora.Build) without a reason, and
-  the Station's feed gives it the `reason` `agora_build` ("The change feed", under "For Station Builders", lists the
-  entry kinds for an owner's account being disabled or enabled; Stations act on `state` and `integration.state`, not
-  on `kind`).
+  the Station's feed gives it the `reason` `agora_build`. An owner's account being disabled reaches Stations as an
+  Agora.Build pause, and its enabling as Agora.Build's lift: the Station's feed has `integration_paused` and
+  `integration_resumed` with the `reason` `agora_build`, and a custom Station owner's history shows the same kinds by
+  `agora_build`. Only the Portal's `integration_events` and the integration owner's own history name
+  `integration_owner_disabled` and `integration_owner_enabled`.
 - **Clocks.** A resume from the feed is recorded but not applied when the Portal already has a newer pause, resume or
   revocation of that integration (a pause or revocation always applies). That compares the change time Auth gives
   with times from the Portal's own clock, so keep Auth's and the Portal's clocks in sync (NTP). Skewed clocks could
@@ -687,9 +690,10 @@ integration's Station refuses still-valid tokens and closes open sessions at onc
 - **A stale owner-disabled flag.** The flag clears when Auth enables the account (the feed's `owner_enabled`), and
   also when Auth accepts a management call naming that owner as `actor` (Auth refuses a disabled account's calls, so
   an accepted one proves it is enabled). That heals a missed `owner_enabled`: the Portal records
-  `integration_owner_enabled` (actor `system`, reason `reconciled`) and tells the Station. To check by hand, compare the
-  Portal's `SELECT id, owner_account, owner_disabled_at FROM integrations WHERE owner_disabled_at IS NOT NULL;` with
-  Auth's `accounts.disabled_at` for those owners. A flag on an account Auth shows enabled is stale.
+  `integration_owner_enabled` (actor `system`, reason `reconciled`) and tells the Station, which sees Agora.Build's
+  lift. To check by hand, compare the Portal's
+  `SELECT id, owner_account, owner_disabled_at FROM integrations WHERE owner_disabled_at IS NOT NULL;` with Auth's
+  `accounts.disabled_at` for those owners. A flag on an account Auth shows enabled is stale.
 
 #### Rolling Out Admin Changes (Dev First)
 
@@ -913,9 +917,6 @@ cursor in a push nudge is only a hint; never store it. `kind` is one of `integra
 `integration_key_added`, `integration_reported` (the Station's own reports),
 `integration_reconciled` (the Portal caught up with a change made at Auth,
 such as a new expiry, quota or R9 binding, or an integration it had missed),
-`integration_owner_disabled` and `integration_owner_enabled` (Agora.Build
-disabled or enabled the integration's owner account: Auth issues it no token
-while it is disabled, and its `state` is `paused` until it is enabled again),
 and for the Station itself `station_registered`, `station_reconciled`,
 `member_added` and `member_removed`, which have no integration. New kinds may
 be added; treat an unknown one as a reason to act on the `integration` it
@@ -923,7 +924,10 @@ carries. Act on `state` and `integration.state`, never on `kind` alone: some
 changes are only recorded and change nothing, such as an older
 `integration_resumed` that reaches the Portal after a newer pause: it comes with
 the integration's actual state, `paused`. A change Agora.Build made (an admin's, on the admin site) has the
-`reason` `agora_build`. As soon as an integration's `state` is `paused`,
+`reason` `agora_build`. Agora.Build disabling an integration's owner account reaches the Station as an Agora.Build
+pause (`integration_paused`, `state` `paused`; Auth issues the integration no token meanwhile), and enabling it again
+as Agora.Build's `integration_resumed`, after which `integration.state` is what it was before (still `paused` if its
+owner had paused it). As soon as an integration's `state` is `paused`,
 `revoking`, `revoked` or `expired`, refuse its still-valid tokens and close its
 open sessions and streams; its tokens are never trusted past their 300-second
 lifetime anyway. A removed Station cannot read its feed any more (its report client is
@@ -988,8 +992,9 @@ makes once Auth's step-up gate has passed): a pause reaches the Portal's events 
 nudge, the owner cannot resume it in the Portal or at Auth, the admin's lift and revocation follow, and with the nudge
 lost the Portal's poll still brings a pause. It checks that the Station's feed, the owner's history and the Portal's
 log name neither the admin nor the reasons, and that an admin disabling and enabling an owner at Auth pauses and
-restores that owner's integrations. Those need an Auth checkout with the change feed and the admin pause lock (Auth
-`feat/admin-mfa`, Tasks 13 and 14) and are skipped otherwise.
+restores that owner's integrations, which the Station sees as Agora.Build's pause and lift. Those need an Auth
+checkout with the change feed and the admin pause lock (Auth `feat/admin-mfa`, Tasks 13 and 14) and are skipped
+otherwise.
 `scripts/browser-smoke-integrations.mjs` also checks its row and the Station selector, and the row of an integration
 an admin paused at Auth ("Paused by Agora.Build", no Resume).
 

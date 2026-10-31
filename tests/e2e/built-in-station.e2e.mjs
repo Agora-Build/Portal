@@ -244,9 +244,10 @@ describe("The built-in Station against the real auth.agora.build", { skip: skip 
     const start = (await feed(0, token)).body.cursor;
     const portalNudges = stack.portal.nudges;
     await stack.adminAccount(fayId, { disabled: true, reason: "Account review" });
+    // The Station sees Agora.Build's pause, never that the owner's account was disabled (least disclosure).
     const disabled = await eventually(async () => {
       const { changes } = (await feed(start, token)).body;
-      const found = ids.map((id) => changes.find((entry) => entry.integrationId === id && entry.kind === "integration_owner_disabled"));
+      const found = ids.map((id) => changes.find((entry) => entry.integrationId === id && entry.kind === "integration_paused"));
       return found.every(Boolean) && found;
     });
     assert.ok(disabled, "both reach the Station's feed, shown paused, as Agora.Build's");
@@ -266,10 +267,11 @@ describe("The built-in Station against the real auth.agora.build", { skip: skip 
     await stack.adminAccount(fayId, { disabled: false, reason: "Review done" });
     const enabled = await eventually(async () => {
       const { changes } = (await feed(middle, token)).body;
-      const found = ids.map((id) => changes.find((entry) => entry.integrationId === id && entry.kind === "integration_owner_enabled"));
+      const found = ids.map((id) => changes.find((entry) => entry.integrationId === id && entry.kind === "integration_resumed"));
       return found.every(Boolean) && found;
     });
-    assert.ok(enabled, "enabling reaches the Station's feed");
+    assert.ok(enabled, "enabling reaches the Station's feed, as Agora.Build's lift");
+    assert.equal((await feed(start, token)).body.changes.some((entry) => entry.kind.includes("owner")), false, "no kind names the owner's account");
     assert.deepEqual(enabled.map((entry) => [entry.reason, entry.integration.state]), [["agora_build", "awaiting_approval"], ["agora_build", "paused"]], "each back as it was");
     assert.deepEqual((await stack.portalQuery("SELECT owner_disabled_at FROM integrations WHERE id = ANY($1)", [ids])).rows.map((row) => row.owner_disabled_at), [null, null]);
     const again = await portalSignIn(stack, person(7313, "Fay"));

@@ -186,7 +186,10 @@ test("disabling an owner's account pauses its integrations for the Station until
   assert.deepEqual([stateOf(feed, live), stateOf(feed, paused), stateOf(feed, others)], ["paused", "paused", "ready"]);
   const event = (await s.events(live)).at(-1);
   assert.deepEqual([event.kind, event.state, event.actor, event.reason], ["integration_owner_disabled", "paused", ADMIN, "Abusive integrations"]);
-  assert.equal(feed.changes.find((change) => change.integrationId === live && change.kind === "integration_owner_disabled").reason, "agora_build");
+  // The Station sees Agora.Build's pause, not that the owner's account was disabled (least disclosure).
+  const latestFor = (answer, id) => answer.changes.filter((change) => change.integrationId === id).at(-1);
+  const masked = (change) => [change.kind, change.state, change.reason];
+  assert.deepEqual([masked(latestFor(feed, live)), masked(latestFor(feed, paused))], [["integration_paused", "paused", "agora_build"], ["integration_paused", "paused", "agora_build"]]);
   // Auth still has the integration active: a listing for the owner (through an access token issued before the account
   // was disabled) must not bring it back for the Station.
   await s.service.integrations(OWNER);
@@ -195,8 +198,10 @@ test("disabling an owner's account pauses its integrations for the Station until
   await s.follow();
   const back = await s.stationFeed();
   assert.deepEqual([stateOf(back, live), stateOf(back, paused)], ["ready", "paused"], "each is back as it was");
+  assert.deepEqual([masked(latestFor(back, live)), masked(latestFor(back, paused))], [["integration_resumed", "ready", "agora_build"], ["integration_resumed", "paused", "agora_build"]], "as Agora.Build's lift");
+  assert.equal(back.changes.some((change) => change.kind.includes("owner")), false, "no kind names the owner's account");
   assert.equal((await s.repository.integration(live)).ownerDisabledAt, null);
-  assert.equal((await s.events(live)).at(-1).kind, "integration_owner_enabled");
+  assert.deepEqual((await s.events(live)).slice(-2).map((entry) => entry.kind), ["integration_owner_disabled", "integration_owner_enabled"], "the Portal's own record keeps what it was");
 });
 
 test("entries that are not changes, and changes to integrations the Portal does not know, are skipped and logged", async (t) => {
@@ -300,6 +305,8 @@ test("Auth accepting the owner's own call clears a stale owner-disabled flag; a 
   }
   assert.ok(s.notified.includes(s.built.id));
   assert.ok(s.logs.includes("Owner-disabled flag cleared: Auth accepted a call by the owner."));
+  const lift = feed.changes.filter((change) => change.integrationId === other).at(-1);
+  assert.deepEqual([lift.kind, lift.state, lift.reason], ["integration_resumed", "ready", "agora_build"], "the Station sees Agora.Build's lift");
   const [latest] = (await s.service.history(OWNER, other)).events;
   assert.deepEqual([latest.kind, latest.actor, latest.reason], ["integration_owner_enabled", "system", "reconciled"]);
 });
