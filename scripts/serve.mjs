@@ -16,6 +16,7 @@ import { createLedger } from "./ledger.mjs";
 import { createBilling } from "./billing.mjs";
 import { ConnectError, createConnections } from "./connections.mjs";
 import { createPostgresPersistence } from "./persistence.mjs";
+import { effectivePlan } from "./plans.mjs";
 import { createSignaling, signalingConfig } from "./spaces/signaling.mjs";
 import { createSpaces, loadWorlds } from "./spaces/service.mjs";
 import { handleSpaces } from "./spaces/routes.mjs";
@@ -70,6 +71,10 @@ export const API_V1 = "/api/v1/";
 const bearerRoutes = new Set(["GET /api/me", "GET /api/credits/balance", "GET /api/credits/statement", "POST /api/marketplaces/chat", "POST /api/marketplaces/tts", "GET /api/connections", "GET /api/connections/agora/projects", "POST /api/connections/agora/certificate", "POST /api/connections/agora/token", "DELETE /api/connections/agora", "POST /api/platform/credits/reserve", "POST /api/platform/credits/settle", "GET /api/integrations", "POST /api/stations/reports", "GET /api/stations/changes"]);
 const bearerPatterns = [/^POST \/api\/integrations\/[A-Za-z0-9_-]{1,64}\/approval$/];
 const isBearerRoute = (route) => bearerRoutes.has(route) || bearerPatterns.some((pattern) => pattern.test(route));
+// A Station's own report token (sub = its s- report client; a built-in Station has no owner) is not an account: it
+// reaches these two routes only, and no Portal account is made for it.
+const stationReportRoutes = new Set(["POST /api/stations/reports", "GET /api/stations/changes"]);
+const reportTokenOnly = () => new AppError(403, "A Station's own report token can only send reports and read the change feed.");
 // Routes that exist for the browser session only; a bearer token there gets 403, and on any other path 404.
 const browserRoutes = new Set(["GET /api/billing/account", "POST /api/billing/checkout", "POST /api/billing/manage", "POST /api/profile", "PUT /api/profile", "DELETE /api/profile", "GET /api/radar", "POST /api/radar", "POST /api/auth/logout", "POST /api/signaling/token"]);
 // Over https the session cookie was renamed from house_session to __Host-house_session. Until this date a guest's
@@ -125,10 +130,13 @@ export function createAppServer(directory = root, options = {}) {
   const worlds = options.worlds || loadWorlds(directory);
   const themes = options.themes || loadThemes(directory);
   const signaling = options.signaling || createSignaling(signalingConfig());
-  const spaces = options.spaces || createSpaces({ store, worlds, signaling, calls, secret: options.channelSecret ?? signalingConfig().secret, admins: platformAdmins(process.env.PLATFORM_ADMINS, log), plazaCapacity: options.plazaCapacity });
+  const admins = platformAdmins(process.env.PLATFORM_ADMINS, log);
+  const spaces = options.spaces || createSpaces({ store, worlds, signaling, calls, secret: options.channelSecret ?? signalingConfig().secret, admins, plazaCapacity: options.plazaCapacity });
   // Stations and integrations: a ready service (tests), null (off), or built from DATABASE_URL; without it every
   // integration route answers 503. integrationOptions ({ stationFetch, pushFetch }) are for the end-to-end tests.
-  const integrations = "integrations" in options ? (options.integrations && readyIntegrations(options.integrations)) : integrationsFromEnv(process.env, { ...options.integrationOptions, idp, log });
+  const integrations = "integrations" in options ? (options.integrations && readyIntegrations(options.integrations)) : integrationsFromEnv(process.env, { ...options.integrationOptions, idp, log, admins });
+  // The account's plan (scripts/plans.mjs), for the integration limits on the built-in Station.
+  const planOf = async (accountId) => effectivePlan((await store.snapshot()).accounts.find((account) => account.id === accountId), clock());
   const windows = new Map();
   const scanning = new Set();
   const radarHours = Math.max(1, Number(process.env.RADAR_INTERVAL_HOURS) || 24);
@@ -292,10 +300,12 @@ export function createAppServer(directory = root, options = {}) {
         }
         const token = caller ? "" : browserToken;
         const route = request.method + " " + path;
+        if (caller?.station && !stationReportRoutes.has(route)) throw reportTokenOnly();
         if (caller && !publicRoutes.has(route) && !isBearerRoute(route)) throw browserRoute(route, path) ? browserOnly() : new AppError(404, "This page or service was not found.");
         if (caller && !versioned && isBearerRoute(route)) throw new AppError(404, "Access tokens use the versioned API: " + API_V1 + path.slice("/api/".length) + ".");
-        // Only after the route gate, so a token that reaches a 404, browser-only or public route creates nothing.
-        if (caller && isBearerRoute(route)) caller.account = await store.ensureAccount(caller.sub);
+        // Only after the route gate, so a token that reaches a 404, browser-only or public route creates nothing; a
+        // Station's own report token never makes an account.
+        if (caller && !caller.station && isBearerRoute(route)) caller.account = await store.ensureAccount(caller.sub);
         const scoped = (scope) => { if (!caller.scopes.includes(scope)) throw insufficientScope(scope); return caller.sub; };
         const member = async () => {
           const person = await store.me(token);
@@ -423,7 +433,7 @@ export function createAppServer(directory = root, options = {}) {
           json(response, 200, { result: await scan(person) });
         } else if (path === "/api/rooms" || path.startsWith("/api/rooms/")) throw new AppError(410, "Meeting rooms are now Stoa spaces. Start one from the Stoa.");
         else if (integrationPath(path)) {
-          const handled = await handleIntegrations({ path, method: request.method, url: requestUrl, read: () => body(request), service: integrations && await integrations.ready(), caller, scoped, invalidToken, portalUser, idToken: () => store.sessionIdToken(token), limit });
+          const handled = await handleIntegrations({ path, method: request.method, url: requestUrl, read: () => body(request), service: integrations && await integrations.ready(), caller, scoped, invalidToken, portalUser, idToken: () => store.sessionIdToken(token), limit, planOf });
           if (!handled) throw new AppError(404, "This page or service was not found.");
           json(response, handled.status, handled.body);
         } else {

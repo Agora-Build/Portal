@@ -2,6 +2,7 @@
 // success; every Auth change names the signed-in account as `actor`. Rows are never deleted (D19).
 import { randomBytes, randomUUID } from "node:crypto";
 import { TokenError } from "../idp.mjs";
+import { builtInIntegrationLimit } from "../plans.mjs";
 import { ACCOUNT_ID, AppError } from "../store.mjs";
 import { ManageError } from "./auth-manage.mjs";
 import { checkProof, createStationFetch, ProofError, stationOrigin, WELL_KNOWN_PATH } from "./proof.mjs";
@@ -29,11 +30,17 @@ const notFound = () => failure(404, "This Station or integration was not found."
 const ownerOnly = () => failure(403, "Only the Station owner can do this.", "forbidden");
 const unknownStation = () => failure(403, "This Station is not registered.", "station");
 const expiredChallenge = () => failure(400, "This check has expired or was already used. Start again.", "challenge");
+const SYSTEM = "system";
+const BUILT_IN_FIXED = "The built-in Station is always there: it can't be removed, shared or left.";
+const BUILT_IN_ORIGIN = "This is the built-in Station. Every account already has it.";
+const NOT_SUPPORTED = "Integrations aren't available on the built-in Station yet.";
 
 const MANAGE_CONFLICTS = {
   origin_taken: "This Station is already registered.",
   revoked: "This integration has been revoked.",
-  duplicate_key: "This key is already registered."
+  duplicate_key: "This key is already registered.",
+  built_in: BUILT_IN_FIXED,
+  not_supported: NOT_SUPPORTED
 };
 
 // Turns Auth's management answer into the Portal's error; anything that is not a ManageError is rethrown unchanged.
@@ -54,9 +61,13 @@ async function viaAuth(call) {
   }
 }
 
-// Members are not shown the Station's report client; it is not secret, but they have no use for it.
+// Members are not shown the Station's report client; it is not secret, but they have no use for it. Nobody is shown a
+// built-in Station's report client (its role is built_in).
 function stationView(station, role) {
-  const view = { id: station.id, origin: station.origin, role, ownerAccount: station.ownerAccount, status: station.status, createdAt: station.createdAt };
+  const view = {
+    id: station.id, origin: station.origin, role, ownerAccount: station.ownerAccount, status: station.status, createdAt: station.createdAt,
+    builtIn: station.builtIn, name: station.name, integrationsEnabled: station.integrationsEnabled
+  };
   if (role === "owner") view.reportClientId = station.reportClientId;
   return view;
 }
@@ -142,7 +153,7 @@ function feedIntegration(row, at) {
 
 export function createIntegrationService({
   repository, db, manage, stationFetch, exchange, now = Date.now, log = () => {}, ids = randomUUID,
-  challengeValue = () => randomBytes(32).toString("base64url"), pushFetch = createStationFetch({ timeoutMs: 3000 }), notify
+  challengeValue = () => randomBytes(32).toString("base64url"), pushFetch = createStationFetch({ timeoutMs: 3000 }), notify, admins = []
 }) {
   // Every transaction here appends events, so each takes the event lock before any row lock (see lockEvents).
   const appending = (work) => db.transaction(async (client) => {
@@ -152,6 +163,26 @@ export function createIntegrationService({
 
   // Per Station: the push in flight and whether another change arrived while it ran.
   const pushes = new Map();
+
+  // Per account and built-in Station: the creation or renewal in flight, so the next one waits for
+  // its count (plan limits).
+  const creations = new Map();
+  function oneAtATime(key, work) {
+    const run = (creations.get(key) ?? Promise.resolve()).then(work);
+    const settled = run.catch(() => {});
+    creations.set(key, settled);
+    settled.then(() => { if (creations.get(key) === settled) creations.delete(key); });
+    return run;
+  }
+
+  // Refuses at the plan limit, counting the account's live integrations on a built-in Station. Call it inside
+  // oneAtATime for that account and Station.
+  async function underPlanLimit(accountId, stationId, plan) {
+    const limit = builtInIntegrationLimit(plan);
+    if (limit !== null && await repository.countLiveIntegrations(stationId, accountId, now()) >= limit) {
+      throw failure(403, "Your plan allows " + limit + " integrations on the built-in Station. Revoke one, upgrade, or use your own Station.", "plan_limit", { limit });
+    }
+  }
 
   // Nudges the Station to read its change feed. The nudge carries no authority, only the latest cursor; the Station
   // learns what changed by polling with its own token. At most one push per Station is in flight; calls meanwhile
@@ -230,7 +261,7 @@ export function createIntegrationService({
     if (!stale || stale.id === id) return null;
     await repository.markStationRemoved(stale.id, now(), client);
     await revokeOn(client, stale.id, () => true, { actor: "system", reason: "reconciled", direct: true });
-    await repository.appendEvent({ stationId: stale.id, accountId: stale.ownerAccount, actor: "system", kind: "station_removed", reason: "reconciled" }, client);
+    await repository.appendEvent({ stationId: stale.id, accountId: stale.ownerAccount ?? SYSTEM, actor: SYSTEM, kind: "station_removed", reason: "reconciled" }, client);
     return stale.id;
   }
 
@@ -240,18 +271,30 @@ export function createIntegrationService({
     changed(stationId);
   }
 
-  // The active Station as this account has it in Portal (with its role, "owner" or "member"). An account that neither
-  // owns it nor is a current member gets the same 404 as for an unknown ID, before Auth is asked, so nothing about the
-  // Station is revealed (as for integrations, Ruling T7-8).
+  // The active Station as this account has it in Portal (with its role, "built_in", "owner" or "member"). An account
+  // that neither owns a custom Station nor is a current member gets the same 404 as for an unknown ID, before Auth is
+  // asked, so nothing about the Station is revealed (as for integrations, Ruling T7-8). Every account has the built-in.
   async function usable(accountId, stationId) {
     const station = typeof stationId === "string" && stationId ? (await repository.stationsFor(accountId)).find((entry) => entry.id === stationId) : null;
     if (!station) throw notFound();
     return station;
   }
 
+  // Remove, share, leave and the member list don't exist for a built-in Station; refused here as Auth refuses them
+  // (409 built_in), without asking Auth.
+  function notBuiltIn(station) {
+    if (station.builtIn) throw failure(409, BUILT_IN_FIXED, "built_in");
+    return station;
+  }
+
+  // Auth answers 409 origin_taken for a built-in Station's origin; Portal says so before a check is issued or fetched.
+  async function notBuiltInOrigin(origin) {
+    if ((await repository.builtInStations()).some((station) => station.origin === origin)) throw failure(409, BUILT_IN_ORIGIN, "origin_taken");
+  }
+
   // For changes only the Station's owner may make; a member sees the Station, so it is told why.
   async function ownStation(accountId, stationId) {
-    const station = await usable(accountId, stationId);
+    const station = notBuiltIn(await usable(accountId, stationId));
     if (station.role !== "owner") throw ownerOnly();
     return station;
   }
@@ -261,6 +304,11 @@ export function createIntegrationService({
   async function reconcile(accountId, listed) {
     const known = new Set(listed.map((station) => station.id));
     for (const station of await repository.stationsFor(accountId)) {
+      // A built-in Station is every account's: a listing without it never removes it or revokes anything (D24).
+      if (station.builtIn) {
+        if (!known.has(station.id)) log("Built-in Station absent from Auth's listing: left as it is.");
+        continue;
+      }
       if (known.has(station.id)) continue;
       if (station.role === "owner") {
         await appending(async (client) => {
@@ -285,7 +333,16 @@ export function createIntegrationService({
       }
     }
     for (const entry of listed) {
+      if (entry.builtIn) {
+        await reconcileBuiltIn(entry);
+        continue;
+      }
       const existing = await repository.station(entry.id);
+      // A built-in Station is only ever reconciled as one: it never gains an owner or members here.
+      if (existing?.builtIn) {
+        log("Built-in Station listed by Auth as a custom Station: left as it is.");
+        continue;
+      }
       // Auth still lists a Station Portal has removed (its integrations already revoked here); restoring it is left to
       // an operator, so it is logged.
       if (existing?.status === "removed") log("Station listed by Auth is removed in Portal: not restored.");
@@ -317,6 +374,32 @@ export function createIntegrationService({
     }
   }
 
+  // Inserts a built-in Station Auth lists (no owner, no members) or follows its name and integrations setting. A new
+  // Station at the origin of an older one retires the older one, as for custom Stations.
+  async function reconcileBuiltIn(entry) {
+    const existing = await repository.station(entry.id);
+    if (existing?.status === "removed") {
+      log("Built-in Station listed by Auth is removed in Portal: not restored.");
+      return;
+    }
+    const settings = { name: entry.name, integrationsEnabled: entry.integrations === true };
+    if (existing) {
+      if (await repository.updateBuiltInStation(entry.id, settings)) log("Built-in Station settings followed from Auth.");
+      return;
+    }
+    const { added, stale } = await appending(async (client) => {
+      const stale = await retireStale(client, entry.origin, entry.id);
+      if (!(await repository.insertStation({ id: entry.id, origin: entry.origin, reportClientId: entry.reportClientId, verifiedAt: entry.createdAt, builtIn: true, ...settings }, client))) return { added: false, stale };
+      await repository.appendEvent({ stationId: entry.id, accountId: SYSTEM, actor: SYSTEM, kind: "station_reconciled", reason: "built_in" }, client);
+      return { added: true, stale };
+    });
+    retired(stale);
+    if (added) {
+      log("Built-in Station added from Auth.");
+      changed(entry.id);
+    }
+  }
+
   function integrationView(row, role, origin) {
     return {
       id: row.id, kind: row.kind, name: row.name, stationId: row.stationId, stationOrigin: origin, scopes: row.scopes,
@@ -329,12 +412,14 @@ export function createIntegrationService({
     return integrationView(row, role, (await repository.station(row.stationId))?.origin ?? null);
   }
 
-  // The row and the account's part in it: "owner", "station_owner" (it owns the integration's Station) or null.
+  // The row and the account's part in it: "owner"; "station_owner" (it owns the integration's custom Station);
+  // "station_admin" (an Agora.Build admin, on a built-in Station); or null.
   async function access(accountId, id) {
     const row = typeof id === "string" && id ? await repository.integration(id) : null;
     if (!row) throw notFound();
     if (row.ownerAccount === accountId) return { row, role: "owner" };
     const station = await repository.station(row.stationId);
+    if (station?.builtIn) return { row, role: admins.includes(accountId) ? "station_admin" : null };
     return { row, role: station?.ownerAccount === accountId ? "station_owner" : null };
   }
 
@@ -349,7 +434,7 @@ export function createIntegrationService({
   // For changes only the integration's owner may make; a Station owner sees the integration, so it is told why.
   async function owned(accountId, id) {
     const { row, role } = await visible(accountId, id);
-    if (role === "station_owner") throw failure(403, "Only the integration's owner can do this.", "forbidden");
+    if (role !== "owner") throw failure(403, "Only the integration's owner can do this.", "forbidden");
     return row;
   }
 
@@ -444,9 +529,22 @@ export function createIntegrationService({
     }
   }
 
+  async function create(accountId, station, fields, publicJwk, expiresInDays) {
+    const stationId = station.id;
+    const expiresAt = new Date(now() + expiresInDays * DAY).toISOString();
+    const created = await viaAuth(() => manage.createIntegration({ owner: accountId, stationId, ...fields, publicJwk, expiresAt, actor: accountId }));
+    await appending(async (client) => {
+      await repository.insertIntegration({ id: created.clientId, ownerAccount: accountId, stationId, kind: "custom_app", ...fields, expiresAt: created.expiresAt ?? expiresAt }, client);
+      await repository.appendEvent({ stationId, integrationId: created.clientId, accountId, actor: accountId, kind: "integration_created", state: "awaiting_approval", details: { scopes: fields.scopes, name: fields.name } }, client);
+    });
+    changed(stationId);
+    return integrationView(await repository.integration(created.clientId), "owner", station.origin);
+  }
+
   return {
     async createChallenge(accountId, originInput) {
       const origin = stationOrigin(originInput);
+      await notBuiltInOrigin(origin);
       // A soft limit: check, then insert, so concurrent requests may pass it by a few.
       const since = new Date(now() - 3600000);
       if (await repository.challengesSince(accountId, since) >= CHALLENGES_PER_HOUR) throw new AppError(429, "Too many Station checks. Try again later.");
@@ -466,6 +564,7 @@ export function createIntegrationService({
       const challenge = await repository.takeChallenge(challengeId, accountId, now());
       if (!challenge) throw expiredChallenge();
       const { origin, value } = challenge;
+      await notBuiltInOrigin(origin);
       const proof = await checkProof(origin, value, { fetch: stationFetch });
       if (!proof.ok) {
         log("Station proof of control failed: " + proof.reason + ".");
@@ -496,7 +595,7 @@ export function createIntegrationService({
     },
 
     async members(accountId, stationId) {
-      await usable(accountId, stationId);
+      notBuiltIn(await usable(accountId, stationId));
       const answer = await viaAuth(() => manage.members(stationId, accountId));
       return { owner: answer.owner, members: (answer.members || []).map(({ account, addedAt }) => ({ account, addedAt })) };
     },
@@ -518,7 +617,7 @@ export function createIntegrationService({
     // on the Station; Portal follows in one transaction, recording the removal only when it had the member.
     async unshare(accountId, stationId, member) {
       memberAccount(member);
-      const station = await usable(accountId, stationId);
+      const station = notBuiltIn(await usable(accountId, stationId));
       if (station.role !== "owner" && member !== accountId) throw ownerOnly();
       await viaAuth(() => manage.removeMember(stationId, member, accountId));
       const wrote = await appending(async (client) => {
@@ -556,24 +655,25 @@ export function createIntegrationService({
       }
     },
 
-    async createIntegration(accountId, { stationId, name, scopes = [], publicJwk, quotaPerSecond = 200, expiresInDays = 30 } = {}) {
+    // On a built-in Station: only while Agora.Build has integrations on there, and within the account's plan limit
+    // (Basic 4, Premium 10, Principal and Fellow none). Custom Stations are never capped.
+    async createIntegration(accountId, { stationId, name, scopes = [], publicJwk, quotaPerSecond = 200, expiresInDays = 30 } = {}, { plan = "basic" } = {}) {
       const fields = { name: integrationName(name), scopes: integrationScopes(scopes), quotaPerSecond: quota(quotaPerSecond) };
       expiryDays(expiresInDays);
       publicKey(publicJwk);
       const station = await usable(accountId, stationId);
-      const expiresAt = new Date(now() + expiresInDays * DAY).toISOString();
-      const created = await viaAuth(() => manage.createIntegration({ owner: accountId, stationId, ...fields, publicJwk, expiresAt, actor: accountId }));
-      await appending(async (client) => {
-        await repository.insertIntegration({ id: created.clientId, ownerAccount: accountId, stationId, kind: "custom_app", ...fields, expiresAt: created.expiresAt ?? expiresAt }, client);
-        await repository.appendEvent({ stationId, integrationId: created.clientId, accountId, actor: accountId, kind: "integration_created", state: "awaiting_approval", details: { scopes: fields.scopes, name: fields.name } }, client);
+      if (!station.builtIn) return create(accountId, station, fields, publicJwk, expiresInDays);
+      if (!station.integrationsEnabled) throw failure(409, NOT_SUPPORTED, "not_supported");
+      return oneAtATime(accountId + " " + station.id, async () => {
+        await underPlanLimit(accountId, station.id, plan);
+        return create(accountId, station, fields, publicJwk, expiresInDays);
       });
-      changed(stationId);
-      return integrationView(await repository.integration(created.clientId), "owner", station.origin);
     },
 
     // The account's own integrations (reconciled with Auth's list of them) and, read from Portal only, the others on
-    // Stations it owns, which it may pause or revoke.
-    async integrations(accountId) {
+    // Stations it owns, which it may pause or revoke, and for Agora.Build admins the others on built-in Stations. Those
+    // are shown only with `asAdmin` (the admin's browser session), never to an app's token acting for the admin.
+    async integrations(accountId, { asAdmin = false } = {}) {
       let listed;
       try {
         listed = await manage.integrations(accountId);
@@ -588,6 +688,14 @@ export function createIntegrationService({
         if (station.role !== "owner") continue;
         for (const row of await repository.integrationsOnStation(station.id)) {
           if (row.ownerAccount !== accountId) views.push(integrationView(row, "station_owner", station.origin));
+        }
+      }
+      // Agora.Build admins: every other account's integration on the built-in Stations, which they may pause or revoke.
+      if (asAdmin && admins.includes(accountId)) {
+        for (const station of await repository.builtInStations()) {
+          for (const row of await repository.integrationsOnStation(station.id)) {
+            if (row.ownerAccount !== accountId) views.push(integrationView(row, "station_admin", station.origin));
+          }
         }
       }
       return { integrations: views, stale: !listed };
@@ -619,16 +727,30 @@ export function createIntegrationService({
       return viewOf(updated, "owner");
     },
 
-    async renew(accountId, id, { expiresInDays } = {}) {
+    // Renewing an expired integration on a built-in Station brings one back, so it counts as adding one (plan limit,
+    // where the expired one is not counted yet); renewing a live one never changes the count. Every renewal there runs
+    // one at a time with the account's creations on that Station and decides "expired" only once it holds that turn,
+    // so a creation racing a renewal just before expiry waits and then counts the renewed one.
+    async renew(accountId, id, { expiresInDays } = {}, { plan = "basic" } = {}) {
       const row = await owned(accountId, id);
       expiryDays(expiresInDays);
       step(row, "renew", now());
-      const changedAt = await viaAuth(() => manage.changeIntegration(id, { expiresAt: new Date(now() + expiresInDays * DAY).toISOString() }, accountId));
-      const updated = await commit(id, (current) => {
+      const renewing = async () => {
+        const changedAt = await viaAuth(() => manage.changeIntegration(id, { expiresAt: new Date(now() + expiresInDays * DAY).toISOString() }, accountId));
+        const updated = await commit(id, (current) => {
+          step(current, "renew", now());
+          return { fields: { expiresAt: changedAt.expiresAt }, event: { actor: accountId, kind: "integration_renewed", details: { expiresAt: changedAt.expiresAt } } };
+        });
+        return viewOf(updated, "owner");
+      };
+      if (!(await repository.station(row.stationId))?.builtIn) return renewing();
+      return oneAtATime(accountId + " " + row.stationId, async () => {
+        const current = await repository.integration(id);
+        if (!current) throw notFound();
         step(current, "renew", now());
-        return { fields: { expiresAt: changedAt.expiresAt }, event: { actor: accountId, kind: "integration_renewed", details: { expiresAt: changedAt.expiresAt } } };
+        if (effectiveState(current, now()) === "expired") await underPlanLimit(accountId, row.stationId, plan);
+        return renewing();
       });
-      return viewOf(updated, "owner");
     },
 
     // Allowed on an expired integration, as Auth allows it: the owner may tune it before renewing.
@@ -703,6 +825,29 @@ export function createIntegrationService({
       const answer = { changes, cursor: events.length ? events.at(-1).id : cursor };
       if (cursor === 0) answer.integrations = rows.map((row) => ({ id: row.id, ...feedIntegration(row, at) }));
       return answer;
+    },
+
+    // The built-in Stations as Auth lists them to the first Agora.Build admin (any account sees them), so their report
+    // clients are known before anyone signs in. Only the built-in part of reconcile runs: nothing is removed or revoked
+    // on absence. Never throws; returns whether it synced. Run by the stack at ready() and hourly.
+    async syncBuiltIn() {
+      const account = admins[0];
+      if (!account) {
+        log("Built-in Station sync skipped: no PLATFORM_ADMINS.");
+        return false;
+      }
+      try {
+        const listed = (await manage.stations(account)).filter((entry) => entry.builtIn);
+        const known = new Set(listed.map((entry) => entry.id));
+        for (const station of await repository.builtInStations()) {
+          if (!known.has(station.id)) log("Built-in Station absent from Auth's listing: left as it is.");
+        }
+        for (const entry of listed) await reconcileBuiltIn(entry);
+        return true;
+      } catch (error) {
+        log("Built-in Station sync failed: " + (error instanceof ManageError ? error.code : error.code || "error") + ".");
+        return false;
+      }
     },
 
     notify: (stationId) => changed(stationId),

@@ -5,11 +5,11 @@
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:https";
-import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { generateKeyPairSync } from "node:crypto";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { decodeJwt, exportJWK, generateKeyPair, SignJWT } from "jose";
-import { API, authRepo, bearer, createBrowser, eventually, integrationsSkipReason, interactionUid, loadAuth, person, portalSignIn, skipReason, startStack, STATION_HOST, stationTls } from "./harness.mjs";
+import { decodeJwt, exportJWK, generateKeyPair } from "jose";
+import { API, authRepo, bearer, clientCredentials as harnessClientCredentials, createBrowser, eventually, integrationsSkipReason, interactionUid, loadAuth, person, portalSignIn, skipReason, startStack, STATION_HOST, stationTls } from "./harness.mjs";
 
 const skip = (await skipReason()) ?? (await integrationsSkipReason());
 if (skip) console.log("# Skipping the Stations and integrations end-to-end suite: " + skip + ".");
@@ -42,18 +42,11 @@ const manage = (path) => fetch(stack.issuer + "/manage/v1" + path, {
   headers: { Authorization: "Basic " + Buffer.from("portal:" + encodeURIComponent(stack.secrets.PORTAL_CLIENT_SECRET)).toString("base64"), Accept: "application/json" }
 }).then(json);
 
-// A client-credentials token with private_key_jwt (docs/integrating.md: the client assertion), as a Station report
-// client or an integration asks for one.
-async function clientCredentials({ clientId, privateKey, resource, scope }) {
-  const now = Math.floor(Date.now() / 1000);
-  const assertion = await new SignJWT({}).setProtectedHeader({ alg: "ES256" }).setIssuer(clientId).setSubject(clientId)
-    .setAudience(stack.issuer + "/token").setJti(randomUUID()).setIssuedAt(now).setExpirationTime(now + 60).sign(privateKey);
-  const response = await fetch(stack.issuer + "/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-    body: new URLSearchParams({ grant_type: "client_credentials", resource, scope, client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer", client_assertion: assertion }).toString()
-  });
-  return { status: response.status, body: remember(await response.json()) };
+// A client-credentials token with private_key_jwt, as a Station report client or an integration asks for one.
+async function clientCredentials(options) {
+  const answer = await harnessClientCredentials(stack, options);
+  remember(answer.body);
+  return answer;
 }
 
 // The native "astation" app's device flow for any scope and resource, with real HTTP: the device authorization request,

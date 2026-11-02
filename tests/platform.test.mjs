@@ -8,7 +8,7 @@ import { createStore } from "../scripts/store.mjs";
 import { createLedger } from "../scripts/ledger.mjs";
 import { createCredits, creditsConfig } from "../scripts/credits.mjs";
 import { createConnections, connectionsConfig } from "../scripts/connections.mjs";
-import { effectivePlan, entitlements } from "../scripts/plans.mjs";
+import { builtInIntegrationLimit, effectivePlan, entitlements } from "../scripts/plans.mjs";
 
 let temp;
 before(async () => { temp = await mkdtemp(resolve(tmpdir(), "agora-platform-")); });
@@ -119,4 +119,9 @@ test("without the AGORA_SSO_* client settings an expired Console connection asks
   const resources = createConnections(store, connectionsConfig({ AGORA_CONSOLE_ENCRYPTION_KEY: randomBytes(32).toString("base64") }), { request: async () => { throw new Error("no request expected"); } });
   await resources.save(login.account.id, { accessToken: "upstream-token", refreshToken: "upstream-refresh", expiresAt: Date.now() - 1 });
   await assert.rejects(resources.projects(login.account.id), { status: 401 });
+});
+
+test("integrations on the built-in Station are limited by plan: Basic 4, Premium 10, Principal and Fellow none", () => {
+  assert.deepEqual(["basic", "premium", "principal", "fellow"].map(builtInIntegrationLimit), [4, 10, null, null]);
+  assert.equal(builtInIntegrationLimit(undefined), 4, "an unknown plan counts as Basic");
 });

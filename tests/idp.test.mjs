@@ -537,3 +537,21 @@ test("exchangeForStation refuses a success that is not an access token", async (
     await assert.rejects(idp.exchangeForStation("t", "https://station.example"), (error) => error instanceof TokenError && error.status === 401 && error.reason === "response");
   }
 });
+
+test("bearer: a Station report client's own token (sub = its s- client ID) is accepted only with station.report", async () => {
+  const { fake, idp } = await setup();
+  const client = "s-" + "0".repeat(24) + "bs";
+  assert.deepEqual(await idp.verifyAccessToken(await fake.issueAccessToken({ sub: client, client_id: client, scope: "station.report" })), { sub: client, clientId: client, scopes: ["station.report"], station: true });
+  for (const claims of [
+    { sub: client, client_id: "s-" + "1".repeat(26), scope: "station.report" },
+    { sub: client, client_id: client, scope: "credits" },
+    { sub: client, client_id: client, scope: undefined },
+    { sub: "s-" + "0".repeat(24) + "BS", client_id: "s-" + "0".repeat(24) + "BS", scope: "station.report" },
+    { sub: "s-" + "0".repeat(24) + "bu", client_id: "s-" + "0".repeat(24) + "bu", scope: "station.report" },
+    { sub: "s-" + "0".repeat(25), client_id: "s-" + "0".repeat(25), scope: "station.report" },
+    { sub: "i-" + "0".repeat(26), client_id: "i-" + "0".repeat(26), scope: "station.report" },
+    { sub: "portal", client_id: "portal", scope: "station.report" }
+  ]) await rejectsToken(idp.verifyAccessToken(await fake.issueAccessToken(claims)), 401);
+  const owner = fake.accountId();
+  assert.deepEqual(await idp.verifyAccessToken(await fake.issueAccessToken({ sub: owner, client_id: client, scope: "station.report" })), { sub: owner, clientId: client, scopes: ["station.report"] }, "a custom Station's report token (sub = its owner) is unchanged");
+});

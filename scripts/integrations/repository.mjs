@@ -33,7 +33,11 @@ function stationRow(row) {
     status: row.status,
     createdAt: iso(row.created_at),
     verifiedAt: iso(row.verified_at),
-    removedAt: iso(row.removed_at)
+    removedAt: iso(row.removed_at),
+    builtIn: row.built_in === true,
+    access: row.access ?? "members",
+    integrationsEnabled: row.integrations_enabled !== false,
+    name: row.name ?? null
   };
 }
 
@@ -88,8 +92,10 @@ export function createRepository(db) {
       return rows[0].n;
     },
 
-    async insertStation({ id, origin, ownerAccount, reportClientId, verifiedAt }, client) {
-      const { rowCount } = await run(client, "INSERT INTO stations (id, origin, owner_account, report_client_id, status, verified_at) VALUES ($1, $2, $3, $4, 'active', $5) ON CONFLICT (id) DO NOTHING", [id, origin, ownerAccount, reportClientId, when(verifiedAt)]);
+    async insertStation({ id, origin, ownerAccount = null, reportClientId, verifiedAt, builtIn = false, integrationsEnabled = true, name = null }, client) {
+      const { rowCount } = await run(client,
+        "INSERT INTO stations (id, origin, owner_account, report_client_id, status, verified_at, built_in, access, integrations_enabled, name) VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING",
+        [id, origin, ownerAccount, reportClientId, when(verifiedAt), builtIn, builtIn ? "any_account" : "members", integrationsEnabled, name]);
       return rowCount > 0;
     },
 
@@ -110,11 +116,35 @@ export function createRepository(db) {
       return rows[0] ? stationRow(rows[0]) : null;
     },
 
+    // The active Stations this account may use: every built-in Station (role built_in), its own (owner) and those
+    // shared with it (member). Built-in Stations come first, as in Auth's listing.
     async stationsFor(accountId, client) {
       const { rows } = await run(client,
-        "SELECT s.*, CASE WHEN s.owner_account = $1 THEN 'owner' ELSE 'member' END AS role FROM stations s WHERE s.status = 'active' AND (s.owner_account = $1 OR EXISTS (SELECT 1 FROM station_members m WHERE m.station_id = s.id AND m.account_id = $1 AND m.removed_at IS NULL)) ORDER BY s.created_at, s.id",
+        "SELECT s.*, CASE WHEN s.built_in THEN 'built_in' WHEN s.owner_account = $1 THEN 'owner' ELSE 'member' END AS role FROM stations s WHERE s.status = 'active' AND (s.built_in OR s.owner_account = $1 OR EXISTS (SELECT 1 FROM station_members m WHERE m.station_id = s.id AND m.account_id = $1 AND m.removed_at IS NULL)) ORDER BY s.built_in DESC, s.created_at, s.id",
         [accountId]);
       return rows.map((row) => ({ ...stationRow(row), role: row.role }));
+    },
+
+    async builtInStations(client) {
+      const { rows } = await run(client, "SELECT * FROM stations WHERE built_in AND status = 'active' ORDER BY created_at, id");
+      return rows.map(stationRow);
+    },
+
+    // Follows Auth's listing of a built-in Station: its name and whether integrations may be created on it. Returns
+    // whether anything changed; custom Stations are never touched.
+    async updateBuiltInStation(id, { name, integrationsEnabled }, client) {
+      const { rowCount } = await run(client,
+        "UPDATE stations SET name = $2, integrations_enabled = $3 WHERE id = $1 AND built_in AND status = 'active' AND (name IS DISTINCT FROM $2 OR integrations_enabled IS DISTINCT FROM $3)",
+        [id, name, integrationsEnabled]);
+      return rowCount > 0;
+    },
+
+    // The account's integrations on a Station that count against a plan limit: every state but revoked, not expired.
+    async countLiveIntegrations(stationId, ownerAccount, now, client) {
+      const { rows } = await run(client,
+        "SELECT count(*)::int AS n FROM integrations WHERE station_id = $1 AND owner_account = $2 AND state <> 'revoked' AND expires_at > $3",
+        [stationId, ownerAccount, when(now)]);
+      return rows[0].n;
     },
 
     async markStationRemoved(id, now, client) {

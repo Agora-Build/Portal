@@ -4,8 +4,9 @@
 //
 // It runs against the end-to-end stack with Stations and integrations (tests/e2e/harness.mjs): the real
 // auth.agora.build from an Agora-Build/Auth checkout, the real Portal with its own PostgreSQL schema, and Station stubs
-// on https://station.test:<port>, as tests/e2e/integrations.e2e.mjs does. Needs Node 22, the Auth checkout (AUTH_REPO,
-// default ../Auth), TEST_DATABASE_URL and PORTAL_TEST_DATABASE_URL, as `npm run test:e2e` does.
+// on https://station.test:<port>, as tests/e2e/integrations.e2e.mjs does, plus Auth's built-in Station (the harness's
+// builtIn option, its integrations off at first), as tests/e2e/built-in-station.e2e.mjs does. Needs Node 22, the Auth
+// checkout (AUTH_REPO, default ../Auth), TEST_DATABASE_URL and PORTAL_TEST_DATABASE_URL, as `npm run test:e2e` does.
 //
 //   PLAYWRIGHT_CORE=/path/to/node_modules/playwright-core CHROMIUM_PATH=/path/to/chrome \
 //     TEST_DATABASE_URL=postgres://… PORTAL_TEST_DATABASE_URL=postgres://…/agora_portal_test \
@@ -16,15 +17,16 @@
 // Then, in the browser, it checks: both sections and their lists; adding a Station (a failed proof, then a good one);
 // creating an integration with a key pair generated in the browser (the private JWK is downloaded and never sent);
 // Pause, Resume, Renew, Quota, Rotate key, History and Revoke; keyboard navigation (reachability, focus indicators,
-// accessible names, Enter and Space, the dialogs' focus); and reduced motion. With SCREENSHOT_DIR set, it saves
+// accessible names, Enter and Space, the dialogs' focus); reduced motion; and the built-in Station: its row (Built in,
+// its origin, Details only, nothing else reachable by Tab), the selector leaving it out while its integrations are off
+// and offering it once they are on, and the Basic plan's limit of 4 there. With SCREENSHOT_DIR set, it saves
 // <viewport>-<what>.png there.
 import { createRequire } from "node:module";
 import { createServer } from "node:https";
-import { randomUUID } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { API, interactionUid, integrationsSkipReason, loadAuth, person, portalSignIn, skipReason, startStack, STATION_HOST, stationTls } from "../tests/e2e/harness.mjs";
+import { exportJWK, generateKeyPair } from "jose";
+import { API, clientCredentials as harnessClientCredentials, interactionUid, integrationsSkipReason, loadAuth, person, portalSignIn, skipReason, startStack, STATION_HOST, stationTls } from "../tests/e2e/harness.mjs";
 
 const { PLAYWRIGHT_CORE: playwrightPath, CHROMIUM_PATH: chromiumPath, SCREENSHOT_DIR: screenshotDir } = process.env;
 if (!playwrightPath || !chromiumPath) {
@@ -56,23 +58,16 @@ const VIEWPORTS = [{ name: "desktop", width: 1280, height: 800 }, { name: "mobil
 const SCOPES = ["agent.view", "agent.prompt"];
 
 const lib = await loadAuth();
-const stack = await startStack(lib, { integrations: true });
-const stubs = [];
+const stack = await startStack(lib, { integrations: true, builtIn: { admin: person(7999, "Ines") } });
+// The built-in Station's stub is the harness's (closed by stack.close()); listed here so "Details" is answered for it.
+const stubs = [{ origin: stack.builtIn.origin, close: async () => {} }];
 let browser = null;
 note("Portal " + stack.site + ", IdP " + stack.issuer);
 
 const json = async (response) => ({ status: response.status, body: await response.json() });
 // A client-credentials token with private_key_jwt, as a Station report client asks for one.
 async function clientCredentials({ clientId, privateKey, resource, scope }) {
-  const now = Math.floor(Date.now() / 1000);
-  const assertion = await new SignJWT({}).setProtectedHeader({ alg: "ES256" }).setIssuer(clientId).setSubject(clientId)
-    .setAudience(stack.issuer + "/token").setJti(randomUUID()).setIssuedAt(now).setExpirationTime(now + 60).sign(privateKey);
-  const response = await fetch(stack.issuer + "/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-    body: new URLSearchParams({ grant_type: "client_credentials", resource, scope, client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer", client_assertion: assertion }).toString()
-  });
-  return (await response.json()).access_token;
+  return (await harnessClientCredentials(stack, { clientId, privateKey, resource, scope })).body.access_token;
 }
 // A Station stub (as in tests/e2e/integrations.e2e.mjs): serves the proof value it is given and accepts change nudges.
 async function startStation() {
@@ -139,7 +134,7 @@ async function setUp(user, memberUser) {
   await create("Ops agent");
   const paused = await create("Night shift");
   await owner.api("/api/integrations/" + paused.id + "/pause", { method: "POST", json: {} });
-  return { ownerId, memberId, station };
+  return { owner, ownerId, memberId, station };
 }
 
 // A browser context that reaches only the Portal and the IdP (and, for "Details", the Station stubs, answered here);
@@ -228,6 +223,23 @@ async function flow(viewport, index) {
       await shot(page.locator("#integrations"), viewport.name + "-integrations");
     });
 
+    await step(tag + "built-in Station", async () => {
+      const first = page.locator("#station-list .station-item").first();
+      check(await first.evaluate((node) => node.classList.contains("station-item--built-in")), tag + "the built-in Station comes first");
+      const row = item(page, ".station-item", "Agora Station");
+      check((await row.locator(".state-badge").textContent()) === "Built in", tag + "it is marked Built in");
+      check((await row.locator(".station-origin").textContent()) === stack.builtIn.origin, tag + "it shows its origin");
+      check(/Integrations not available yet/.test(await row.locator(".muted").textContent()), tag + "it says its integrations are not available yet");
+      const buttons = await row.getByRole("button").allTextContents();
+      check(buttons.length === 1 && buttons[0] === "Details", tag + "it offers Details only (" + buttons.join(", ") + ")");
+      check(await row.locator(".station-members").count() === 0, tag + "it has no Members and sharing panel");
+      await row.getByRole("button", { name: "Details", exact: true }).click();
+      await until(async () => !/^(|Asking the Station\.\.\.)$/.test(await row.locator(".station-details").textContent()), "the built-in Station's details");
+      check((await row.locator(".station-details").textContent()) === "Smoke Station · online", tag + "Details reads the built-in Station");
+      await overflowCheck(page, tag, "with the built-in Station shown");
+      await shot(row, viewport.name + "-built-in-station");
+    });
+
     await step(tag + "add Station", async () => {
       const stub = await startStation();
       await page.locator("#station-add").click();
@@ -258,7 +270,7 @@ async function flow(viewport, index) {
       await page.locator("#station-submit").click();
       await form.waitFor({ state: "hidden", timeout: 8000 });
       await item(page, ".station-item", stub.origin).waitFor({ timeout: 8000 });
-      check(await page.locator("#station-list .station-item").count() === 2, tag + "Verify and register adds the second Station to the list");
+      check(await page.locator("#station-list .station-item").count() === 3, tag + "Verify and register adds the second custom Station to the list (after the built-in one)");
       check((await page.locator("#station-add").getAttribute("aria-expanded")) === "false", tag + "the form closes after registering");
       check(await page.evaluate(() => document.activeElement?.id) === "station-add", tag + "focus returns to Add Station after registering");
     });
@@ -267,6 +279,8 @@ async function flow(viewport, index) {
       await page.locator("#integration-add").click();
       const form = page.locator("#integration-form");
       await form.waitFor({ state: "visible" });
+      const offered = await form.locator("[name=stationId] option").allTextContents();
+      check(!offered.some((label) => /built in/.test(label)), tag + "the Station selector leaves out the built-in Station while its integrations are off");
       await form.locator("[name=name]").fill("Smoke app");
       await form.locator("[name=stationId]").selectOption({ label: setup.station.origin });
       await form.getByLabel("agent.prompt").check();
@@ -361,6 +375,7 @@ async function flow(viewport, index) {
       await page.locator("#stations-title").click();
       const order = [];
       const missing = [];
+      const builtInStops = [];
       let previous = null;
       const inSections = () => page.evaluate(() => Boolean(document.activeElement?.closest("#stations, #integrations")));
       for (let presses = 0; presses < 220; presses += 1) {
@@ -377,6 +392,7 @@ async function flow(viewport, index) {
         const aria = await focusedAria(page);
         const named = /"[^"]+"/.test(aria) || /: .+/.test(aria);
         const label = aria || await handle.evaluate((node) => node.tagName.toLowerCase());
+        if (await handle.evaluate((node) => Boolean(node.closest(".station-item--built-in")))) builtInStops.push(label);
         if (!named) missing.push(label + " (no accessible name)");
         order.push(label);
         previous = { handle, focused: await ring(handle), label };
@@ -402,6 +418,7 @@ async function flow(viewport, index) {
       const expected = ["Add Station", "Details", "Remove Station", "Members and sharing", "Create integration", "Pause", "Resume", "Revoke", "History", "Renew", "Quota", "Rotate key", "Generate a key pair in this browser", "Share"];
       const absent = expected.filter((name) => !order.some((stop) => stop.includes("\"" + name + "\"") || stop.includes(name)));
       check(!absent.length, tag + "every kind of control is reachable by Tab" + (absent.length ? " (not reached: " + absent.join(", ") + ")" : ""));
+      check(builtInStops.length === 1 && /"Details"/.test(builtInStops[0]), tag + "Tab reaches only Details on the built-in Station (" + builtInStops.join(", ") + ")");
       await shot(page, viewport.name + "-keyboard-open");
       await overflowCheck(page, tag, "with every panel open");
 
@@ -476,6 +493,56 @@ async function flow(viewport, index) {
       });
       check(!moving.length, tag + "with reduced motion nothing in the sections or dialogs animates" + (moving.length ? " (" + [...new Set(moving)].join(", ") + ")" : ""));
       await page.emulateMedia({ reducedMotion: "no-preference" });
+    });
+
+    await step(tag + "built-in Station with integrations on", async () => {
+      // Agora.Build turns integrations on there (an Auth restart with the changed clients file); the account's next
+      // listing follows it. Turned off again afterwards, so the next viewport starts as this one did.
+      await stack.reconfigureAuth({ integrations: true });
+      try {
+        await page.goto(stack.site + "/account/");
+        await page.locator("#integration-list .integration-item").first().waitFor({ timeout: 8000 });
+        const row = item(page, ".station-item", "Agora Station");
+        check(/Integrations available/.test(await row.locator(".muted").textContent()), tag + "the built-in Station says integrations are available");
+        await shot(row, viewport.name + "-built-in-station-on");
+        // Three over the API and a fourth in the browser reach the Basic limit of 4.
+        for (const name of ["Built-in one", "Built-in two", "Built-in three"]) {
+          const keys = await generateKeyPair("ES256");
+          const created = await json(await setup.owner.api("/api/integrations", { method: "POST", json: { stationId: stack.builtIn.id, name, scopes: SCOPES, publicJwk: await exportJWK(keys.publicKey) } }));
+          if (created.status !== 201) throw new Error("creating " + name + " on the built-in Station answered " + created.status);
+        }
+        const form = page.locator("#integration-form");
+        const fillAndSubmit = async (name) => {
+          await page.locator("#integration-add").click();
+          await form.waitFor({ state: "visible" });
+          await form.locator("[name=name]").fill(name);
+          await form.locator("[name=stationId]").selectOption({ label: "Agora Station (built in)" });
+          await form.getByRole("button", { name: "Generate a key pair in this browser" }).click();
+          const link = form.locator(".key-download a");
+          await link.waitFor({ timeout: 5000 });
+          await Promise.all([page.waitForEvent("download"), link.click()]);
+          await page.locator("#integration-submit").click();
+        };
+        await page.locator("#integration-add").click();
+        await form.waitFor({ state: "visible" });
+        const offered = await form.locator("[name=stationId] option").allTextContents();
+        check(offered[0] === "Agora Station (built in)", tag + "the Station selector offers the built-in Station first once its integrations are on (" + offered.join(", ") + ")");
+        await form.getByRole("button", { name: "Cancel" }).click();
+        await fillAndSubmit("Built-in app");
+        await integration(page, "Built-in app").waitFor({ timeout: 8000 }).catch(async (error) => { throw new Error(error.message.split("\n")[0] + " (the form says \"" + await page.locator("#integration-status").textContent() + "\")"); });
+        check(new RegExp("Station\\s+" + stack.builtIn.origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(await integration(page, "Built-in app").locator(".integration-facts").innerText()), tag + "an integration created in the browser lands on the built-in Station");
+        expectedErrors.push(/^Failed to load resource: the server responded with a status of 403/);
+        await fillAndSubmit("One too many");
+        await page.locator("#integration-status").filter({ hasText: /./ }).waitFor({ timeout: 8000 });
+        const said = await page.locator("#integration-status").textContent();
+        check(said === "Your plan allows 4 integrations on the built-in Station. Revoke one, upgrade, or use your own Station.", tag + "the fifth on Basic shows the plan limit (" + said + ")");
+        check(await form.isVisible() && await integration(page, "One too many").count() === 0, tag + "the form stays open and nothing is added");
+        await overflowCheck(page, tag, "with the plan-limit message shown");
+        await shot(form, viewport.name + "-built-in-plan-limit");
+        await form.getByRole("button", { name: "Cancel" }).click();
+      } finally {
+        await stack.reconfigureAuth({ integrations: false });
+      }
     });
 
     check(!errors.length, tag + "no console errors" + (errors.length ? " (" + errors.join("; ") + ")" : ""));

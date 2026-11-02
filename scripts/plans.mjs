@@ -15,3 +15,10 @@ export function entitlements(plan) {
   const premium = plan !== "basic";
   return { projects: premium ? 20 : 5, evalFlowsPerProject: premium ? 20 : 10, apiEvalFlows: premium ? 200 : 50, privateResources: premium, ownStorage: premium, publishMainline: ["principal", "fellow"].includes(plan), spaces: premium ? 20 : 3 };
 }
+
+// Integrations an account may have on a built-in Station at once (D24): counted in every state but revoked, and not
+// expired. null is no cap. Custom Stations are never capped. An unknown plan counts as Basic.
+const BUILT_IN_INTEGRATIONS = { basic: 4, premium: 10, principal: null, fellow: null };
+export function builtInIntegrationLimit(plan) {
+  return Object.hasOwn(BUILT_IN_INTEGRATIONS, plan) ? BUILT_IN_INTEGRATIONS[plan] : BUILT_IN_INTEGRATIONS.basic;
+}

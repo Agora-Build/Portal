@@ -107,6 +107,8 @@ a.is-disabled { opacity: .65; cursor: default; }
 .state-badge--awaiting-approval, .state-badge--provisioning, .state-badge--waiting-for-host { color: var(--accent-dark); border-color: #e2b4a3; background: #fbf0ea; }
 .state-badge--paused, .state-badge--expired { color: var(--ink); }
 .state-badge--revoking, .state-badge--revoked { color: var(--muted); border-style: dashed; }
+.state-badge--built-in { color: var(--ink); border-color: var(--ink); }
+.station-origin { margin: 2px 0 0; font-size: 13px; overflow-wrap: anywhere; }
 .key-field { display: flex; flex-direction: column; gap: 10px; }
 .key-field > label { margin: 0; }
 .key-download { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
