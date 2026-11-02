@@ -3,6 +3,7 @@
 import { ACCOUNT_ID, AppError } from "../store.mjs";
 import { TokenError } from "../idp.mjs";
 import { createManageClient } from "./auth-manage.mjs";
+import { AUTH_CHANGES, createAuthChanges } from "./auth-changes.mjs";
 import { createDatabase } from "./db.mjs";
 import { createStationFetch } from "./proof.mjs";
 import { createRepository } from "./repository.mjs";
@@ -18,34 +19,44 @@ const BUILT_IN_SYNC_AFTER = { ok: 3600000, failed: 60000 };
 // Registering a Station and creating an integration keep their own, stricter limits.
 const LISTS_PER_MINUTE = 60;
 const CHANGES_PER_MINUTE = 30;
+// Auth's nudge after an integration change the Portal did not make (spec §3.3.4): the path is the Portal client's
+// changesNudgeUri in Auth's clients file, and one address may send this many a minute.
+export const CHANGES_NUDGE_PATH = "/auth/integration-changes";
+export const NUDGES_PER_MINUTE = 60;
 
 export const integrationPath = (path) => /^\/api\/(stations|integrations)(\/|$)/.test(path);
 
-// The stack for a ready service (tests): nothing to prepare or close.
-export const readyIntegrations = (service) => ({ service, ready: async () => service, close: async () => {} });
+// The stack for a ready service (tests): nothing to prepare or close; `nudge` stands in for the reader's request.
+export const readyIntegrations = (service, nudge = () => {}) => ({ service, ready: async () => service, nudge, close: async () => {} });
 
 // The service over `db`. ready() migrates and creates the event partitions before the first request, once; a failure
 // answers 503 and the next request tries again. The partitions are then kept up hourly. `stationFetch` (proof of
-// control), `pushFetch` (change nudges) and `builtInSyncAfter` are only given by tests; production uses the defaults.
-export function createIntegrationStack({ db, manage, idp, log, stationFetch = createStationFetch(), pushFetch, admins = [], builtInSyncAfter = BUILT_IN_SYNC_AFTER }) {
+// control), `pushFetch` (change nudges), `builtInSyncAfter` and `authChanges` (the timing of the reader of Auth's
+// change feed) are only given by tests; production uses the defaults.
+export function createIntegrationStack({ db, manage, idp, log, stationFetch = createStationFetch(), pushFetch, builtInSyncAfter = BUILT_IN_SYNC_AFTER, authChanges = AUTH_CHANGES }) {
   const exchange = (idToken, origin) => idp ? idp.exchangeForStation(idToken, origin) : Promise.reject(new TokenError(503, "unavailable"));
-  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, pushFetch, exchange, log, admins });
+  const repository = createRepository(db);
+  // Auth's change feed (spec §3.3.4, D26): read once the stack is ready, then after every nudge from Auth, every 30
+  // seconds, and when Auth answers 409 admin_paused to a resume (it changed something the Portal has not read yet).
+  let feed = null;
+  const service = createIntegrationService({ repository, db, manage, stationFetch, pushFetch, exchange, log, authChanged: () => feed?.request() });
+  feed = createAuthChanges({ repository, manage, apply: (change) => service.applyAuthChange(change), log, settings: authChanges });
   let pending = null;
   let prepared = false;
   const partitions = setInterval(() => {
     if (prepared) db.ensureEventPartitions().catch((error) => log("Integration event partitions failed: " + (error.code || "error") + "."));
   }, PARTITION_INTERVAL);
   partitions.unref();
-  // The built-in Stations, synced from Auth once the stack is ready and then hourly (P17); a failed sync is logged by
-  // syncBuiltIn and tried again a minute later. Without PLATFORM_ADMINS it is skipped (logged) and stays hourly.
-  // ready() waits for the first sync, which is bounded by the management call's 10 s timeout plus the database
-  // statements of reconciling (each within statement_timeout).
+  // The built-in Stations, synced from Auth's account-less listing once the stack is ready and then hourly (P17, D26);
+  // a failed sync is logged by syncBuiltIn and tried again a minute later. ready() waits for the first sync, which is
+  // bounded by the management call's 10 s timeout plus the database statements of reconciling (each within
+  // statement_timeout).
   let builtInSync = null;
   let closed = false;
   const syncBuiltIn = async () => {
     const synced = await service.syncBuiltIn();
     if (closed) return;
-    builtInSync = setTimeout(syncBuiltIn, synced || !admins.length ? builtInSyncAfter.ok : builtInSyncAfter.failed);
+    builtInSync = setTimeout(syncBuiltIn, synced ? builtInSyncAfter.ok : builtInSyncAfter.failed);
     builtInSync.unref();
   };
   function ready() {
@@ -54,6 +65,7 @@ export function createIntegrationStack({ db, manage, idp, log, stationFetch = cr
       await db.ensureEventPartitions();
       prepared = true;
       await syncBuiltIn();
+      if (!closed) feed.start();
       return service;
     })().catch((error) => {
       pending = null;
@@ -62,12 +74,28 @@ export function createIntegrationStack({ db, manage, idp, log, stationFetch = cr
     });
     return pending;
   }
-  return { service, ready, close: async () => { closed = true; clearInterval(partitions); clearTimeout(builtInSync); await db.close(); } };
+  // Auth's nudge (POST /auth/integration-changes, scripts/serve.mjs): read the feed soon, once the stack is ready.
+  // Before that it does nothing (Ruling R-F): a nudge never prepares the stack, so nudges while the database is down
+  // neither retry ready() nor log, and the reader reads at once when it starts. After close() it does nothing either.
+  // Never throws and never waits.
+  function nudge() {
+    feed.request();
+  }
+  return {
+    service, ready, nudge,
+    close: async () => {
+      closed = true;
+      clearInterval(partitions);
+      clearTimeout(builtInSync);
+      await feed.stop();
+      await db.close();
+    }
+  };
 }
 
 // The stack from the environment: only with DATABASE_URL, and null (logged once, by setting name) when Auth's settings
-// are missing or invalid. Tests may pass `stationFetch` and `pushFetch` (see createIntegrationStack).
-export function integrationsFromEnv(env, { idp, log, stationFetch, pushFetch, admins }) {
+// are missing or invalid. Tests may pass `stationFetch`, `pushFetch` and `authChanges` (see createIntegrationStack).
+export function integrationsFromEnv(env, { idp, log, stationFetch, pushFetch, authChanges }) {
   if (!env.DATABASE_URL) return null;
   let manage;
   try {
@@ -78,7 +106,7 @@ export function integrationsFromEnv(env, { idp, log, stationFetch, pushFetch, ad
     log("Stations and integrations are unavailable: " + (error instanceof TypeError ? error.message : "their settings are invalid") + ".");
     return null;
   }
-  return createIntegrationStack({ db: createDatabase(env.DATABASE_URL, { log }), manage, idp, log, stationFetch, pushFetch, admins });
+  return createIntegrationStack({ db: createDatabase(env.DATABASE_URL, { log }), manage, idp, log, stationFetch, pushFetch, authChanges });
 }
 
 // Maps HTTP requests to the integration service. Returns null when the request is not an integration route. `caller`
@@ -106,9 +134,8 @@ export async function handleIntegrations({ path, method, url, read, service, cal
     const clientId = reporter(); limit("changes:" + clientId, 120, 60000);
     return ok(await service.changes(clientId, url.searchParams.get("cursor") ?? "0"));
   }
-  // Agora.Build admins see other accounts' built-in integrations only in their browser session, never through a token.
   if (path === "/api/integrations" && method === "GET") {
-    return ok(await service.integrations(listing("integrations", caller ? scoped("integrations:read") : await portalUser()), { asAdmin: !caller }));
+    return ok(await service.integrations(listing("integrations", caller ? scoped("integrations:read") : await portalUser())));
   }
   const integration = INTEGRATION.exec(path);
   if (integration?.[2] === "approval" && method === "POST") {

@@ -3,6 +3,7 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
+import { connect } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -14,7 +15,7 @@ import { createSignaling, signalingConfig } from "../scripts/spaces/signaling.mj
 import { createIdp } from "../scripts/idp.mjs";
 import { createRepository } from "../scripts/integrations/repository.mjs";
 import { createIntegrationService } from "../scripts/integrations/service.mjs";
-import { createIntegrationStack, integrationsFromEnv } from "../scripts/integrations/routes.mjs";
+import { createIntegrationStack, integrationsFromEnv, readyIntegrations } from "../scripts/integrations/routes.mjs";
 import { ManageError } from "../scripts/integrations/auth-manage.mjs";
 import { accountId, createFakeIdp } from "./helpers/fake-idp.mjs";
 import { BUILT_IN_REPORT_CLIENT, fakeManage } from "./helpers/fake-manage.mjs";
@@ -29,6 +30,13 @@ const R9 = "a".repeat(64);
 const UNAVAILABLE = "Stations and integrations need the Portal database.";
 const profile = (name = "Route tester") => ({ name, bio: "Building voice agents with Rust.", intent: "Build a language practice voice agent with natural interruptions.", lookingFor: "Audio engineers", skills: ["Rust", "Voice AI"], location: "Remote", contact: "https://example.com/builder", monitor: false });
 const publicJwk = () => generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey.export({ format: "jwk" });
+const waitFor = async (check, label, timeout = 3000) => {
+  const end = Date.now() + timeout;
+  while (!(await check())) {
+    if (Date.now() > end) throw new Error("timed out waiting for " + label);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+};
 let temporary;
 before(async () => { temporary = await mkdtemp(resolve(tmpdir(), "integrations-routes-")); });
 after(() => rm(temporary, { recursive: true, force: true }));
@@ -40,6 +48,8 @@ function withoutDatabaseUrl(t) {
   t.after(() => { if (saved !== undefined) process.env.DATABASE_URL = saved; });
 }
 
+// The server's own log lines about the stack, not the unrelated ones it writes at startup.
+const stackLines = (app) => app.logs.filter((line) => !line.startsWith("Agora Console"));
 const close = (instance) => new Promise((done) => { instance.close(done); instance.closeIdleConnections(); });
 async function start(t, options = {}) {
   withoutDatabaseUrl(t);
@@ -50,15 +60,20 @@ async function start(t, options = {}) {
   const instance = createAppServer(root, {
     monitor: false, store, idp, siteUrl, billingClients: null, log: (line) => logs.push(line), models: createModelClient(modelConfig({})),
     calls: createAgoraCalls(agoraConfig(env)), signaling: createSignaling(signalingConfig(env)), channelSecret: env.SPACES_SIGNALING_SECRET,
-    ...("integrations" in options ? { integrations: options.integrations } : {})
+    ...("integrations" in options ? { integrations: options.integrations } : {}),
+    ...("integrationNudge" in options ? { integrationNudge: options.integrationNudge } : {}),
+    ...("integrationStack" in options ? { integrationStack: options.integrationStack } : {}),
+    ...("integrationRetryMs" in options ? { integrationRetryMs: options.integrationRetryMs } : {}),
+    ...("trustProxy" in options ? { trustProxy: options.trustProxy } : {}),
+    ...(options.log ? { log: (line) => { logs.push(line); options.log(line); } } : {})
   });
   await new Promise((done) => instance.listen(0, "127.0.0.1", done));
   t.after(() => close(instance));
-  return { fake, idp, store, logs, base: "http://127.0.0.1:" + instance.address().port };
+  return { fake, idp, store, logs, server: instance, stop: () => close(instance), base: "http://127.0.0.1:" + instance.address().port };
 }
 
 // A real service on the test database; null (and the test skipped) without PORTAL_TEST_DATABASE_URL.
-async function stack(t, { admins = [] } = {}) {
+async function stack(t) {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
   const manage = fakeManage();
@@ -68,7 +83,7 @@ async function stack(t, { admins = [] } = {}) {
   const pushFetch = { async post(url, body) { pushes.push({ url, body }); return { status: 202 }; } };
   const exchanges = [];
   const exchange = async (idToken, origin) => { exchanges.push({ idToken, origin }); return { accessToken: "station-read-token", expiresIn: 300 }; };
-  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, pushFetch, exchange, log: () => {}, admins });
+  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, pushFetch, exchange, log: () => {} });
   t.after(() => service._pushesIdle());
   return { db, manage, served, service, exchanges, pushes };
 }
@@ -463,9 +478,9 @@ test("renewing an expired integration on the built-in Station is checked against
   await integrations.service._pushesIdle();
 });
 
-test("an admin's bearer token lists only the admin's own built-in integrations; only the browser session shows others' and acts on them", async (t) => {
+test("an Agora.Build admin's browser session and tokens list only the admin's own integrations; others' on the built-in Station are 404", async (t) => {
   const admin = accountId();
-  const integrations = await stack(t, { admins: [admin] });
+  const integrations = await stack(t);
   if (!integrations) return;
   const built = integrations.manage.seedBuiltIn({ integrations: true, admins: [admin] });
   const app = await start(t, { integrations: integrations.service });
@@ -476,59 +491,40 @@ test("an admin's bearer token lists only the admin's own built-in integrations; 
   const theirs = await create(owner.cookie);
   const own = await create(boss.cookie);
   const roles = async (response) => (await response.json()).integrations.map((entry) => [entry.id, entry.role]);
-  assert.deepEqual(await roles(await call(app.base, "/api/integrations", { cookie: boss.cookie })), [[own, "owner"], [theirs, "station_admin"]]);
+  assert.deepEqual(await roles(await call(app.base, "/api/integrations", { cookie: boss.cookie })), [[own, "owner"]]);
   const bearer = await app.fake.issueAccessToken({ sub: admin, scope: "integrations:read integrations:approve" });
-  assert.deepEqual(await roles(await call(app.base, "/api/v1/integrations", { bearer })), [[own, "owner"]], "a token acting for an admin sees only the admin's own");
-  for (const action of ["pause", "revoke", "events"]) {
-    const method = action === "events" ? "GET" : "POST";
-    assert.equal((await call(app.base, "/api/v1/integrations/" + theirs + "/" + action, { bearer, method })).status, 404, action + " is not a v1 route");
-    assert.ok([401, 403].includes((await call(app.base, "/api/integrations/" + theirs + "/" + action, { bearer, method })).status), action + " needs the browser session");
-  }
+  assert.deepEqual(await roles(await call(app.base, "/api/v1/integrations", { bearer })), [[own, "owner"]]);
+  for (const action of ["pause", "revoke", "resume"]) assert.equal((await call(app.base, "/api/integrations/" + theirs + "/" + action, { cookie: boss.cookie, method: "POST" })).status, 404, action);
+  assert.equal((await call(app.base, "/api/integrations/" + theirs + "/events", { cookie: boss.cookie })).status, 404);
   assert.equal((await integrations.service.integrations(owner.sub)).integrations[0].state, "awaiting_approval", "nothing changed");
-  const paused = await call(app.base, "/api/integrations/" + theirs + "/revoke", { cookie: boss.cookie, method: "POST" });
-  assert.deepEqual([paused.status, (await paused.json()).role], [200, "station_admin"]);
-  await integrations.service._pushesIdle();
-});
-test("the stack hands the platform admins to the service", async (t) => {
-  const db = await testDatabase(t);
-  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
-  const owner = accountId();
-  const admin = accountId();
-  const manage = fakeManage();
-  const built = manage.seedBuiltIn({ integrations: true, admins: [admin] });
-  const integrations = createIntegrationStack({ db, manage, idp: null, log: () => {}, admins: [admin], pushFetch: { async post() { return { status: 202 }; } } });
-  await integrations.service.stations(owner);
-  const created = await integrations.service.createIntegration(owner, { stationId: built.id, name: "Hosted", scopes: [], publicJwk: publicJwk() });
-  assert.deepEqual((await integrations.service.integrations(admin, { asAdmin: true })).integrations.map((entry) => [entry.id, entry.role]), [[created.id, "station_admin"]]);
   await integrations.service._pushesIdle();
 });
 
-test("the stack syncs the built-in Stations from Auth once when it becomes ready, as the first platform admin", async (t) => {
+test("the stack syncs the built-in Stations from Auth once when it becomes ready, naming no account", async (t) => {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
-  const admin = accountId();
   const manage = fakeManage();
-  const built = manage.seedBuiltIn({ admins: [admin] });
-  const integrations = createIntegrationStack({ db, manage, idp: null, log: () => {}, admins: [admin] });
-  const listings = () => manage.calls.filter((name) => name === "stations").length;
+  const built = manage.seedBuiltIn();
+  const integrations = createIntegrationStack({ db, manage, idp: null, log: () => {} });
+  const listings = () => manage.calls.filter((name) => name === "builtInStations").length;
   assert.equal(listings(), 0, "nothing before the first request");
   await integrations.ready();
   assert.equal(listings(), 1);
+  assert.equal(manage.calls.includes("stations"), false, "no account's listing");
   assert.deepEqual((await db.pool.query("SELECT id, built_in, report_client_id FROM stations")).rows, [{ id: built.id, built_in: true, report_client_id: built.reportClientId }]);
   await integrations.ready();
   assert.equal(listings(), 1, "memoised with ready()");
 });
 
-
 test("the stack is ready even when the first built-in sync fails, retries it a minute later, and close() stops the syncs", async () => {
   const db = { async migrate() { return []; }, async ensureEventPartitions() { return []; }, async close() {} };
   const manage = fakeManage();
   let listings = 0;
-  manage.stations = async () => { listings += 1; throw new ManageError(503, "unavailable"); };
+  manage.builtInStations = async () => { listings += 1; throw new ManageError(503, "unavailable"); };
   const logs = [];
-  const integrations = createIntegrationStack({ db, manage, idp: null, log: (line) => logs.push(line), admins: [accountId()], builtInSyncAfter: { ok: 3600000, failed: 20 } });
+  const integrations = createIntegrationStack({ db, manage, idp: null, log: (line) => logs.push(line), builtInSyncAfter: { ok: 3600000, failed: 20 } });
   assert.equal(typeof (await integrations.ready()).stations, "function", "ready despite Auth refusing the listing");
-  assert.deepEqual([listings, logs], [1, ["Built-in Station sync failed: unavailable."]]);
+  assert.deepEqual([listings, logs.filter((line) => line.startsWith("Built-in"))], [1, ["Built-in Station sync failed: unavailable."]]);
   await new Promise((resolve) => setTimeout(resolve, 60));
   assert.ok(listings >= 2, "a failed sync is retried soon, not an hour later");
   await integrations.close();
@@ -537,20 +533,254 @@ test("the stack is ready even when the first built-in sync fails, retries it a m
   assert.equal(listings, after, "no sync after close()");
 });
 
-test("without platform admins the skipped sync keeps the hourly schedule, so it is logged at most once an hour", async () => {
-  const db = { async migrate() { return []; }, async ensureEventPartitions() { return []; }, async close() {} };
-  const logs = [];
-  const integrations = createIntegrationStack({ db, manage: fakeManage(), idp: null, log: (line) => logs.push(line), builtInSyncAfter: { ok: 3600000, failed: 20 } });
+test("a successful built-in sync is repeated on the hourly schedule, with no platform admins anywhere", async () => {
+  // A database whose every query finds nothing: enough for the built-in part of reconcile.
+  const db = { pool: { async query() { return { rows: [] }; } }, async migrate() { return []; }, async ensureEventPartitions() { return []; }, async close() {} };
+  const manage = fakeManage();
+  let listings = 0;
+  manage.builtInStations = async () => { listings += 1; return []; };
+  const integrations = createIntegrationStack({ db, manage, idp: null, log: () => {}, builtInSyncAfter: { ok: 20, failed: 3600000 } });
   await integrations.ready();
   await new Promise((resolve) => setTimeout(resolve, 80));
-  assert.deepEqual(logs, ["Built-in Station sync skipped: no PLATFORM_ADMINS."], "not retried a minute later");
+  assert.ok(listings >= 2, "synced again on the ok schedule (" + listings + ")");
   await integrations.close();
 });
-test("the built-in Station's own report token reports and reads a feed of every integration on it, and only those", async (t) => {
+
+test("the stack reads Auth's change feed once it is ready and again on each nudge, following an admin's pause", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
   const admin = accountId();
-  const integrations = await stack(t, { admins: [admin] });
+  const owner = accountId();
+  const manage = fakeManage();
+  const built = manage.seedBuiltIn({ integrations: true, admins: [admin] });
+  const pushes = [];
+  // The test database closes its own pool when the test ends.
+  const integrations = createIntegrationStack({ db: { ...db, close: async () => {} }, manage, idp: null, log: () => {}, pushFetch: { async post(url) { pushes.push(url); return { status: 202 }; } }, authChanges: { pollMs: 3600000, minGapMs: 10 } });
+  const reads = () => manage.calls.filter((name) => name === "integrationChanges").length;
+  integrations.nudge(); // before ready(): nothing, not even preparing the stack (Ruling R-F)
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(manage.calls, [], "a nudge neither prepares the stack nor reads before it is ready");
+  await integrations.ready();
+  await waitFor(() => reads() === 1, "the first read, once ready");
+  const created = await integrations.service.createIntegration(owner, { stationId: built.id, name: "Hosted", scopes: [], publicJwk: publicJwk() });
+  manage.adminChange(created.id, { status: "paused", actor: admin, reason: "Spam" });
+  integrations.nudge();
+  await waitFor(async () => (await db.pool.query("SELECT paused_by FROM integrations WHERE id = $1", [created.id])).rows[0].paused_by === "admin", "the admin's pause in the Portal");
+  assert.equal(reads(), 2);
+  assert.equal((await db.pool.query("SELECT state FROM integrations WHERE id = $1", [created.id])).rows[0].state, "paused");
+  await waitFor(async () => (await db.pool.query("SELECT cursor FROM auth_change_feed")).rows[0]?.cursor === manage.feed.at(-1).cursor, "the cursor saved after the page");
+  await integrations.service._pushesIdle();
+  assert.ok(pushes.includes(built.origin + "/agora-build/v1/changes"), "the Station was pushed");
+  await integrations.close();
+});
+
+test("a nudge before the stack is ready asks for nothing: no ready() retries and no log per nudge while the database is down", async () => {
+  const calls = [];
+  const db = {
+    async migrate() { calls.push("migrate"); throw Object.assign(new Error("down"), { code: "ECONNREFUSED" }); },
+    async ensureEventPartitions() { calls.push("partitions"); return []; },
+    async close() {}
+  };
+  const manage = fakeManage();
+  const logs = [];
+  const integrations = createIntegrationStack({ db, manage, idp: null, log: (line) => logs.push(line), authChanges: { pollMs: 3600000, minGapMs: 5 } });
+  for (let index = 0; index < 20; index += 1) integrations.nudge();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual([calls, manage.calls, logs], [[], [], []]);
+  await assert.rejects(integrations.ready(), (error) => error.status === 503);
+  for (let index = 0; index < 20; index += 1) integrations.nudge();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual([calls, manage.calls], [["migrate"], []], "a failed ready() is retried by the next request, never by a nudge");
+  assert.deepEqual(logs, ["Portal database is not ready: ECONNREFUSED."]);
+  await integrations.close();
+});
+
+test("an injected ready service takes a nudge and does nothing with it", async () => {
+  const service = {};
+  const integrations = readyIntegrations(service);
+  assert.equal(integrations.nudge(), undefined);
+  assert.equal(await integrations.ready(), service);
+});
+
+test("an injected ready service hands a nudge to the function it was given", async () => {
+  const nudges = [];
+  const integrations = readyIntegrations({}, () => nudges.push("asked"));
+  integrations.nudge();
+  assert.deepEqual(nudges, ["asked"]);
+});
+
+test("Auth's nudge is a bodiless POST that only asks for a read of Auth's feed: no session, no same-origin check, 60 a minute", async (t) => {
+  const nudges = [];
+  const app = await start(t, { integrations: {}, integrationNudge: () => nudges.push(Date.now()) });
+  const nudge = (init = {}) => fetch(app.base + "/auth/integration-changes", { method: "POST", ...init });
+  const answer = await nudge();
+  assert.deepEqual([answer.status, await answer.text(), answer.headers.get("cache-control")], [204, "", "no-store"]);
+  assert.equal(nudges.length, 1);
+  // Server to server: another site's Origin and Sec-Fetch-Site don't matter, and nothing it sends is read.
+  assert.equal((await nudge({ headers: { Origin: "https://evil.example", "Sec-Fetch-Site": "cross-site" } })).status, 204);
+  for (const body of ["{}", "x"]) assert.equal((await nudge({ body, headers: { "Content-Type": "application/json" } })).status, 413, "a nudge carries no body");
+  const get = await fetch(app.base + "/auth/integration-changes");
+  assert.deepEqual([get.status, get.headers.get("allow")], [405, "POST"]);
+  assert.equal(nudges.length, 2, "only the bodiless POSTs asked for a read");
+  // The address's allowance is 60 a minute, every POST counted. A refused one still asks for a read (reads run at
+  // most one a second however many ask), so Auth's real nudge is never lost to a forger who spends the allowance.
+  let accepted = 0;
+  let refused = null;
+  for (let index = 0; index < 70; index += 1) {
+    const response = await nudge();
+    if (response.status === 204) accepted += 1;
+    else refused ??= response;
+  }
+  assert.equal(accepted, 56, "four POSTs above already counted");
+  assert.deepEqual([refused.status, refused.headers.get("retry-after")], [429, "60"]);
+  assert.equal(nudges.length, 72, "the 56 accepted and the 14 refused each asked for a read");
+});
+
+test("without Stations and integrations the nudge answers 404", async (t) => {
+  const app = await start(t, { integrations: null });
+  assert.equal((await fetch(app.base + "/auth/integration-changes", { method: "POST" })).status, 404);
+});
+
+test("the nudge refuses a body with 413 and closes the connection at once, without waiting for the body", async (t) => {
+  const nudges = [];
+  const app = await start(t, { integrations: {}, integrationNudge: () => nudges.push(1) });
+  const { port } = app.server.address();
+  // A raw request: Transfer-Encoding: chunked with a body the server must not wait for, then Content-Length: 5 with none
+  // sent. The connection is the server's to close; a client-side safety timer (1 s) only keeps a broken server from hanging the test.
+  const raw = (head) => new Promise((resolve, reject) => {
+    const started = Date.now();
+    const socket = connect(port, "127.0.0.1", () => socket.write(head));
+    let received = "";
+    const safety = setTimeout(() => { socket.destroy(); }, 1000);
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => { received += chunk; });
+    socket.on("close", () => { clearTimeout(safety); resolve({ received, elapsed: Date.now() - started }); });
+    socket.on("error", (error) => { clearTimeout(safety); reject(error); });
+  });
+  for (const head of ["POST /auth/integration-changes HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", "POST /auth/integration-changes HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\n"]) {
+    const { received, elapsed } = await raw(head);
+    assert.match(received, /^HTTP\/1\.1 413 /, "the body is refused before it arrives");
+    assert.match(received, /connection: close/i);
+    assert.ok(elapsed < 500, "the server closed the connection itself (" + elapsed + " ms)");
+  }
+  assert.deepEqual(nudges, []);
+});
+
+test("an unauthenticated nudge never looks up the session cookie or a guest", async (t) => {
+  const lookups = [];
+  const app = await start(t, { integrations: {}, integrationNudge: () => {} });
+  for (const name of ["browserToken", "guestToken", "session"]) {
+    const original = app.store[name];
+    app.store[name] = (...args) => { lookups.push(name); return original.apply(app.store, args); };
+  }
+  const answer = await fetch(app.base + "/auth/integration-changes", { method: "POST", headers: { Cookie: "house_session=" + "a".repeat(40), Authorization: "Bearer not-a-token" } });
+  assert.equal(answer.status, 204);
+  assert.deepEqual(lookups, [], "no session work for a nudge");
+});
+
+test("the nudge's allowance is per client address: behind TRUST_PROXY=1 the last X-Forwarded-For hop, never a leading one", async (t) => {
+  const app = await start(t, { integrations: {}, integrationNudge: () => {}, trustProxy: "1" });
+  const nudge = (forwardedFor) => fetch(app.base + "/auth/integration-changes", { method: "POST", headers: { "X-Forwarded-For": forwardedFor } });
+  for (let index = 0; index < 60; index += 1) assert.equal((await nudge("198.51.100." + (index % 250) + ", 203.0.113.9")).status, 204, "a spoofed leading hop earns nothing");
+  assert.equal((await nudge("192.0.2.1, 203.0.113.9")).status, 429, "the proxy-added hop is the client");
+  assert.equal((await nudge("203.0.113.10")).status, 204, "another address has its own allowance");
+});
+
+test("a nudge asks the running stack for a read: it never starts, retries or logs for the stack", async (t) => {
+  const calls = { ready: 0, nudge: 0 };
+  const stack = { service: {}, ready: async () => { calls.ready += 1; return stack.service; }, nudge: () => { calls.nudge += 1; }, close: async () => {} };
+  const app = await start(t, { integrationStack: stack });
+  await waitFor(() => calls.ready === 1, "the stack's start at server start");
+  for (let index = 0; index < 5; index += 1) assert.equal((await fetch(app.base + "/auth/integration-changes", { method: "POST" })).status, 204);
+  assert.deepEqual(calls, { ready: 1, nudge: 5 });
+  assert.deepEqual(stackLines(app), []);
+});
+
+test("the stack starts when the server starts, without holding up the server, and the start is retried until it succeeds", async (t) => {
+  const calls = [];
+  let failMigrate = true;
+  const db = {
+    pool: { async query() { return { rows: [] }; } },
+    async migrate() { calls.push("migrate"); if (failMigrate) { failMigrate = false; throw Object.assign(new Error("down"), { code: "ECONNREFUSED" }); } return []; },
+    async ensureEventPartitions() { return []; },
+    async close() { calls.push("close"); }
+  };
+  const manage = fakeManage();
+  const reads = () => manage.calls.filter((name) => name === "integrationChanges").length;
+  const stackLogs = [];
+  const stack = createIntegrationStack({ db, manage, idp: null, log: (line) => stackLogs.push(line), authChanges: { pollMs: 3600000, minGapMs: 5 } });
+  const app = await start(t, { integrationStack: stack, integrationRetryMs: { first: 20, max: 40 } });
+  // No request has asked for the stack: it started itself, failed once, and tried again.
+  await waitFor(() => reads() === 1, "the reader's first read");
+  assert.deepEqual(calls, ["migrate", "migrate"]);
+  assert.deepEqual(stackLogs, ["Portal database is not ready: ECONNREFUSED."]);
+  assert.deepEqual(stackLines(app), ["Stations and integrations did not start; trying again in 1 s."], "a fixed message and the delay, nothing from the error");
+  // Started, it is not started again.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(calls, ["migrate", "migrate"]);
+  assert.equal(stackLines(app).length, 1);
+  await app.stop();
+  await waitFor(() => calls.at(-1) === "close", "the stack's close");
+});
+
+test("a start that never finishes does not hold up the server", async (t) => {
+  const stack = { service: {}, ready: () => new Promise(() => {}), nudge: () => {}, close: async () => {} };
+  const app = await start(t, { integrationStack: stack });
+  const page = await fetch(app.base + "/");
+  assert.equal(page.status, 200);
+  await page.arrayBuffer();
+});
+
+test("closing the server stops the start's retries and closes the stack", async (t) => {
+  const calls = { ready: 0, close: 0 };
+  const stack = { service: {}, ready: async () => { calls.ready += 1; throw Object.assign(new Error("secret detail"), { code: "ECONNREFUSED" }); }, nudge: () => {}, close: async () => { calls.close += 1; } };
+  const app = await start(t, { integrationStack: stack, integrationRetryMs: { first: 15, max: 15 } });
+  await waitFor(() => calls.ready >= 3, "retries of the start");
+  assert.ok(stackLines(app).length >= 3);
+  assert.ok(stackLines(app).every((line) => /^Stations and integrations did not start \(ECONNREFUSED\)(; trying again in 1 s)?\.$/.test(line)), "a fixed message, the code and the delay only");
+  await app.stop();
+  await waitFor(() => calls.close === 1, "the stack's close");
+  const settled = { ...calls, logs: stackLines(app).length };
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.deepEqual({ ...calls, logs: stackLines(app).length }, settled, "no start after the server closed");
+});
+
+test("a start that fails with a non-Error, or whose log throws, is still retried and never an unhandled rejection", async (t) => {
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  t.after(() => process.off("unhandledRejection", onUnhandled));
+  const reasons = [undefined, null, "down", { code: "x".repeat(200) + " secret" }];
+  let calls = 0;
+  const stack = { service: {}, ready: () => { calls += 1; return calls <= reasons.length ? Promise.reject(reasons[calls - 1]) : Promise.resolve(); }, nudge: () => {}, close: async () => {} };
+  let thrown = 0;
+  const app = await start(t, { integrationStack: stack, integrationRetryMs: { first: 10, max: 10 }, log: (line) => { if (line.startsWith("Stations and integrations did not start") && thrown < 2) { thrown += 1; throw new Error("the log failed"); } } });
+  await waitFor(() => calls === reasons.length + 1, "a retry after each failure");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(calls, reasons.length + 1, "started, then left alone");
+  assert.deepEqual(unhandled, []);
+  assert.ok(stackLines(app).every((line) => /^Stations and integrations did not start(; trying again in 1 s)?\.$/.test(line)), "no code that is not a plain code, nothing from the error: " + JSON.stringify(stackLines(app)));
+});
+
+test("close() stops reading Auth's change feed", async () => {
+  // A database whose every query finds nothing: an empty cursor, no built-in Stations.
+  const db = { pool: { async query() { return { rows: [] }; } }, async migrate() { return []; }, async ensureEventPartitions() { return []; }, async close() {} };
+  const manage = fakeManage();
+  const reads = () => manage.calls.filter((name) => name === "integrationChanges").length;
+  const integrations = createIntegrationStack({ db, manage, idp: null, log: () => {}, authChanges: { pollMs: 20, minGapMs: 5 } });
+  await integrations.ready();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.ok(reads() >= 2, "it polls (" + reads() + " reads)");
+  await integrations.close();
+  const after = reads();
+  integrations.nudge();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(reads(), after, "no read after close(), nudged or not");
+});
+test("the built-in Station's own report token reports and reads a feed of every integration on it, and only those", async (t) => {
+  const integrations = await stack(t);
   if (!integrations) return;
-  const built = integrations.manage.seedBuiltIn({ integrations: true, admins: [admin] });
+  const built = integrations.manage.seedBuiltIn({ integrations: true });
   const app = await start(t, { integrations: integrations.service });
   const token = await app.fake.issueAccessToken({ sub: BUILT_IN_REPORT_CLIENT, client_id: BUILT_IN_REPORT_CLIENT, scope: "station.report" });
   // A report client the Portal does not know is refused.

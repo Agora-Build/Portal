@@ -104,3 +104,17 @@ test("approve, pause and resume on an expired row are refused as expired; revoke
 test("an unknown event is refused", () => {
   assert.equal(attempt(row("ready"), "explode").status, 409);
 });
+
+test("effectiveState shows an integration whose owner Agora.Build disabled as paused, after revocation and expiry", () => {
+  const past = new Date(NOW - 1000).toISOString();
+  const disabled = { ownerDisabledAt: new Date(NOW - 5000).toISOString() };
+  assert.equal(effectiveState(row("ready", disabled), NOW), "paused");
+  assert.equal(effectiveState(row("awaiting_approval", disabled), NOW), "paused");
+  assert.equal(effectiveState(row("paused", disabled), NOW), "paused");
+  assert.equal(effectiveState(row("ready", { ...disabled, expiresAt: past }), NOW), "expired");
+  assert.equal(effectiveState(row("revoking", disabled), NOW), "revoking");
+  assert.equal(effectiveState(row("revoked", disabled), NOW), "revoked");
+  assert.equal(effectiveState(row("ready", { ownerDisabledAt: null }), NOW), "ready");
+  // Transitions follow the row's own state: a disabled owner is not a pause of the row.
+  assert.deepEqual(transition(row("ready", disabled), "pause", NOW), { state: "paused", resumeState: "ready" });
+});

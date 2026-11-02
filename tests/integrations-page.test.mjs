@@ -110,7 +110,20 @@ test("the built-in Station shows as Built in with Details only, and is offered f
   assert.doesNotMatch(row, /Remove|Share|Leave|membersPanel|confirmed\(/);
   assert.match(script, /\(!station\.builtIn \|\| station\.integrationsEnabled\)/);
   assert.match(script, /Integrations aren't available on the built-in Station yet\. Add your own Station to create one\./);
-  assert.match(script, /As an Agora\.Build admin you can pause or revoke it\./);
+  assert.doesNotMatch(script, /station_admin|As an Agora\.Build admin/, "admins act on the admin site, never here (D26)");
   assert.match(await read("account.html"), /Every account has the built-in Agora Station/);
   assert.match(await read("styles.css"), /\.state-badge--built-in \{/);
+});
+
+test("an integration Agora.Build paused shows Paused by Agora.Build, offers no Resume, and its history names Agora.Build", async () => {
+  const script = await read("integrations.js");
+  assert.match(script, /const PAUSED_BY_AGORA = "Paused by Agora\.Build";/);
+  assert.match(script, /const locked = state === "paused" && integration\.pausedBy === "admin";/);
+  assert.match(script, /if \(owner && state === "paused" && !locked\) \{/);
+  assert.match(script, /text: locked \? PAUSED_BY_AGORA : stateLabel\(state\)/);
+  assert.match(script, /Agora\.Build paused this integration\. Only Agora\.Build can resume it; you can still revoke it\./);
+  // A resume refused because Agora.Build paused it meanwhile says so and shows the list as it is now.
+  assert.match(script, /if \(error\.code !== "admin_paused" && error\.code !== "owner_disabled"\) throw error;/);
+  assert.match(script, /entry\.actor === "agora_build" \? "Agora\.Build" : entry\.actor/);
+  assert.equal((script.match(/confirmed\(\w+, output, \[/g) || []).length, 4, "no new confirmation");
 });

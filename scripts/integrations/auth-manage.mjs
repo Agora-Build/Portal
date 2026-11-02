@@ -54,6 +54,8 @@ export function createManageClient({ issuer: issuerSetting, clientId, clientSecr
   return {
     registerStation: ({ origin, owner, reportKey, actor }) => call("POST", "/stations", { body: { origin, owner, reportKey, actor } }),
     async stations(account) { return list(await call("GET", "/stations", { query: { account } }), "stations"); },
+    // The active built-in Stations, naming no account (D26): the Portal's startup and hourly sync.
+    async builtInStations() { return list(await call("GET", "/built-in-stations"), "stations"); },
     async removeStation(id, actor) { await call("DELETE", "/stations/" + segment(id), { query: { actor } }); },
     members: (id, actor) => call("GET", "/stations/" + segment(id) + "/members", { query: { actor } }),
     async addMember(id, account, actor) { await call("PUT", "/stations/" + segment(id) + "/members/" + segment(account), { query: { actor } }); },
@@ -63,6 +65,17 @@ export function createManageClient({ issuer: issuerSetting, clientId, clientSecr
     async integrations(account) { return list(await call("GET", "/integrations", { query: { account } }), "integrations"); },
     addKey: (id, publicJwk, actor) => call("POST", "/integrations/" + segment(id) + "/keys", { body: { publicJwk, actor } }),
     changeIntegration: (id, { status, r9Svc, quotaPerSecond, expiresAt } = {}, actor) =>
-      call("PATCH", "/integrations/" + segment(id), { body: { status, r9Svc, quotaPerSecond, expiresAt, actor } })
+      call("PATCH", "/integrations/" + segment(id), { body: { status, r9Svc, quotaPerSecond, expiresAt, actor } }),
+    // Auth's change feed (D26, the Portal's alone): the changes to integration access after `after` (an opaque cursor
+    // Auth handed out), oldest first, and the cursor to pass next (null before the feed's first change).
+    async integrationChanges({ after, limit } = {}) {
+      const query = {};
+      if (after !== undefined) query.after = after;
+      if (limit !== undefined) query.limit = String(limit);
+      const json = await call("GET", "/integration-changes", { query: Object.keys(query).length ? query : undefined });
+      const changes = list(json, "changes");
+      if (json.nextCursor !== null && typeof json.nextCursor !== "string") throw new ManageError(200, "bad_response");
+      return { changes, nextCursor: json.nextCursor };
+    }
   };
 }
