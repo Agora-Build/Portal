@@ -14,7 +14,7 @@ const CHALLENGES_PER_HOUR = 10;
 const REPORT_KEY_MAX = 4096;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DAY = 86400000;
-const SCOPES = ["agent.view", "agent.prompt", "agent.approve", "agent.interrupt", "agent.terminal", "agent.launch", "agent.message"];
+const SCOPES = ["agent.view", "agent.prompt", "agent.approve", "agent.interrupt", "agent.terminal", "agent.launch", "agent.message", "agent.notify"];
 const PRIVATE_MEMBERS = ["d", "p", "q", "dp", "dq", "qi", "k"];
 const R9_SVC = /^[0-9a-f]{64}$/;
 // Control characters, and the bidirectional marks and overrides that could make a name read differently.
@@ -110,12 +110,17 @@ function integrationName(value) {
   return name;
 }
 
-// Unique scopes from SCOPES; agent.view is always granted, so it is added when missing.
+// Unique scopes from SCOPES; agent.view is always granted, so it is added when missing. agent.notify needs
+// agent.message and agent.prompt, as Auth requires.
 function integrationScopes(value) {
   if (!Array.isArray(value) || value.some((scope) => !SCOPES.includes(scope)) || new Set(value).size !== value.length) {
     throw failure(400, "Choose scopes from " + SCOPES.join(", ") + ", each at most once.", "scopes");
   }
-  return value.includes("agent.view") ? [...value] : ["agent.view", ...value];
+  const scopes = value.includes("agent.view") ? [...value] : ["agent.view", ...value];
+  if (scopes.includes("agent.notify") && !(scopes.includes("agent.message") && scopes.includes("agent.prompt"))) {
+    throw failure(400, "agent.notify needs agent.message and agent.prompt.", "scopes");
+  }
+  return scopes;
 }
 
 function wholeNumber(value, min, max, message, code) {

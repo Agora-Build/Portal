@@ -64,8 +64,8 @@ const VIEWPORTS = [
 // An Agora.Build admin's pause needs Auth's change feed and admin pause lock (Auth D26 Tasks 13 and 14).
 const adminPauseSkip = !authHasChangeFeed ? "the Auth checkout has no change feed (Auth D26 Task 13)" : !authHasAdminPauseLock ? "the Auth checkout has no admin pause lock (Auth D26 Task 14)" : null;
 const SCOPES = ["agent.view", "agent.prompt"];
-// What the browser form ticks: SCOPES plus a new D28 scope, which a real Auth must accept.
-const FORM_SCOPES = ["agent.view", "agent.prompt", "agent.launch"];
+// What the browser form ticks: SCOPES plus the D28 scopes, which a real Auth must accept.
+const FORM_SCOPES = ["agent.view", "agent.prompt", "agent.launch", "agent.message", "agent.notify"];
 
 const lib = await loadAuth();
 const stack = await startStack(lib, { integrations: true, builtIn: { admin: person(7999, "Ines") } });
@@ -295,6 +295,8 @@ async function flow(viewport, index) {
       await form.locator("[name=stationId]").selectOption({ label: setup.station.origin });
       await form.getByLabel("agent.prompt").check();
       await form.getByLabel("agent.launch").check();
+      await form.getByLabel("agent.message").check();
+      await form.getByLabel("agent.notify").check();
       await form.getByRole("button", { name: "Generate a key pair in this browser" }).click();
       const link = form.locator(".key-download a");
       await link.waitFor({ timeout: 5000 });
