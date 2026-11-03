@@ -14,7 +14,7 @@ const CHALLENGES_PER_HOUR = 10;
 const REPORT_KEY_MAX = 4096;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DAY = 86400000;
-const SCOPES = ["agent.view", "agent.prompt", "agent.approve", "agent.interrupt", "agent.terminal"];
+const SCOPES = ["agent.view", "agent.prompt", "agent.approve", "agent.interrupt", "agent.terminal", "agent.launch", "agent.message"];
 const PRIVATE_MEMBERS = ["d", "p", "q", "dp", "dq", "qi", "k"];
 const R9_SVC = /^[0-9a-f]{64}$/;
 // Control characters, and the bidirectional marks and overrides that could make a name read differently.
