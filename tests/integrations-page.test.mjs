@@ -43,15 +43,16 @@ test("/account/ carries the Stations and Integrations sections, hidden by defaul
   for (const dialog of dialogs) assert.match(dialog, /aria-labelledby="/, dialog);
 });
 
-test("the integration form offers agent.launch and agent.message and says they need an upgraded Atem", async () => {
+test("the integration form offers agent.launch, agent.message and agent.notify and says they need an upgraded Atem", async () => {
   const html = await read("account.html");
-  const fieldset = html.match(/<fieldset[^>]*class="token-choice scope-choice"[^>]*>[\s\S]*?<\/fieldset>/)?.[0] || "";
+  const fieldset = html.match(/<fieldset class="token-choice scope-choice"[^>]*>[\s\S]*?<\/fieldset>/)?.[0] || "";
   const values = [...fieldset.matchAll(/name="scope" value="([^"]+)"/g)].map((match) => match[1]);
-  assert.deepEqual(values, ["agent.view", "agent.prompt", "agent.approve", "agent.interrupt", "agent.terminal", "agent.launch", "agent.message"]);
+  assert.deepEqual(values, ["agent.view", "agent.prompt", "agent.approve", "agent.interrupt", "agent.terminal", "agent.launch", "agent.message", "agent.notify"]);
   const note = html.match(/<p class="form-note" id="scope-note">[\s\S]*?<\/p>/)?.[0] || "";
   assert.match(note, /agent\.launch<\/strong>: Start new agent sessions on your hosts, only from profiles you approved there\./);
-  assert.match(note, /agent\.message<\/strong>: Send messages, context and attachments to your hosts and agents\. For an agent to act on one, also allow agent\.prompt\./);
-  assert.match(note, /need an upgraded Atem on the host/);
+  assert.match(note, /agent\.message<\/strong>: Send messages, context and attachments to your hosts and projects\. On their own, messages never make an agent act\./);
+  assert.match(note, /agent\.notify<\/strong>: Let this app's messages become work for an agent, handed to it when the agent is free\. Also needs agent\.message and agent\.prompt, and your approval of the route on the host\./);
+  assert.match(note, /All three need an upgraded Atem on the host\./);
   assert.match(fieldset, /aria-describedby="scope-note"/);
 });
 

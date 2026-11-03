@@ -82,6 +82,16 @@ test("createIntegration takes agent.launch and agent.message, alone or together"
   for (const scopes of [["agent.launch", "agent.launch"], ["agent.notify"]]) await assert.rejects(s.create(OWNER, { scopes }), refused(400, "scopes"), JSON.stringify(scopes));
 });
 
+test("createIntegration takes agent.notify only with agent.message and agent.prompt", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const made = await s.create(OWNER, { scopes: ["agent.prompt", "agent.message", "agent.notify"] });
+  assert.deepEqual(s.record(made.id).scopes, ["agent.view", "agent.prompt", "agent.message", "agent.notify"]);
+  for (const scopes of [["agent.notify"], ["agent.message", "agent.notify"], ["agent.prompt", "agent.notify"]]) {
+    await assert.rejects(s.create(OWNER, { scopes }), (error) => refused(400, "scopes")(error) && error.message === "agent.notify needs agent.message and agent.prompt.", JSON.stringify(scopes));
+  }
+});
+
 test("createIntegration refuses bad input before Auth, and maps Auth's refusals", async (t) => {
   const s = await setup(t);
   if (!s) return;
