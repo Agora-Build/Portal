@@ -64,6 +64,8 @@ const VIEWPORTS = [
 // An Agora.Build admin's pause needs Auth's change feed and admin pause lock (Auth D26 Tasks 13 and 14).
 const adminPauseSkip = !authHasChangeFeed ? "the Auth checkout has no change feed (Auth D26 Task 13)" : !authHasAdminPauseLock ? "the Auth checkout has no admin pause lock (Auth D26 Task 14)" : null;
 const SCOPES = ["agent.view", "agent.prompt"];
+// What the browser form ticks: SCOPES plus a new D28 scope, which a real Auth must accept.
+const FORM_SCOPES = ["agent.view", "agent.prompt", "agent.launch"];
 
 const lib = await loadAuth();
 const stack = await startStack(lib, { integrations: true, builtIn: { admin: person(7999, "Ines") } });
@@ -292,6 +294,7 @@ async function flow(viewport, index) {
       await form.locator("[name=name]").fill("Smoke app");
       await form.locator("[name=stationId]").selectOption({ label: setup.station.origin });
       await form.getByLabel("agent.prompt").check();
+      await form.getByLabel("agent.launch").check();
       await form.getByRole("button", { name: "Generate a key pair in this browser" }).click();
       const link = form.locator(".key-download a");
       await link.waitFor({ timeout: 5000 });
@@ -307,7 +310,7 @@ async function flow(viewport, index) {
       await integration(page, "Smoke app").waitFor({ timeout: 8000 });
       const body = JSON.parse(sentBodies.at(-1) || "{}");
       check(sentBodies.length === 1 && body.publicJwk && !("d" in body.publicJwk) && !JSON.stringify(body).includes(file.d) && !/"d"\s*:/.test(sentBodies[0]), tag + "the request to /api/integrations has no \"d\" member");
-      check(JSON.stringify(body.scopes) === JSON.stringify(SCOPES), tag + "the request carries the chosen scopes");
+      check(JSON.stringify(body.scopes) === JSON.stringify(FORM_SCOPES), tag + "the request carries the chosen scopes");
       check((await badgeOf(page, "Smoke app")) === "Awaiting approval in Astation", tag + "the new integration awaits approval");
       check(await form.isHidden() && await form.locator(".key-download a").count() === 0, tag + "the form closes and the key link is gone");
       check(await page.evaluate(() => document.activeElement?.id) === "integration-add", tag + "focus returns to Create integration after creating");

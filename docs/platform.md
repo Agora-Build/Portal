@@ -816,7 +816,7 @@ Create takes a name of 1 to 80 characters, scopes from `agent.view`,
 added), a public JWK (a private member is refused), a quota of 1 to 10000 token
 requests per second (default 200) and an expiry of 1 to 90 days (default 30).
 `agent.launch` and `agent.message` take effect only on a Station and host that
-support them (an upgraded Atem); see the design's D28. A new integration waits for approval, and
+support them (an upgraded Atem); see D28 in [Portal issue #26](https://github.com/Agora-Build/Portal/issues/26). A new integration waits for approval, and
 Auth issues it no token until then; the owner approves it in Astation, which sends the approval with an
 `integrations:approve` token for the owner. An account that is neither an
 integration's owner nor its Station's owner gets 404 for it; likewise an account
