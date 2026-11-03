@@ -43,6 +43,18 @@ test("/account/ carries the Stations and Integrations sections, hidden by defaul
   for (const dialog of dialogs) assert.match(dialog, /aria-labelledby="/, dialog);
 });
 
+test("the integration form offers agent.launch and agent.message and says they need an upgraded Atem", async () => {
+  const html = await read("account.html");
+  const fieldset = html.match(/<fieldset[^>]*class="token-choice scope-choice"[^>]*>[\s\S]*?<\/fieldset>/)?.[0] || "";
+  const values = [...fieldset.matchAll(/name="scope" value="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(values, ["agent.view", "agent.prompt", "agent.approve", "agent.interrupt", "agent.terminal", "agent.launch", "agent.message"]);
+  const note = html.match(/<p class="form-note" id="scope-note">[\s\S]*?<\/p>/)?.[0] || "";
+  assert.match(note, /agent\.launch<\/strong>: Start new agent sessions on your hosts, only from profiles you approved there\./);
+  assert.match(note, /agent\.message<\/strong>: Send messages, context and attachments to your hosts and agents\. For an agent to act on one, also allow agent\.prompt\./);
+  assert.match(note, /need an upgraded Atem on the host/);
+  assert.match(fieldset, /aria-describedby="scope-note"/);
+});
+
 test("/integrations.js is served as JavaScript", async (t) => {
   const response = await fetch((await served(t)) + "/integrations.js");
   assert.equal(response.status, 200);

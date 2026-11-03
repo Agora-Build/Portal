@@ -71,6 +71,17 @@ test("createIntegration adds agent.view, uses the defaults and records the creat
   assert.deepEqual([custom.scopes, custom.quotaPerSecond, custom.expiresAt], [["agent.view", "agent.terminal"], 50, new Date(s.clock.now + 90 * DAY).toISOString()]);
 });
 
+test("createIntegration takes agent.launch and agent.message, alone or together", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  for (const scopes of [["agent.launch"], ["agent.message"], ["agent.prompt", "agent.launch", "agent.message"]]) {
+    const made = await s.create(OWNER, { scopes });
+    assert.deepEqual(s.record(made.id).scopes, ["agent.view", ...scopes], JSON.stringify(scopes));
+    assert.deepEqual(made.scopes, ["agent.view", ...scopes], JSON.stringify(scopes));
+  }
+  for (const scopes of [["agent.launch", "agent.launch"], ["agent.notify"]]) await assert.rejects(s.create(OWNER, { scopes }), refused(400, "scopes"), JSON.stringify(scopes));
+});
+
 test("createIntegration refuses bad input before Auth, and maps Auth's refusals", async (t) => {
   const s = await setup(t);
   if (!s) return;
