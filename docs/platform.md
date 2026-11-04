@@ -523,7 +523,7 @@ the change feed the Stations read. Account deletion (with its waiting period)
 and the Discord apps come later and are not covered here.
 
 Every account also has the **built-in Station** (`https://station.agora.build`; on dev
-`https://station-dev.agora.build`), which Agora.Build runs (spec D24). Auth admits it from the `stations` list in
+`https://station-dev.agora.build`), which Agora.Build runs ([D24](integrations.md#332-the-built-in-station)). Auth admits it from the `stations` list in
 its clients file instead of proof of control; nobody owns it, every signed-in account may use it, and nobody can
 remove it through any page or API.
 
@@ -592,7 +592,7 @@ Auth's clients file must be set up for this:
   expired integration on a built-in Station counts as a creation (same check, same 403; the expired one is not
   counted yet); renewing a live one is always allowed. Custom Stations have no cap.
 - **Admins.** Agora.Build admins act on the admin site (`https://admin.agora.build`, dev
-  `https://admin.dev.agora.build`; spec D26), which calls Auth, never in the Portal. In the Portal an admin is just
+  `https://admin.dev.agora.build`; [D26](integrations.md#334-the-admin-site-d26)), which calls Auth, never in the Portal. In the Portal an admin is just
   another account: every listing shows an account its own integrations and those on custom Stations it owns, another
   account's integration on the built-in Station is 404 for everyone but its owner, and Auth refuses the Portal's
   management calls that act across accounts. Their changes reach the Portal through Auth's change feed (see "Admin
@@ -817,7 +817,7 @@ added), a public JWK (a private member is refused), a quota of 1 to 10000 token
 requests per second (default 200) and an expiry of 1 to 90 days (default 30).
 `agent.notify` needs `agent.message` and `agent.prompt`. `agent.launch`, `agent.message` and `agent.notify` take
 effect only on a Station and host that
-support them (an upgraded Atem); see the D28 contract in [Portal issue #25](https://github.com/Agora-Build/Portal/issues/25). A new integration waits for approval, and
+support them (an upgraded Atem); see [D28](integrations.md#313-launch-message-and-notify-scopes-d28) in the integrations design. A new integration waits for approval, and
 Auth issues it no token until then; the owner approves it in Astation, which sends the approval with an
 `integrations:approve` token for the owner. An account that is neither an
 integration's owner nor its Station's owner gets 404 for it; likewise an account

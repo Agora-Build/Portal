@@ -48,6 +48,9 @@ for the IdP registration, the API contract for apps (IdP access tokens, scopes,
 billing clients), PostgreSQL storage, Stripe subscription/credit purchases, and
 encrypted Agora resources. Moving Vox and Astation onto the IdP is their teams'
 next phase; their current accounts, balances, and subscription state are not changed here.
+The design, with what is built and what is still planned, is in [docs/design.md](docs/design.md); Stations,
+integrations and the admin site, shared with Auth, Astation and Atem, are designed in
+[docs/integrations.md](docs/integrations.md).
 
 Shared navigation, dialogs, sign-in, and browser sessions live in `script.js`; styling lives in `styles.css`. The backend uses built-in Node modules in `scripts/serve.mjs`, `store.mjs`, `models.mjs`, and `activity.mjs`; `calls.mjs` uses the official Agora token builder, and `idp.mjs` (the auth.agora.build client) uses `openid-client` and `jose`. The browser SDK is served locally at `/assets/agora-rtc.js` and loaded only when someone joins a call.
 
