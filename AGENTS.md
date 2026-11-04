@@ -4,6 +4,11 @@
 
 This is the static Agora Build community portal. `index.html` contains the homepage; `explore.html` contains the project directory. Shared styling lives in `styles.css`, navigation and featured filters in `script.js`, and directory search, categories, and sorting in `explore.js`. SVG artwork and the favicon live in `assets/`. Node tooling lives in `scripts/`; automated checks live in `tests/`. Generated deployment files go into `dist/`.
 
+The design is `docs/design.md` (Spaces, the Stoa, sign-in through Auth) and `docs/integrations.md` (Stations,
+integrations and the admin site, shared with Auth, Astation and Atem). Code comments that cite "spec §3.x" or a D or
+Q number mean `docs/integrations.md`. The executed implementation plans and dated specs were removed from the tree on
+2026-11-04 and remain in git history under `docs/superpowers/`.
+
 ## Build, Test, and Development Commands
 
 Use Node.js 20 or newer; no dependency installation is required.
