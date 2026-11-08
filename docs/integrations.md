@@ -990,11 +990,23 @@ part is not started.
 
 **The decision.** Atem owns accepted tasks of delegated senders: integrations a Station's control feed covers, native members, and host senders with project grants. Natural expiry and renewal don't touch accepted tasks, and each task's deadline (at most 24 h) bounds it, running turns included. A revocation cancels unstarted tasks and interrupts running ones only when the owner chooses it. An integration's pause holds its unstarted tasks; host senders have no pause, only revoke and readmit. Stops reach hosts as signed control records (from the Station for integrations, from native managers for host senders) or as device-list entries, and a host reconciles its feeds and mailbox before it starts queued remote work. R9 authorization stays with native managers, outside Agora.Build's kill switch. Agora.Build's service availability is separate: disabling an Agora.Build account suspends the built-in Station's relay and mailbox service for that account's hosts, and revokes nothing.
 
-**The design** is *Delegated host work and host-to-host senders: one design*, revision 6b,
-`proposals/delegated-host-work/delegated-host-work-and-host-senders.md` (SHA-256
-`cc180912cd8d3afc11c20f77a3ebc4e8a81989ede1327afc90df52d09c39eb83`), with its diagram `flows.html` (SHA-256
-`587a4c74ca9c2645dd3a2c79908813da573451479c0a0a846896fd3ff909cf6a`). Atem is moving it into Atem's `designs/` as planned
-work. Reviews and sign-offs are on [Atem #120](https://github.com/Agora-Build/Atem/issues/120), Astation's final
+**The design** is *Delegated host work and host-to-host senders: one design*, in the Atem repository:
+[`designs/delegated-host-work.md`](https://github.com/Agora-Build/Atem/blob/99e11b5/designs/delegated-host-work.md) and its diagram
+[`designs/delegated-host-work-flows.html`](https://github.com/Agora-Build/Atem/blob/99e11b5/designs/delegated-host-work-flows.html), at commit `99e11b5` on branch
+`feat/delegated-host-work` (draft [Atem PR #133](https://github.com/Agora-Build/Atem/pull/133), not merged yet).
+
+The text all three teams agreed is its revision 6b, recorded by SHA-256: the design
+`cc180912cd8d3afc11c20f77a3ebc4e8a81989ede1327afc90df52d09c39eb83` and the diagram
+`587a4c74ca9c2645dd3a2c79908813da573451479c0a0a846896fd3ff909cf6a`. The repository copy differs from it only by
+updates made after agreement:
+
+- its status block;
+- the diagram link;
+- two Astation file references;
+- III.4, which now says the phone sign-in is live on dev (Auth #19);
+- a new Appendix B quoting the agent-collaboration passages it cites.
+
+Reviews and sign-offs are on [Atem #120](https://github.com/Agora-Build/Atem/issues/120), Astation's final
 confirmation in [comment 6715069931](https://github.com/Agora-Build/Atem/issues/120#issuecomment-6715069931). The
 owner's decisions are in its Appendix A.
 
