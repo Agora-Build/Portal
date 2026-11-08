@@ -84,9 +84,9 @@ Notes:
 
 - **Registered Stations, admin site:** it lists only the built-in Stations. Auth has no admin listing of custom
   Stations yet.
-- **Built-in apps, Auth:** the Portal, Astation and the admin site are first-party clients. The RFC 8252 redirects a
-  mobile app needs are not built.
-- **Built-in apps, Station (Astation):** the Astation app is a built-in app; the mobile app is not built.
+- **Built-in apps, Auth:** the Portal, Astation and the admin site are first-party clients, and so are Astation's
+  phone apps, `astation-ios` and `astation-android`, with exact private-use redirects (live on dev since 2026-11-08).
+- **Built-in apps, Station (Astation):** the Astation app is a built-in app; its phone apps are not finished.
 - **Launch, message and notify, Station (Astation):** the Station maps the three scopes to Atem's operations only with
   the Cargo feature `host-work-api`, which is off on every Station. Astation's consent review, signing gate and native
   launch are merged; its message inbox is not built.
@@ -485,8 +485,8 @@ and production builds keep it closed.
 
 #### 3.3.3 Built-in apps (Portal, Astation, a mobile app)
 
-Status: [Partly built] — the Portal, Astation and the admin site are first-party clients; the mobile app and the
-redirects it needs at Auth are not built.
+Status: [Partly built] — the Portal, Astation, the admin site and Astation's two phone clients are first-party clients
+at Auth; the phone apps themselves are Astation's and not finished.
 
 Agora.Build's own apps (D25) are first-party clients of Auth. People sign in to them as themselves. They are neither
 integrations (a person's own apps or bots acting on their agents, created at runtime and natively approved) nor
@@ -500,26 +500,30 @@ Stations.
 
 Today these are the `portal` web client, the `astation` native client (PKCE on a loopback redirect or device code,
 with `integrations:read` and `integrations:approve` on the Portal and `astation.remote` as its Station scope), and the
-admin site's `admin` client (§3.3.4). First-party web apps see no consent page.
+admin site's `admin` client (§3.3.4), and Astation's phone apps `astation-ios` and `astation-android` (below).
+First-party web apps see no consent page.
 
-**The mobile app** [Not built] is a native client, for example `agora-mobile`: public (no secret), PKCE required,
-refresh tokens with rotation, first-party. It requests only what it uses:
+**The phone apps** [Not built: Astation] are Astation for iPhone and iPad (`astation-ios`) and Astation for Android
+(`astation-android`) (Auth #18, Portal #30). At Auth they are public native clients [Built]: no secret, PKCE S256
+required, refresh tokens with rotation, first party, and the browser asks the person to confirm each sign-in. They
+request only what they use:
 
+- `openid profile offline_access` for the person's sign-in;
 - `astation.remote` on the person's chosen Station (built-in or custom, exact origin), to view and control their
-  agents through the shared Station protocol, with no per-Station configuration;
-- `integrations:read` on the Portal, and `integrations:approve` only if Q5 allows approving on the phone.
+  agents through the shared Station protocol, with the same token contract as the Mac's Astation.
 
-**Auth change needed: mobile redirect URIs** [Not built]. Auth accepts only `http://127.0.0.1/callback` (any port) for
-native apps, which works for desktop apps and not on a phone. The RFC 8252 forms for native clients are to be added:
+They get no Portal resource or API scopes (no `integrations:read` or `integrations:approve` yet) and no device grant.
+Signing in never makes the phone an R9 member: native membership and the encrypted channel stay separate
+prerequisites (Q5).
 
-- a **claimed https redirect** (preferred), for example `https://agora.build/app/callback`, served with Apple
-  associated domains and Android app links so only the app can receive it (the Portal then serves the association
-  files);
-- or a **private-use reverse-domain scheme**, for example `build.agora.mobile:/callback` (RFC 8252 §7.1), registered
-  exactly.
-
-Both are matched exactly like other redirect URIs, PKCE S256 stays mandatory, and device code remains a fallback. The
-clients-file check accepts these forms only for `type: "native"` clients.
+**Mobile redirect URIs at Auth** [Built] (Auth PR #19). Besides `http://127.0.0.1/callback` (any port), a native
+client may register exact **private-use redirects** under Agora Build's reverse domain (RFC 8252 §7.1):
+`build.agora.<app>:/<path>`, lower case, one slash after the colon, no query or fragment. They are matched exactly, a
+client uses loopback or private-use redirects but never both, and only `type: "native"` clients may use them. PKCE
+S256 protects the code if another app claims the same scheme. Astation's apps use
+`build.agora.astation.ios:/oauth/callback` and `build.agora.astation.android:/oauth/callback`. **Claimed https
+redirects** (with Apple associated domains and Android app links, the Portal serving the association files) aren't
+used yet [Not built].
 
 **Push notifications** to the phone (an approval waiting, an agent asking a question) are later work with Astation's
 mobile work [Not built: Astation].
@@ -1054,7 +1058,7 @@ Status: [Partly built] — each row has its own tag.
 | D22 | Bring-your-own Discord app supported: the person's own Discord application points at their Station; bot token and public key stored on the Station only; the Portal still manages the integration (§3.8) | [Not built] | Station, Astation, Portal |
 | D23 | No live R9 log compaction (Atem owner; the owner allowed it in principle). The Station's archive is an availability backup, not a trust source. A renewal rate limit and a "device list nearly full" warning; checkpoints only as a future revision with an owner-ceremony anchor, if an account nears the cap (§3.6) | [Partly built] — Atem's nearly-full levels and renewal guard are built; the Station's archive of signed entries is Astation's and not confirmed here | Atem, Station, Astation |
 | D24 | The built-in Station is a full Station on the same protocol as custom Stations, admitted by configuration instead of proof of control, open to every signed-in account and every account's default relay. Integrations and Station AI on it only once Agora.Build supports them there, with active integrations per account limited by plan (Basic 4, Premium 10, Principal and Fellow no cap; custom Stations never capped). Dev uses its own built-in Station, `https://station-dev.agora.build`. No user owns it, Agora.Build's admins administer it (on the admin site, D26), and nobody can unregister it. A person may switch to a custom Station and back at any time, with re-verification on each switch. Each kind may add functions on top of the shared protocol (§3.3.2) | [Built] | Auth, Portal, Station |
-| D25 | Built-in apps (the Portal, Astation, a planned mobile app) are first-party Auth clients added once in the clients file, separate from integrations and Stations. The mobile app is a public native client with PKCE and refresh tokens, requesting `astation.remote` on the chosen Station and `integrations:read` on the Portal; Auth adds RFC 8252 mobile redirects (claimed https, or a private reverse-domain scheme) for native clients (§3.3.3). Q5 is open | [Partly built] — the first-party clients exist; the mobile app and the mobile redirects are not built | Auth, Astation |
+| D25 | Built-in apps (the Portal, Astation, a planned mobile app) are first-party Auth clients added once in the clients file, separate from integrations and Stations. The phone apps are public native clients (`astation-ios`, `astation-android`) with PKCE and refresh tokens, requesting `astation.remote` on the chosen Station and no Portal scopes yet; Auth accepts exact private-use redirects under `build.agora.` for native clients (§3.3.3). Q5 is open | [Partly built] — the first-party clients and the phone apps' clients and redirects are built (live on dev); the phone apps themselves are not finished (Astation) | Auth, Astation |
 | D26 | A separate admin site (the private `Agora-Build/Portal-Admin`; `admin.agora.build`, dev `admin.dev.agora.build`) holds Agora.Build's admin powers. Admins sign in with a passkey at Auth, never by silent SSO reuse. Auth enforces every admin permission server-side, with a step-up ID token on each cross-account call. Pause and revoke take effect at once, including the Station's open sessions. Every action has a required reason and an audited actor. Account disabling, enabling and passkey resets are admin-site actions, not CLI commands. The Portal has no admin views. Dev only until passkeys are verified and the owner approves production (§3.3.4) | [Built] | Auth, Portal, admin site |
 | D27 | All system, account and user management goes through the admin site; no `npm` or script tools: a Portal admin API for plan roles and credit grants, called with a 60-second `portal.admin` token exchanged from the admin's step-up proof; Stoa admins taken from Auth's configured admins; signing keys listed and emergency-revoked on the admin site; `import-json` removed (§3.3.5) | [Not built] | Auth, Portal, admin site |
 | D28 | Three integration scopes for Atem's new signed operations: `agent.launch` → `launch`, `agent.message` → `message` (never makes an agent act), `agent.notify` → `notify` (needs `agent.message` and `agent.prompt`, which Auth enforces). `agent.view` stays required; existing integrations gain nothing; the Portal shows all three checkboxes. Signing gate: the Station maps the scopes only in builds with `host-work-api` (Atem supports them from v0.8.2), and Astation signs the new operations only for hosts and checkers that support them. An Astation inbox with "Start work on this" is follow-up (§3.1.3) | [Partly built] — the Station's mapping is off (`host-work-api`), the joint check on a real host has not run, and the inbox is not built | Auth, Portal, Station, Astation, Atem |
@@ -1126,10 +1130,9 @@ Grouped by area. Nothing goes to production without the owner's approval.
 
 **Built-in apps** ([§3.3.3](#333-built-in-apps-portal-astation-a-mobile-app))
 
-- Auth: RFC 8252 mobile redirects for native clients (claimed https, private-use reverse-domain scheme), matched
-  exactly, PKCE S256, checked in the clients file; then register the mobile client, dev first.
-- Portal: serve the claimed-https redirect path and the app association files (`apple-app-site-association`,
-  `assetlinks.json`), if the https form is chosen.
+- Auth and the owner: the phone clients in production, after Astation's apps are checked on dev.
+- Auth, Portal: claimed https redirects and the app association files (`apple-app-site-association`,
+  `assetlinks.json`), only if a phone app ever needs them.
 - Astation, Atem: Q5, the mobile app itself, and push notifications.
 
 **Retention and account deletion** ([§3.6](#36-portal-account--integrations))
