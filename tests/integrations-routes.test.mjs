@@ -74,7 +74,7 @@ async function start(t, options = {}) {
 }
 
 // A real service on the test database; null (and the test skipped) without PORTAL_TEST_DATABASE_URL.
-async function stack(t) {
+async function stack(t, { delegatedHostWork = false } = {}) {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
   const manage = fakeManage();
@@ -84,7 +84,7 @@ async function stack(t) {
   const pushFetch = { async post(url, body) { pushes.push({ url, body }); return { status: 202 }; } };
   const exchanges = [];
   const exchange = async (idToken, origin) => { exchanges.push({ idToken, origin }); return { accessToken: "station-read-token", expiresIn: 300 }; };
-  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, pushFetch, exchange, log: () => {} });
+  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, pushFetch, exchange, log: () => {}, delegatedHostWork });
   t.after(() => service._pushesIdle());
   return { db, manage, served, service, exchanges, pushes };
 }
@@ -369,6 +369,142 @@ test("the v1 integration list and approval take scoped access tokens", async (t)
   assert.equal(approved.status, 200);
   assert.equal((await approved.json()).state, "provisioning");
   assert.equal((await call(app.base, "/api/v1/integrations/bad.id/approval", { bearer: approver, method: "POST", data: { r9Svc: R9 } })).status, 404);
+});
+
+// D29: a revocation states whether to interrupt running tasks, from the browser and from Astation (the setting on).
+const INTERRUPT_RUNNING = "Say whether to interrupt running tasks: send interruptRunning as true or false.";
+
+test("with the setting on, the browser's revoke must say whether to interrupt running tasks", async (t) => {
+  const integrations = await stack(t, { delegatedHostWork: true });
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const owner = await signIn(app);
+  const { station } = await registerStation(app, integrations, owner.cookie);
+  const revoke = (id, data) => call(app.base, "/api/integrations/" + id + "/revoke", { cookie: owner.cookie, method: "POST", data });
+  const mine = await createIntegration(app, owner.cookie, station.id);
+  const calls = integrations.manage.calls.length;
+  assert.equal((await revoke(mine.id)).status, 415, "no JSON body");
+  for (const data of [{}, { interruptRunning: "true" }, { interruptRunning: null }, { interruptRunning: 1 }]) {
+    const refused = await revoke(mine.id, data);
+    assert.deepEqual([refused.status, await refused.json()], [400, { error: INTERRUPT_RUNNING, code: "interrupt_running" }], JSON.stringify(data));
+  }
+  assert.equal((await revoke("i-unknown", {})).status, 400, "an unknown ID is refused the same way");
+  assert.equal(integrations.manage.calls.length, calls, "Auth was not asked");
+  // Pause and resume take no body.
+  const pause = (name) => call(app.base, "/api/integrations/" + mine.id + "/" + name, { cookie: owner.cookie, method: "POST" });
+  assert.equal((await pause("pause")).status, 200);
+  assert.equal((await pause("resume")).status, 200);
+  const revoked = await revoke(mine.id, { interruptRunning: true });
+  assert.equal(revoked.status, 200);
+  const view = await revoked.json();
+  assert.deepEqual([view.state, view.interruptRunning, typeof view.revokedAt], ["revoked", true, "string"]);
+  assert.equal(integrations.manage.integrationRecords.find((entry) => entry.clientId === mine.id).interruptRunning, true);
+  const second = await createIntegration(app, owner.cookie, station.id);
+  assert.equal((await (await revoke(second.id, { interruptRunning: false })).json()).interruptRunning, false);
+  assert.equal((await revoke("i-unknown", { interruptRunning: false })).status, 404);
+});
+
+test("with the setting on, Astation revokes at POST /api/v1/integrations/<id>/revoke with integrations:approve, for the owner only", async (t) => {
+  const integrations = await stack(t, { delegatedHostWork: true });
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const owner = await signIn(app);
+  const { station } = await registerStation(app, integrations, owner.cookie);
+  const integration = await createIntegration(app, owner.cookie, station.id);
+  const path = "/api/v1/integrations/" + integration.id + "/revoke";
+  const token = (scope, sub = owner.sub) => app.fake.issueAccessToken({ sub, client_id: "astation", scope });
+  const native = (bearer, data = { interruptRunning: true }, target = path) => call(app.base, target, { bearer, method: "POST", data });
+
+  assertScope(await native(await token("integrations:read")), "integrations:approve");
+  assertScope(await native(await token("credits")), "integrations:approve");
+  const approver = await token("integrations:approve");
+  assert.equal((await call(app.base, path, { bearer: approver, method: "POST" })).status, 415, "no JSON body");
+  const refused = await native(approver, {});
+  assert.deepEqual([refused.status, (await refused.json()).code], [400, "interrupt_running"]);
+  // Not the owner: another account, or the Station's owner on a member's integration, finds nothing.
+  const stranger = await signIn(app);
+  assert.equal((await native(await token("integrations:approve", stranger.sub))).status, 404);
+  assert.equal((await native(approver, { interruptRunning: true }, "/api/v1/integrations/i-unknown/revoke")).status, 404);
+  const friend = await signIn(app);
+  assert.equal((await call(app.base, "/api/stations/" + station.id + "/members/" + friend.sub, { cookie: owner.cookie, method: "PUT" })).status, 200);
+  const theirs = await createIntegration(app, friend.cookie, station.id);
+  assert.equal((await native(approver, { interruptRunning: true }, "/api/v1/integrations/" + theirs.id + "/revoke")).status, 404, "the Station's owner is not the integration's owner");
+  assert.equal((await (await call(app.base, "/api/integrations", { cookie: friend.cookie })).json()).integrations.find((entry) => entry.id === theirs.id).state, "awaiting_approval");
+
+  const revoked = await native(approver);
+  assert.equal(revoked.status, 200);
+  const view = await revoked.json();
+  assert.deepEqual([view.id, view.state, view.role, view.interruptRunning, typeof view.revokedAt], [integration.id, "revoked", "owner", true, "string"]);
+  assert.equal(integrations.manage.integrationRecords.find((entry) => entry.clientId === integration.id).interruptRunning, true);
+  const event = (await integrations.db.pool.query("SELECT actor, reason, details FROM integration_events WHERE integration_id = $1 AND kind = 'integration_revoked'", [integration.id])).rows;
+  assert.equal(event.length, 1);
+  assert.deepEqual([event[0].actor, event[0].reason, event[0].details.clientId, event[0].details.interruptRunning], [owner.sub, "owner", "astation", true]);
+  assert.equal((await native(approver, { interruptRunning: false })).status, 200, "a repeat is the same no-op");
+  assert.equal((await integrations.service.integrations(owner.sub)).integrations.find((entry) => entry.id === integration.id).interruptRunning, true);
+
+  // A token on the unversioned path gets the versioned-API 404, as for the other token routes; a browser session on it still works.
+  const unversioned = await native(approver, { interruptRunning: true }, "/api/integrations/" + integration.id + "/revoke");
+  assert.equal(unversioned.status, 404);
+  assert.match((await unversioned.json()).error, new RegExp("^Access tokens use the versioned API: /api/v1/integrations/" + integration.id + "/revoke\\.$"));
+  assert.equal((await call(app.base, "/api/integrations/" + integration.id + "/revoke", { cookie: owner.cookie, method: "POST", data: { interruptRunning: true } })).status, 200);
+  // Only POST, and only revoke: nothing else became a token route.
+  assert.equal((await call(app.base, path, { bearer: approver, method: "GET" })).status, 404);
+  assert.equal((await call(app.base, "/api/v1/integrations/" + integration.id + "/pause", { bearer: approver, method: "POST" })).status, 404);
+});
+
+test("with the setting off, the browser's revoke reads no body and Astation's native revoke does not exist", async (t) => {
+  const integrations = await stack(t);
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service });
+  const owner = await signIn(app);
+  const { station } = await registerStation(app, integrations, owner.cookie);
+  const first = await createIntegration(app, owner.cookie, station.id);
+  const second = await createIntegration(app, owner.cookie, station.id);
+  const approver = await app.fake.issueAccessToken({ sub: owner.sub, client_id: "astation", scope: "integrations:approve" });
+  const nativePath = "/api/v1/integrations/" + first.id + "/revoke";
+  const missing = await call(app.base, nativePath, { bearer: approver, method: "POST", data: { interruptRunning: true } });
+  assert.deepEqual([missing.status, (await missing.json()).error], [404, "This API was not found. See https://github.com/Agora-Build/Portal/blob/main/docs/platform.md for the /api/v1 routes."]);
+  const token = await call(app.base, "/api/integrations/" + first.id + "/revoke", { bearer: approver, method: "POST" });
+  assert.equal(token.status, 403, "a token on the browser path is refused as today");
+  assert.match((await token.json()).error, /browser session/);
+  const revoked = await call(app.base, "/api/integrations/" + first.id + "/revoke", { cookie: owner.cookie, method: "POST" });
+  assert.equal(revoked.status, 200, "no body, no 415");
+  const view = await revoked.json();
+  assert.equal(view.state, "revoked");
+  assert.equal(Object.hasOwn(view, "interruptRunning") || Object.hasOwn(view, "revokedAt"), false);
+  const given = await call(app.base, "/api/integrations/" + second.id + "/revoke", { cookie: owner.cookie, method: "POST", data: { interruptRunning: true } });
+  assert.equal(given.status, 200, "a body is not read");
+  assert.equal(integrations.manage.integrationRecords.find((entry) => entry.clientId === second.id).interruptRunning, undefined);
+});
+
+// The data side's setting comes from the environment through the stack: integrationsFromEnv, createIntegrationStack, the service.
+test("DELEGATED_HOST_WORK=1 reaches the service through integrationsFromEnv, and the stack's service serves the choice end to end", async (t) => {
+  const settings = { AUTH_ISSUER: issuer, PORTAL_CLIENT_SECRET: clientSecret, DATABASE_URL: "postgres://unused@127.0.0.1:1/none" };
+  const on = integrationsFromEnv({ ...settings, DELEGATED_HOST_WORK: "1" }, { idp: null, log: () => {} });
+  t.after(() => on.close());
+  // Refused before any database work, so this stack needs none.
+  await assert.rejects(on.service.revoke(accountId(), "i-1", {}), (error) => error.status === 400 && error.details?.code === "interrupt_running");
+
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
+  const manage = fakeManage();
+  const served = { body: "" };
+  const stationFetch = { async get() { return { status: 200, body: served.body }; } };
+  const pushFetch = { async post() { return { status: 202 }; } };
+  // The stack closes its database when the server stops; the test database closes with the test.
+  const stackDb = { ...db, close: async () => {} };
+  const integrationStack = createIntegrationStack({ db: stackDb, manage, idp: null, log: () => {}, stationFetch, pushFetch, delegatedHostWork: true, authChanges: { pollMs: 3600000, minGapMs: 5 } });
+  t.after(() => integrationStack.service._pushesIdle());
+  const app = await start(t, { integrationStack, delegatedHostWork: "1" });
+  const owner = await signIn(app);
+  await integrationStack.ready();
+  const { station } = await registerStation(app, { served }, owner.cookie);
+  const integration = await createIntegration(app, owner.cookie, station.id);
+  const revoke = (data) => call(app.base, "/api/integrations/" + integration.id + "/revoke", { cookie: owner.cookie, method: "POST", data });
+  assert.equal((await revoke({})).status, 400);
+  const revoked = await revoke({ interruptRunning: true });
+  assert.deepEqual([revoked.status, (await revoked.json()).interruptRunning], [200, true]);
+  assert.equal(manage.integrationRecords.find((entry) => entry.clientId === integration.id).interruptRunning, true);
 });
 
 test("Station reports and the change feed take only the Station's station.report token", async (t) => {

@@ -90,6 +90,18 @@ test("writes send JSON with a UTF-8 content type and the actor", async () => {
   assert.deepEqual(JSON.parse(s.calls[0].body), { status: "paused", actor });
 });
 
+test("changeIntegration sends interruptRunning when given, and leaves it out otherwise", async () => {
+  for (const interruptRunning of [true, false]) {
+    const s = stub({ clientId: "i-1", status: "revoked" });
+    await clientWith(s).changeIntegration("i-1", { status: "revoked", interruptRunning }, actor);
+    assert.equal(s.calls[0].method, "PATCH");
+    assert.deepEqual(JSON.parse(s.calls[0].body), { status: "revoked", interruptRunning, actor });
+  }
+  const s = stub({ clientId: "i-1", status: "revoked" });
+  await clientWith(s).changeIntegration("i-1", { status: "revoked" }, actor);
+  assert.deepEqual(Object.keys(JSON.parse(s.calls[0].body)).sort(), ["actor", "status"], "no interruptRunning key when it is not given");
+});
+
 test("Auth errors become ManageError with Auth's code, never echoing the request", async () => {
   const s = stub(Response.json({ error: "forbidden", error_description: "no" }, { status: 403 }));
   await assert.rejects(clientWith(s).changeIntegration("i-1", { r9Svc: "a".repeat(64) }, actor), (error) => {

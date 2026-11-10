@@ -144,6 +144,12 @@ export async function handleIntegrations({ path, method, url, read, service, cal
     const accountId = changing(scoped("integrations:approve"));
     return ok(await service.approve(accountId, integration[1], { r9Svc: (await read()).r9Svc }));
   }
+  // Astation revokes for the owner, saying whether to interrupt the tasks running on their hosts (D29). The browser's
+  // revoke, below, is the same path without a token.
+  if (delegatedHostWork && integration?.[2] === "revoke" && method === "POST" && caller) {
+    const accountId = changing(scoped("integrations:approve"));
+    return ok(await service.revokeNative(accountId, integration[1], { interruptRunning: (await read()).interruptRunning, clientId: caller.clientId }));
+  }
 
   // Everything below is for the browser session only.
   if (path === "/api/stations" && method === "GET") return ok(await service.stations(listing("stations", await portalUser())));
@@ -182,6 +188,8 @@ export async function handleIntegrations({ path, method, url, read, service, cal
   if (action === "events") return method === "GET" ? ok(await service.history(await portalUser(), id)) : null;
   if (method !== "POST") return null;
   const accountId = changing(await portalUser());
+  // With the setting on the browser's revoke says whether to interrupt running tasks; without it, it reads no body.
+  if (action === "revoke" && delegatedHostWork) return ok(await service.revoke(accountId, id, { interruptRunning: (await read()).interruptRunning }));
   if (action === "pause" || action === "resume" || action === "revoke") return ok(await service[action](accountId, id));
   if (action === "keys") return { status: 201, body: await service.rotateKey(accountId, id, { publicJwk: (await read()).publicJwk }) };
   if (action === "renew") return ok(await service.renew(accountId, id, { expiresInDays: (await read()).expiresInDays }, { plan: await planOf(accountId) }));

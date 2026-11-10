@@ -38,11 +38,12 @@ export function fakeManage({ now = Date.now } = {}) {
   // cursor as Auth hands it out.
   const feed = [];
   const feedCursor = (n) => Buffer.from("c" + n, "utf8").toString("base64url");
-  function recordChange(integration, kind, { actor = null, reason = null, admin = false } = {}) {
+  // A revoked entry carries interruptRunning when the revocation stated it (D29).
+  function recordChange(integration, kind, { actor = null, reason = null, admin = false, interruptRunning } = {}) {
     feed.push({
       cursor: feedCursor(feed.length + 1), at: new Date(now()).toISOString(), kind, clientId: integration.clientId, stationId: integration.stationId,
       owner: integration.owner, status: integration.status, pausedBy: integration.status === "paused" ? integration.pausedBy ?? null : null,
-      actorAccountId: actor, reason, admin
+      actorAccountId: actor, reason, admin, ...(kind === "revoked" && interruptRunning !== undefined ? { interruptRunning } : {})
     });
   }
   const statusKind = (status) => (status === "paused" ? "paused" : status === "revoked" ? "revoked" : "resumed");
@@ -177,7 +178,7 @@ export function fakeManage({ now = Date.now } = {}) {
       integration.keys.push(JSON.stringify(publicJwk));
       return { kid: "kid-" + integration.keys.length, overlapEndsAt: new Date(now() + 600000).toISOString() };
     },
-    async changeIntegration(id, { status, r9Svc, quotaPerSecond, expiresAt } = {}, actor) {
+    async changeIntegration(id, { status, r9Svc, quotaPerSecond, expiresAt, interruptRunning } = {}, actor) {
       await auth.gate("changeIntegration", actor);
       const integration = auth.findIntegration(id);
       const others = [r9Svc, quotaPerSecond, expiresAt].some((value) => value !== undefined);
@@ -202,8 +203,10 @@ export function fakeManage({ now = Date.now } = {}) {
       if (status !== undefined && status !== integration.status) {
         integration.status = status;
         integration.pausedBy = status === "paused" ? (integration.owner === actor ? "owner" : "station") : null;
-        recordChange(integration, statusKind(status), { actor });
+        recordChange(integration, statusKind(status), { actor, interruptRunning });
       }
+      // The last value given on a call that went through (a revocation of a revoked integration changes nothing, above).
+      if (interruptRunning !== undefined) integration.interruptRunning = interruptRunning;
       if (r9Svc !== undefined) integration.r9Svc = r9Svc;
       if (quotaPerSecond !== undefined) integration.quotaPerSecond = quotaPerSecond;
       if (expiry !== undefined) integration.expiresAt = expiry;
@@ -213,7 +216,7 @@ export function fakeManage({ now = Date.now } = {}) {
     // pause, on a built-in Station the admin administers, with a reason; in the feed with admin: true, then Auth's
     // nudge. Resuming an active integration and revoking a revoked one change nothing, as at Auth. Not a Portal call,
     // so it is not recorded in calls.
-    adminChange(id, { status, actor, reason = "Admin test" }) {
+    adminChange(id, { status, actor, reason = "Admin test", interruptRunning }) {
       const integration = auth.findIntegration(id);
       const station = stations.find((entry) => entry.id === integration.stationId);
       const lifts = status === "active" && ((integration.status === "paused" && integration.pausedBy === "admin") || integration.status === "active");
@@ -226,7 +229,7 @@ export function fakeManage({ now = Date.now } = {}) {
       if (status === integration.status && !converts) return listed(integration);
       integration.status = status;
       integration.pausedBy = status === "paused" ? "admin" : null;
-      recordChange(integration, statusKind(status), { actor, reason, admin: true });
+      recordChange(integration, statusKind(status), { actor, reason, admin: true, interruptRunning });
       auth.onNudge?.();
       return listed(integration);
     },

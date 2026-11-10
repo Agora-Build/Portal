@@ -41,7 +41,7 @@ function fakePush() {
   return push;
 }
 
-async function setup(t) {
+async function setup(t, { delegatedHostWork = false } = {}) {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
   const repository = createRepository(db);
@@ -54,7 +54,7 @@ async function setup(t) {
   let counter = 0;
   const service = createIntegrationService({
     repository, db, manage, stationFetch, pushFetch, exchange: async () => ({}), now: () => clock.now, log: (line) => logged.push(line),
-    challengeValue: () => "proof-value-" + (++counter)
+    challengeValue: () => "proof-value-" + (++counter), delegatedHostWork
   });
   async function register(accountId = OWNER, origin = "https://one.example") {
     const challenge = await service.createChallenge(accountId, origin);
@@ -338,4 +338,49 @@ test("a report is not pushed back to its Station; sharing and removal are, a rem
   assert.ok(s.pushFetch.posts.every((post) => post.url === url));
   assert.deepEqual(s.pushFetch.posts.at(-1).body, { cursor: await s.repository.latestCursor(s.station.id) });
   assert.equal((await s.repository.integration(id)).state, "revoking");
+});
+
+// D29: the Station's feed says whether a revocation interrupts running tasks (the setting on: delegatedHostWork).
+test("with the setting on, a revoked change and a stopped integration's feed entries carry interruptRunning; others do not", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  await s.service.share(OWNER, s.station.id, MEMBER);
+  const interrupted = await s.approved();
+  const kept = await s.approved();
+  const live = await s.approved();
+  const removed = await s.create(MEMBER);
+  const before = await s.create();
+  await s.service.revoke(OWNER, interrupted, { interruptRunning: true });
+  await s.service.revoke(OWNER, kept, { interruptRunning: false });
+  await s.service.unshare(OWNER, s.station.id, MEMBER);
+  // A revocation recorded before the setting has no choice recorded, which means "don't interrupt".
+  await s.db.transaction((db) => s.repository.appendEvent({ stationId: s.station.id, integrationId: before, accountId: OWNER, actor: OWNER, kind: "integration_revoked", state: "revoked", reason: "owner" }, db));
+  await s.repository.updateIntegration(before, { state: "revoked", revokedAt: s.clock.now });
+
+  const feed = await s.service.changes(client, 0);
+  const revoked = feed.changes.filter((change) => change.kind === "integration_revoked");
+  assert.deepEqual(revoked.map((change) => [change.integrationId, change.interruptRunning]), [[interrupted, true], [kept, false], [removed, false], [before, false]]);
+  assert.deepEqual(revoked.map((change) => change.integration.interruptRunning), [true, false, false, false], "each carries the integration's own");
+  const snapshot = Object.fromEntries(feed.integrations.map((entry) => [entry.id, entry]));
+  assert.deepEqual([interrupted, kept, removed, before].map((id) => snapshot[id].interruptRunning), [true, false, false, false]);
+  assert.equal(Object.hasOwn(snapshot[live], "interruptRunning"), false, "a live integration has none");
+  for (const change of feed.changes.filter((entry) => entry.kind !== "integration_revoked")) {
+    assert.equal(Object.hasOwn(change, "interruptRunning"), false, change.kind);
+    if (change.integration && change.integration.state !== "revoking" && change.integration.state !== "revoked") assert.equal(Object.hasOwn(change.integration, "interruptRunning"), false, change.kind);
+  }
+  // Only the owner's choice is in the row: the first revocation's, not a later one's.
+  assert.equal((await s.repository.integration(interrupted)).interruptRunning, true);
+});
+
+test("with the setting off, the Station's feed has no interruptRunning anywhere", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const id = await s.approved();
+  await s.service.revoke(OWNER, id);
+  const feed = await s.service.changes(s.station.reportClientId, 0);
+  const revoked = feed.changes.find((change) => change.kind === "integration_revoked");
+  assert.deepEqual(Object.keys(revoked).sort(), ["at", "id", "integration", "integrationId", "kind", "reason", "state"]);
+  assert.deepEqual(Object.keys(revoked.integration).sort(), ["expiresAt", "ownerAccount", "quotaPerSecond", "r9Svc", "scopes", "state"]);
+  assert.deepEqual(Object.keys(feed.integrations[0]).sort(), ["expiresAt", "id", "ownerAccount", "quotaPerSecond", "r9Svc", "scopes", "state"]);
 });

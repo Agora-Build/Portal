@@ -31,6 +31,8 @@ const notFound = () => failure(404, "This Station or integration was not found."
 const ownerOnly = () => failure(403, "Only the Station owner can do this.", "forbidden");
 const unknownStation = () => failure(403, "This Station is not registered.", "station");
 const expiredChallenge = () => failure(400, "This check has expired or was already used. Start again.", "challenge");
+// D29: with the setting on, a revocation says whether to interrupt the tasks running on the owner's hosts.
+const interruptRunningRequired = () => failure(400, "Say whether to interrupt running tasks: send interruptRunning as true or false.", "interrupt_running");
 const SYSTEM = "system";
 const BUILT_IN_FIXED = "The built-in Station is always there: it can't be removed, shared or left.";
 const BUILT_IN_ORIGIN = "This is the built-in Station. Every account already has it.";
@@ -173,9 +175,12 @@ function feedCursor(value) {
 }
 
 // What a Station needs to act on an integration; the state is the effective one, so it may be "expired". ownerAccount
-// lets the Station bind an integration to its owner before approval, when the integration itself has no token yet.
-function feedIntegration(row, at) {
-  return { ownerAccount: row.ownerAccount, state: effectiveState(row, at), scopes: row.scopes, r9Svc: row.r9Svc, expiresAt: row.expiresAt, quotaPerSecond: row.quotaPerSecond };
+// lets the Station bind an integration to its owner before approval, when the integration itself has no token yet. A
+// stopped one also says whether its revocation interrupts running tasks (delegated, D29).
+function feedIntegration(row, at, delegated = false) {
+  const entry = { ownerAccount: row.ownerAccount, state: effectiveState(row, at), scopes: row.scopes, r9Svc: row.r9Svc, expiresAt: row.expiresAt, quotaPerSecond: row.quotaPerSecond };
+  if (delegated && STOPPED.includes(row.state)) entry.interruptRunning = row.interruptRunning;
+  return entry;
 }
 
 // Who stopped a paused integration, for the page: Auth's pausedBy while the row is paused, and "admin" while Agora.Build
@@ -202,7 +207,8 @@ function authTime(value) {
 // the Portal saw before an owner's call (byActor) is told apart from one that came after it.
 function authEffect(row, entry) {
   const stopped = STOPPED.includes(row.state);
-  if (entry.kind === "revoked") return { kind: "integration_revoked", fields: stopped ? {} : { ...step(row, "revoke", 0), pausedBy: null } };
+  // A live row's revocation is dated as Auth dated it.
+  if (entry.kind === "revoked") return { kind: "integration_revoked", fields: stopped ? {} : { ...step(row, "revoke", 0), pausedBy: null, revokedAt: entry.at } };
   if (stopped) return { kind: "integration_" + entry.kind, fields: {} };
   if (entry.kind === "paused") {
     const pausedBy = PAUSED_BY.includes(entry.pausedBy) ? entry.pausedBy : null;
@@ -343,8 +349,8 @@ export function createIntegrationService({
   }
 
   // Revokes, inside the caller's transaction, each integration `pick` selects on the Station; already revoking or
-  // revoked ones are left as they are. `direct` sets revoked at once (Auth has already removed the Station). Returns
-  // how many it revoked.
+  // revoked ones are left as they are. `direct` sets revoked at once (Auth has already removed the Station). An
+  // indirect revocation never interrupts running tasks (delegated, D29). Returns how many it revoked.
   async function revokeOn(client, stationId, pick, { actor, reason, direct = false }) {
     const at = now();
     let revoked = 0;
@@ -353,9 +359,9 @@ export function createIntegrationService({
       const row = await repository.integrationForUpdate(listed.id, client);
       if (row.state === "revoking" || row.state === "revoked") continue;
       // A revoked integration is no longer paused by anyone.
-      const next = { ...(direct ? { state: "revoked", resumeState: null } : transition(row, "revoke", at)), pausedBy: null };
+      const next = { ...(direct ? { state: "revoked", resumeState: null } : transition(row, "revoke", at)), pausedBy: null, revokedAt: at };
       await repository.updateIntegration(row.id, next, client);
-      await repository.appendEvent({ stationId, integrationId: row.id, accountId: row.ownerAccount, actor, kind: "integration_revoked", state: next.state, reason }, client);
+      await repository.appendEvent({ stationId, integrationId: row.id, accountId: row.ownerAccount, actor, kind: "integration_revoked", state: next.state, reason, ...(delegatedHostWork ? { details: { interruptRunning: false } } : {}) }, client);
       revoked += 1;
     }
     return revoked;
@@ -512,13 +518,16 @@ export function createIntegrationService({
 
   function integrationView(row, role, origin) {
     const state = effectiveState(row, now());
-    return {
+    const view = {
       id: row.id, kind: row.kind, name: row.name, stationId: row.stationId, stationOrigin: origin, scopes: row.scopes,
       // An integration shown as paused because its owner's account is disabled reads like an admin's pause: what it was
       // paused from is its own state.
       state, pausedFrom: state === "paused" && row.state !== "paused" ? row.state : row.resumeState, pausedBy: pausedByOf(row, state), r9Svc: row.r9Svc, quotaPerSecond: row.quotaPerSecond,
       expiresAt: row.expiresAt, approvedAt: row.approvedAt, lastError: row.lastError, createdAt: row.createdAt, role
     };
+    // When it was revoked and whether that interrupts running tasks (delegated, D29).
+    if (delegatedHostWork && STOPPED.includes(state)) Object.assign(view, { revokedAt: row.revokedAt, interruptRunning: row.interruptRunning });
+    return view;
   }
 
   async function viewOf(row, role) {
@@ -572,18 +581,26 @@ export function createIntegrationService({
 
   // pause and revoke: the integration's owner or its Station's owner; anyone else is told nothing about it. A pause
   // records who paused it as Auth answers (an admin's pause already there stays the admin's: Auth never lowers it), or
-  // by role from an Auth without the admin pause lock. A revocation clears it.
-  async function stop(accountId, id, event) {
+  // by role from an Auth without the admin pause lock. A revocation clears it, and is dated (revokedAt) whatever the
+  // setting. With the setting on a revocation must say whether to interrupt the tasks running on the owner's hosts
+  // (D29): that is checked first, so a malformed call is refused the same for everyone, and it goes to Auth, the row
+  // and the event. `details` is added to the event's; `ownerOnly` refuses the Station's owner (404), as approval does.
+  async function stop(accountId, id, event, { interruptRunning, details, ownerOnly = false } = {}) {
+    const choice = delegatedHostWork && event === "revoke";
+    if (choice && typeof interruptRunning !== "boolean") throw interruptRunningRequired();
     const { row, role } = await visible(accountId, id);
+    if (ownerOnly && role !== "owner") throw notFound();
     // Shown as paused (its owner's account disabled): a pause is refused as for any paused integration, before Auth.
     step(shownPaused(row) ? { ...row, state: "paused", resumeState: row.state } : row, event, now());
     if (event === "revoke" && STOPPED.includes(row.state)) return viewOf(row, role);
-    const answer = await byActor(accountId, () => manage.changeIntegration(id, { status: event === "pause" ? "paused" : "revoked" }, accountId));
+    const answer = await byActor(accountId, () => manage.changeIntegration(id, { status: event === "pause" ? "paused" : "revoked", ...(choice ? { interruptRunning } : {}) }, accountId));
     const kind = event === "pause" ? "integration_paused" : "integration_revoked";
     const pausedBy = event !== "pause" ? null : PAUSED_BY.includes(answer?.pausedBy) ? answer.pausedBy : role === "owner" ? "owner" : "station";
     const updated = await commit(id, (current) => {
       if (event === "revoke" && STOPPED.includes(current.state)) return null;
-      return { fields: { ...step(current, event, now()), pausedBy }, event: { actor: accountId, kind, reason: role, details: seen() } };
+      const fields = { ...step(current, event, now()), pausedBy };
+      if (event === "revoke") Object.assign(fields, { revokedAt: now() }, choice ? { interruptRunning } : {});
+      return { fields, event: { actor: accountId, kind, reason: role, details: { ...seen(), ...(choice ? { interruptRunning } : {}), ...details } } };
     });
     return viewOf(updated, role);
   }
@@ -605,7 +622,7 @@ export function createIntegrationService({
     const pausedBy = entry.status === "paused" && PAUSED_BY.includes(entry.pausedBy) ? entry.pausedBy : null;
     if (!event && row.state === "paused" && entry.status === "paused" && entry.pausedBy !== undefined && pausedBy !== row.pausedBy) fields.pausedBy = pausedBy;
     const settings = Object.keys(fields);
-    if (event) Object.assign(fields, step(row, event[0], 0), { pausedBy: event[0] === "pause" ? pausedBy : null });
+    if (event) Object.assign(fields, step(row, event[0], 0), { pausedBy: event[0] === "pause" ? pausedBy : null }, event[0] === "revoke" ? { revokedAt: now() } : {});
     return { fields, event, settings };
   }
 
@@ -835,7 +852,15 @@ export function createIntegrationService({
     },
 
     pause: (accountId, id) => stop(accountId, id, "pause"),
-    revoke: (accountId, id) => stop(accountId, id, "revoke"),
+    // `interruptRunning` is read only with the setting on, where it is required (D29).
+    revoke: (accountId, id, { interruptRunning } = {}) => stop(accountId, id, "revoke", { interruptRunning }),
+
+    // Astation's revoke, for the owner's own integrations only, as approve is (the setting on only): recorded with the
+    // app as the client.
+    async revokeNative(accountId, id, { interruptRunning, clientId } = {}) {
+      if (!delegatedHostWork) throw notFound();
+      return stop(accountId, id, "revoke", { interruptRunning, ownerOnly: true, details: { clientId } });
+    },
 
     // The owner only, never while Agora.Build has the owner's account disabled, and never out of an Agora.Build admin's
     // pause, which only an admin lifts on the admin site. Auth holds the lock too: its own 409 admin_paused means the
@@ -961,12 +986,14 @@ export function createIntegrationService({
         // Agora.Build's changes say only that: the admin and their reason stay in the Portal's event (spec §3.3.4).
         const masked = Object.hasOwn(OWNER_EVENTS, kind);
         const change = { id, at: when, integrationId, kind: masked ? OWNER_EVENTS[kind] : kind, state, reason: masked || details?.admin === true ? AGORA_BUILD : reason };
+        // A revocation recorded without the choice (before the setting) means "don't interrupt".
+        if (delegatedHostWork && kind === "integration_revoked") change.interruptRunning = details?.interruptRunning === true;
         const row = integrationId ? current.get(integrationId) : null;
-        if (row) change.integration = feedIntegration(row, at);
+        if (row) change.integration = feedIntegration(row, at, delegatedHostWork);
         return change;
       });
       const answer = { changes, cursor: events.length ? events.at(-1).id : cursor };
-      if (cursor === 0) answer.integrations = rows.map((row) => ({ id: row.id, ...feedIntegration(row, at) }));
+      if (cursor === 0) answer.integrations = rows.map((row) => ({ id: row.id, ...feedIntegration(row, at, delegatedHostWork) }));
       return answer;
     },
 
