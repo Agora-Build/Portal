@@ -12,6 +12,8 @@ import { createIntegrationService } from "./service.mjs";
 const ID = "[A-Za-z0-9_-]{1,64}";
 const STATION = new RegExp("^/api/stations/(" + ID + ")(?:/(members|read-token)(?:/([^/]+))?)?$");
 const INTEGRATION = new RegExp("^/api/integrations/(" + ID + ")/(keys|pause|resume|revoke|renew|settings|events|approval)$");
+// Interrupt running tasks (D29): added by the browser session after a revocation; the setting on only.
+const INTERRUPT = new RegExp("^/api/integrations/(" + ID + ")/interrupt$");
 const PARTITION_INTERVAL = 3600000;
 // After a built-in Station sync: the next one an hour later, or a minute later when it failed (Auth unreachable).
 const BUILT_IN_SYNC_AFTER = { ok: 3600000, failed: 60000 };
@@ -183,6 +185,8 @@ export async function handleIntegrations({ path, method, url, read, service, cal
     }
     return null;
   }
+  const interrupt = delegatedHostWork && method === "POST" ? INTERRUPT.exec(path) : null;
+  if (interrupt) return ok(await service.interrupt(changing(await portalUser()), interrupt[1]));
   if (!integration) return null;
   const [, id, action] = integration;
   if (action === "events") return method === "GET" ? ok(await service.history(await portalUser(), id)) : null;

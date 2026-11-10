@@ -584,12 +584,12 @@ export function createIntegrationService({
   // by role from an Auth without the admin pause lock. A revocation clears it, and is dated (revokedAt) whatever the
   // setting. With the setting on a revocation must say whether to interrupt the tasks running on the owner's hosts
   // (D29): that is checked first, so a malformed call is refused the same for everyone, and it goes to Auth, the row
-  // and the event. `details` is added to the event's; `ownerOnly` refuses the Station's owner (404), as approval does.
-  async function stop(accountId, id, event, { interruptRunning, details, ownerOnly = false } = {}) {
+  // and the event. `details` is added to the event's; `mineOnly` refuses the Station's owner (404), as approval does.
+  async function stop(accountId, id, event, { interruptRunning, details, mineOnly = false } = {}) {
     const choice = delegatedHostWork && event === "revoke";
     if (choice && typeof interruptRunning !== "boolean") throw interruptRunningRequired();
     const { row, role } = await visible(accountId, id);
-    if (ownerOnly && role !== "owner") throw notFound();
+    if (mineOnly && role !== "owner") throw notFound();
     // Shown as paused (its owner's account disabled): a pause is refused as for any paused integration, before Auth.
     step(shownPaused(row) ? { ...row, state: "paused", resumeState: row.state } : row, event, now());
     if (event === "revoke" && STOPPED.includes(row.state)) return viewOf(row, role);
@@ -859,7 +859,26 @@ export function createIntegrationService({
     // app as the client.
     async revokeNative(accountId, id, { interruptRunning, clientId } = {}) {
       if (!delegatedHostWork) throw notFound();
-      return stop(accountId, id, "revoke", { interruptRunning, ownerOnly: true, details: { clientId } });
+      return stop(accountId, id, "revoke", { interruptRunning, mineOnly: true, details: { clientId } });
+    },
+
+    // Interrupt running tasks (D29): within 24 hours of the revocation, the owner or the custom Station's owner adds the
+    // interrupt they didn't ask for at first. The Portal's own record (Auth is not asked), pushed to the Station; once
+    // made it can't be undone, and asking again, even after the 24 hours, answers the same and changes nothing. The
+    // setting on only.
+    async interrupt(accountId, id) {
+      if (!delegatedHostWork) throw notFound();
+      const { row, role } = await visible(accountId, id);
+      // True when there is something to record. A row that was never dated (revoked before revokedAt) is too late.
+      const check = (current) => {
+        if (!STOPPED.includes(current.state)) throw failure(409, "Only a revoked integration's running tasks can be interrupted.", "invalid_state");
+        if (current.interruptRunning) return false;
+        if (!current.revokedAt || now() - Date.parse(current.revokedAt) > DAY) throw failure(409, "Running tasks can be interrupted only within 24 hours of the revocation.", "too_late");
+        return true;
+      };
+      if (!check(row)) return viewOf(row, role);
+      const updated = await commit(id, (current) => check(current) ? { fields: { interruptRunning: true }, event: { actor: accountId, kind: "integration_interrupt_requested", reason: role, details: { interruptRunning: true } } } : null);
+      return viewOf(updated, role);
     },
 
     // The owner only, never while Agora.Build has the owner's account disabled, and never out of an Agora.Build admin's
@@ -965,8 +984,9 @@ export function createIntegrationService({
         if (error.details?.code === "invalid_state" && shownPaused(row)) throw failure(409, "This integration is paused and cannot take that action.", "invalid_state");
         throw error;
       }
-      // As in its feed, the Station is not told who paused an integration.
-      const { role, pausedBy, ...view } = integrationView(updated, null, station.origin);
+      // As in its feed, the Station is not told who paused an integration, nor (the setting on, D29) when it was revoked
+      // or whether that interrupts running tasks: the feed says the latter, and the report answer stays as it is today.
+      const { role, pausedBy, revokedAt, interruptRunning, ...view } = integrationView(updated, null, station.origin);
       return view;
     },
 
@@ -986,8 +1006,9 @@ export function createIntegrationService({
         // Agora.Build's changes say only that: the admin and their reason stay in the Portal's event (spec §3.3.4).
         const masked = Object.hasOwn(OWNER_EVENTS, kind);
         const change = { id, at: when, integrationId, kind: masked ? OWNER_EVENTS[kind] : kind, state, reason: masked || details?.admin === true ? AGORA_BUILD : reason };
-        // A revocation recorded without the choice (before the setting) means "don't interrupt".
+        // A revocation recorded without the choice (before the setting) means "don't interrupt"; the later interrupt is one.
         if (delegatedHostWork && kind === "integration_revoked") change.interruptRunning = details?.interruptRunning === true;
+        if (delegatedHostWork && kind === "integration_interrupt_requested") change.interruptRunning = true;
         const row = integrationId ? current.get(integrationId) : null;
         if (row) change.integration = feedIntegration(row, at, delegatedHostWork);
         return change;

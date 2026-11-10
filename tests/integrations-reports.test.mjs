@@ -384,3 +384,57 @@ test("with the setting off, the Station's feed has no interruptRunning anywhere"
   assert.deepEqual(Object.keys(revoked.integration).sort(), ["expiresAt", "ownerAccount", "quotaPerSecond", "r9Svc", "scopes", "state"]);
   assert.deepEqual(Object.keys(feed.integrations[0]).sort(), ["expiresAt", "id", "ownerAccount", "quotaPerSecond", "r9Svc", "scopes", "state"]);
 });
+
+// D29: the later "interrupt running tasks" is a change in the Station's feed, pushed like the others.
+test("with the setting on, an interrupt is pushed and is a feed change with interruptRunning: true, its integration carrying it too", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  await s.service.share(OWNER, s.station.id, MEMBER);
+  const mine = await s.approved();
+  const theirs = await s.approved(MEMBER);
+  await s.service.revoke(OWNER, mine, { interruptRunning: false });
+  await s.service.revoke(MEMBER, theirs, { interruptRunning: false });
+  await s.service._pushesIdle();
+  s.pushFetch.posts.length = 0;
+  s.clock.now += 3600000;
+  await s.service.interrupt(OWNER, mine);
+  await s.service.interrupt(OWNER, theirs);
+  await s.service.interrupt(OWNER, theirs);
+  await s.service._pushesIdle();
+  assert.ok(s.pushFetch.posts.length >= 1, "the Station is told");
+  assert.ok(s.pushFetch.posts.every((post) => post.url === "https://one.example/agora-build/v1/changes"));
+  assert.deepEqual(s.pushFetch.posts.at(-1).body, { cursor: await s.repository.latestCursor(s.station.id) });
+
+  const feed = await s.service.changes(client, 0);
+  const interrupts = feed.changes.filter((change) => change.kind === "integration_interrupt_requested");
+  assert.deepEqual(interrupts.map((change) => [change.integrationId, change.state, change.reason, change.interruptRunning]), [[mine, "revoking", "owner", true], [theirs, "revoking", "station_owner", true]], "one each: the repeat wrote none");
+  for (const change of interrupts) {
+    assert.deepEqual(Object.keys(change).sort(), ["at", "id", "integration", "integrationId", "interruptRunning", "kind", "reason", "state"]);
+    assert.deepEqual([change.integration.state, change.integration.interruptRunning], ["revoking", true]);
+  }
+  assert.deepEqual(feed.integrations.filter((entry) => [mine, theirs].includes(entry.id)).map((entry) => entry.interruptRunning), [true, true]);
+  // The revocations' own changes still say what was chosen then; the integration they carry is as it is now.
+  const revoked = feed.changes.filter((change) => change.kind === "integration_revoked");
+  assert.deepEqual(revoked.map((change) => [change.interruptRunning, change.integration.interruptRunning]), [[false, true], [false, true]]);
+  // Read from after the revocations, the cursor carries the interrupts alone.
+  const later = await s.service.changes(client, String(revoked.at(-1).id));
+  assert.deepEqual(later.changes.map((change) => change.kind), ["integration_interrupt_requested", "integration_interrupt_requested"]);
+});
+
+test("with the setting on, a Station's report answer stays as it is today: no revokedAt or interruptRunning", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const id = await s.approved();
+  await s.service.report(client, { integrationId: id, state: "ready" });
+  await s.service.revoke(OWNER, id, { interruptRunning: true });
+  const keys = ["approvedAt", "createdAt", "expiresAt", "id", "kind", "lastError", "name", "pausedFrom", "quotaPerSecond", "r9Svc", "scopes", "state", "stationId", "stationOrigin"];
+  const errored = await s.service.report(client, { integrationId: id, state: "error", reason: "R9 host unreachable" });
+  assert.deepEqual([errored.state, Object.keys(errored).sort()], ["revoking", keys], "an error on a revoking integration");
+  const revoked = await s.service.report(client, { integrationId: id, state: "revoked" });
+  assert.deepEqual([revoked.state, Object.keys(revoked).sort()], ["revoked", keys], "its revoked report");
+  // The owner's own view of the same row has them, which is where the page reads them.
+  const own = (await s.service.integrations(OWNER)).integrations.find((entry) => entry.id === id);
+  assert.deepEqual([own.interruptRunning, typeof own.revokedAt], [true, "string"]);
+});
