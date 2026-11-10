@@ -116,6 +116,8 @@ export function createAppServer(directory = root, options = {}) {
   // Behind a proxy that appends X-Forwarded-For (TRUST_PROXY=1), the client is the last hop, the one that proxy added;
   // anything before it is client-supplied. Otherwise it is the socket address. Every IP-keyed limit uses this.
   const trustProxy = (options.trustProxy ?? process.env.TRUST_PROXY) === "1";
+  // Delegated host work (D29), off by default: the same variable the integration service reads (integrationsFromEnv).
+  const delegatedHostWork = (options.delegatedHostWork ?? process.env.DELEGATED_HOST_WORK) === "1";
   const clientAddress = (request) => (trustProxy && String(request.headers["x-forwarded-for"] || "").split(",").map((hop) => hop.trim()).filter(Boolean).at(-1)) || request.socket.remoteAddress;
   // Platform billing clients and their server-side prices; null turns platform billing off.
   const billingClients = "billingClients" in options ? (options.billingClients && parseBillingClients(options.billingClients)) : loadBillingClients(process.env.PORTAL_BILLING_FILE, log);
@@ -347,7 +349,7 @@ export function createAppServer(directory = root, options = {}) {
         else if (path === "/api/me" && request.method === "GET") {
           // The email is shown only to the browser session; bearer callers get the account without it.
           if (caller) { const { email, ...account } = caller.account; json(response, 200, { profile: await store.accountProfile(caller.sub), account }); }
-          else json(response, 200, { ...await store.session(token), integrationsAvailable: Boolean(integrations) });
+          else json(response, 200, { ...await store.session(token), integrationsAvailable: Boolean(integrations), ...(delegatedHostWork ? { delegatedHostWork: true } : {}) });
         }
         else if (path === "/api/auth/config" && request.method === "GET") json(response, 200, { issuer: idp?.config.issuer || null, accountUrl: idp?.config.accountUrl || null });
         else if (path === "/api/billing/catalog" && request.method === "GET") json(response, 200, await billing.catalog());
@@ -453,7 +455,7 @@ export function createAppServer(directory = root, options = {}) {
           json(response, 200, { result: await scan(person) });
         } else if (path === "/api/rooms" || path.startsWith("/api/rooms/")) throw new AppError(410, "Meeting rooms are now Stoa spaces. Start one from the Stoa.");
         else if (integrationPath(path)) {
-          const handled = await handleIntegrations({ path, method: request.method, url: requestUrl, read: () => body(request), service: integrations && await integrations.ready(), caller, scoped, invalidToken, portalUser, idToken: () => store.sessionIdToken(token), limit, planOf });
+          const handled = await handleIntegrations({ path, method: request.method, url: requestUrl, read: () => body(request), service: integrations && await integrations.ready(), caller, scoped, invalidToken, portalUser, idToken: () => store.sessionIdToken(token), limit, planOf, delegatedHostWork });
           if (!handled) throw new AppError(404, "This page or service was not found.");
           json(response, handled.status, handled.body);
         } else {

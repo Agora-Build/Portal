@@ -32,14 +32,14 @@ export const readyIntegrations = (service, nudge = () => {}) => ({ service, read
 // The service over `db`. ready() migrates and creates the event partitions before the first request, once; a failure
 // answers 503 and the next request tries again. The partitions are then kept up hourly. `stationFetch` (proof of
 // control), `pushFetch` (change nudges), `builtInSyncAfter` and `authChanges` (the timing of the reader of Auth's
-// change feed) are only given by tests; production uses the defaults.
-export function createIntegrationStack({ db, manage, idp, log, stationFetch = createStationFetch(), pushFetch, builtInSyncAfter = BUILT_IN_SYNC_AFTER, authChanges = AUTH_CHANGES }) {
+// change feed) are only given by tests; production uses the defaults. `delegatedHostWork` is DELEGATED_HOST_WORK=1 (D29).
+export function createIntegrationStack({ db, manage, idp, log, stationFetch = createStationFetch(), pushFetch, builtInSyncAfter = BUILT_IN_SYNC_AFTER, authChanges = AUTH_CHANGES, delegatedHostWork = false }) {
   const exchange = (idToken, origin) => idp ? idp.exchangeForStation(idToken, origin) : Promise.reject(new TokenError(503, "unavailable"));
   const repository = createRepository(db);
   // Auth's change feed (spec §3.3.4, D26): read once the stack is ready, then after every nudge from Auth, every 30
   // seconds, and when Auth answers 409 admin_paused to a resume (it changed something the Portal has not read yet).
   let feed = null;
-  const service = createIntegrationService({ repository, db, manage, stationFetch, pushFetch, exchange, log, authChanged: () => feed?.request() });
+  const service = createIntegrationService({ repository, db, manage, stationFetch, pushFetch, exchange, log, authChanged: () => feed?.request(), delegatedHostWork });
   feed = createAuthChanges({ repository, manage, apply: (change) => service.applyAuthChange(change), log, settings: authChanges });
   let pending = null;
   let prepared = false;
@@ -106,13 +106,14 @@ export function integrationsFromEnv(env, { idp, log, stationFetch, pushFetch, au
     log("Stations and integrations are unavailable: " + (error instanceof TypeError ? error.message : "their settings are invalid") + ".");
     return null;
   }
-  return createIntegrationStack({ db: createDatabase(env.DATABASE_URL, { log }), manage, idp, log, stationFetch, pushFetch, authChanges });
+  return createIntegrationStack({ db: createDatabase(env.DATABASE_URL, { log }), manage, idp, log, stationFetch, pushFetch, authChanges, delegatedHostWork: env.DELEGATED_HOST_WORK === "1" });
 }
 
 // Maps HTTP requests to the integration service. Returns null when the request is not an integration route. `caller`
 // is the verified bearer (only ever on the v1 routes; serve.mjs refuses it elsewhere), `scoped(scope)` checks its scope
-// and returns its account, and `idToken()` reads the browser session's ID token.
-export async function handleIntegrations({ path, method, url, read, service, caller, scoped, invalidToken, portalUser, idToken, limit, planOf = async () => "basic" }) {
+// and returns its account, and `idToken()` reads the browser session's ID token. `delegatedHostWork` (D29) is read by
+// serve.mjs as the service reads it: off by default, and off is today's routes and bodies.
+export async function handleIntegrations({ path, method, url, read, service, caller, scoped, invalidToken, portalUser, idToken, limit, planOf = async () => "basic", delegatedHostWork = false }) {
   if (!integrationPath(path)) return null;
   if (!service) throw new AppError(503, "Stations and integrations need the Portal database.");
   const ok = (body) => ({ status: 200, body });

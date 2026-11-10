@@ -65,6 +65,7 @@ async function start(t, options = {}) {
     ...("integrationStack" in options ? { integrationStack: options.integrationStack } : {}),
     ...("integrationRetryMs" in options ? { integrationRetryMs: options.integrationRetryMs } : {}),
     ...("trustProxy" in options ? { trustProxy: options.trustProxy } : {}),
+    ...("delegatedHostWork" in options ? { delegatedHostWork: options.delegatedHostWork } : {}),
     ...(options.log ? { log: (line) => { logs.push(line); options.log(line); } } : {})
   });
   await new Promise((done) => instance.listen(0, "127.0.0.1", done));
@@ -136,6 +137,23 @@ test("without the Portal database every Stations and integrations route answers 
   const bearer = await app.fake.issueAccessToken({ scope: "integrations:read" });
   assert.equal((await call(app.base, "/api/v1/integrations", { bearer })).status, 503);
   assert.equal((await (await call(app.base, "/api/me", { cookie })).json()).integrationsAvailable, false);
+});
+
+test("/api/me names delegatedHostWork only when it is on: DELEGATED_HOST_WORK=1, or the option; any other value is off", async (t) => {
+  const meOf = async (app) => (await call(app.base, "/api/me", { cookie: (await signIn(app)).cookie })).json();
+  const off = await meOf(await start(t));
+  assert.equal("delegatedHostWork" in off, false, "off by default: the /api/me shape is unchanged");
+  assert.equal(off.integrationsAvailable, false);
+  for (const value of ["0", "true", "", "2", " 1"]) assert.equal("delegatedHostWork" in await meOf(await start(t, { delegatedHostWork: value })), false, JSON.stringify(value));
+  const on = await start(t, { delegatedHostWork: "1" });
+  assert.equal((await meOf(on)).delegatedHostWork, true);
+  const bearer = await on.fake.issueAccessToken({ sub: accountId(), scope: "credits" });
+  assert.equal("delegatedHostWork" in await (await call(on.base, "/api/v1/me", { bearer })).json(), false, "the bearer /api/me shape is unchanged");
+  const saved = process.env.DELEGATED_HOST_WORK;
+  t.after(() => { if (saved === undefined) delete process.env.DELEGATED_HOST_WORK; else process.env.DELEGATED_HOST_WORK = saved; });
+  process.env.DELEGATED_HOST_WORK = "1";
+  assert.equal((await meOf(await start(t))).delegatedHostWork, true, "the environment, when the option is absent");
+  assert.equal("delegatedHostWork" in await meOf(await start(t, { delegatedHostWork: "0" })), false, "the option wins over the environment");
 });
 
 test("missing Auth settings leave the integrations unavailable, logged once by setting name", () => {

@@ -9,10 +9,10 @@ test("migrate applies each migration once, even when two instances race", async 
   const first = open();
   const second = open();
   const results = await Promise.all([first.migrate(), second.migrate()]);
-  assert.deepEqual(results.flat(), ["001_integrations.sql", "002_built_in_stations.sql", "003_auth_changes.sql"]);
+  assert.deepEqual(results.flat(), ["001_integrations.sql", "002_built_in_stations.sql", "003_auth_changes.sql", "004_delegated_host_work.sql"]);
   assert.deepEqual(await first.migrate(), []);
   const { rows } = await first.pool.query("SELECT version FROM portal_migrations");
-  assert.deepEqual(rows.map((row) => row.version), ["001_integrations.sql", "002_built_in_stations.sql", "003_auth_changes.sql"]);
+  assert.deepEqual(rows.map((row) => row.version), ["001_integrations.sql", "002_built_in_stations.sql", "003_auth_changes.sql", "004_delegated_host_work.sql"]);
 });
 
 test("migration 002 leaves an existing database's custom Stations, integrations and events as they were", async (t) => {
@@ -38,7 +38,7 @@ test("migration 002 leaves an existing database's custom Stations, integrations 
     events: (await db.pool.query("SELECT * FROM integration_events ORDER BY id")).rows
   });
   const before = await snapshot();
-  assert.deepEqual(await db.migrate(), ["002_built_in_stations.sql", "003_auth_changes.sql"]);
+  assert.deepEqual(await db.migrate(), ["002_built_in_stations.sql", "003_auth_changes.sql", "004_delegated_host_work.sql"]);
   assert.deepEqual(await snapshot(), before);
   const { rows: [row] } = await db.pool.query("SELECT owner_account, status, built_in, access, integrations_enabled, name FROM stations WHERE id = 'st1'");
   assert.deepEqual(row, { owner_account: "ab1", status: "active", built_in: false, access: "members", integrations_enabled: true, name: null });
@@ -114,10 +114,11 @@ test("migration 003 adds who paused and when the owner was disabled, keeps every
   await db.pool.query("INSERT INTO integration_events (at, station_id, integration_id, account_id, actor, kind, state) VALUES ('2026-10-03T00:00:00Z', 'st1', 'i-1', 'ab1', 'ab1', 'integration_paused', 'paused')");
   const integrations = (await db.pool.query("SELECT * FROM integrations")).rows;
   const events = (await db.pool.query("SELECT * FROM integration_events")).rows;
-  assert.deepEqual(await db.migrate(), ["003_auth_changes.sql"]);
+  assert.deepEqual(await db.migrate(), ["003_auth_changes.sql", "004_delegated_host_work.sql"]);
   const after = (await db.pool.query("SELECT * FROM integrations")).rows;
-  assert.deepEqual(after.map(({ paused_by, owner_disabled_at, ...rest }) => rest), integrations);
+  assert.deepEqual(after.map(({ paused_by, owner_disabled_at, revoked_at, interrupt_running, ...rest }) => rest), integrations);
   assert.deepEqual(after.map((row) => [row.paused_by, row.owner_disabled_at]), [[null, null]], "a pause from before 003 names nobody");
+  assert.deepEqual(after.map((row) => [row.revoked_at, row.interrupt_running]), [[null, false]], "004 leaves no revocation time and no interrupt choice on an existing integration");
   assert.deepEqual((await db.pool.query("SELECT * FROM integration_events")).rows, events);
   assert.deepEqual((await db.pool.query("SELECT id, cursor FROM auth_change_feed")).rows, [{ id: true, cursor: null }]);
   await assert.rejects(db.pool.query("UPDATE integrations SET paused_by = 'someone'"), { code: "23514" });

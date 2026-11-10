@@ -10,7 +10,9 @@ const updatable = {
   approvedAt: "approved_at",
   lastError: "last_error",
   pausedBy: "paused_by",
-  ownerDisabledAt: "owner_disabled_at"
+  ownerDisabledAt: "owner_disabled_at",
+  revokedAt: "revoked_at",
+  interruptRunning: "interrupt_running"
 };
 
 function iso(value) {
@@ -68,6 +70,8 @@ function integrationRow(row) {
     lastError: row.last_error,
     pausedBy: row.paused_by ?? null,
     ownerDisabledAt: iso(row.owner_disabled_at) ?? null,
+    revokedAt: iso(row.revoked_at) ?? null,
+    interruptRunning: row.interrupt_running === true,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at)
   };
@@ -78,6 +82,7 @@ function eventRow(row) {
     id: Number(row.id),
     at: iso(row.at),
     integrationId: row.integration_id,
+    accountId: row.account_id,
     kind: row.kind,
     state: row.state,
     reason: row.reason,
@@ -215,9 +220,10 @@ export function createRepository(db) {
       const values = [id];
       for (const [key, value] of Object.entries(fields)) {
         if (!Object.hasOwn(updatable, key)) throw new TypeError("Cannot update integration field " + key + ".");
-        // when() reads undefined as now, and a set owner-disabled time makes Stations deny tokens: only on purpose.
-        if (key === "ownerDisabledAt" && value === undefined) throw new TypeError("ownerDisabledAt must be a time, or null to clear it.");
-        values.push(key === "expiresAt" || key === "approvedAt" || key === "ownerDisabledAt" ? (value === null ? null : when(value)) : value);
+        // when() reads undefined as now, and a set owner-disabled time makes Stations deny tokens, a set revocation time starts the
+        // interrupt window: only on purpose.
+        if ((key === "ownerDisabledAt" || key === "revokedAt") && value === undefined) throw new TypeError(key + " must be a time, or null to clear it.");
+        values.push(key === "expiresAt" || key === "approvedAt" || key === "ownerDisabledAt" || key === "revokedAt" ? (value === null ? null : when(value)) : value);
         assignments.push(updatable[key] + " = $" + values.length);
       }
       assignments.push("updated_at = now()");
@@ -242,7 +248,7 @@ export function createRepository(db) {
     },
 
     async changesSince(stationId, cursor, limit = 500, client) {
-      const { rows } = await run(client, "SELECT id, at, integration_id, kind, state, reason, details FROM integration_events WHERE station_id = $1 AND id > $2 ORDER BY id LIMIT $3", [stationId, cursorNumber(cursor), limit]);
+      const { rows } = await run(client, "SELECT id, at, integration_id, account_id, kind, state, reason, details FROM integration_events WHERE station_id = $1 AND id > $2 ORDER BY id LIMIT $3", [stationId, cursorNumber(cursor), limit]);
       return rows.map(eventRow);
     },
 
@@ -275,6 +281,18 @@ export function createRepository(db) {
     async authChangeApplied(integrationId, cursor, at, client) {
       const { rows } = await run(client, "SELECT 1 FROM integration_events WHERE integration_id = $1 AND details->>'authCursor' = $2 AND details->>'authAt' = $3 LIMIT 1", [integrationId, cursor, at]);
       return rows.length > 0;
+    },
+
+    // Whether an account-level entry of Auth's change feed was already recorded for this Station (service.applyAuthChange).
+    async accountChangeApplied(stationId, cursor, at, client) {
+      const { rows } = await run(client, "SELECT 1 FROM integration_events WHERE station_id = $1 AND integration_id IS NULL AND kind IN ('account_disabled', 'account_enabled') AND details->>'authCursor' = $2 AND details->>'authAt' = $3 LIMIT 1", [stationId, cursor, at]);
+      return rows.length > 0;
+    },
+
+    // The accounts whose latest account-level event on this Station is account_disabled: the cursor-0 snapshot.
+    async disabledAccounts(stationId, client) {
+      const { rows } = await run(client, "SELECT account_id FROM (SELECT DISTINCT ON (account_id) account_id, kind FROM integration_events WHERE station_id = $1 AND integration_id IS NULL AND kind IN ('account_disabled', 'account_enabled') ORDER BY account_id, id DESC) latest WHERE kind = 'account_disabled' ORDER BY account_id", [stationId]);
+      return rows.map((row) => row.account_id);
     },
 
     // The pauses, resumes and revocations recorded for the integration: { at, id }, both null when there is none.

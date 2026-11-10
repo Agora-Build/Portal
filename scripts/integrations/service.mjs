@@ -214,10 +214,12 @@ function authEffect(row, entry) {
   return { kind: "integration_owner_enabled", fields: row.ownerDisabledAt ? { ownerDisabledAt: null } : {} };
 }
 
-// authChanged() asks the stack to read Auth's change feed soon (a resume answered 409 admin_paused).
+// authChanged() asks the stack to read Auth's change feed soon (a resume answered 409 admin_paused). delegatedHostWork
+// (DELEGATED_HOST_WORK=1, D29) is off by default: off is today's behaviour.
 export function createIntegrationService({
   repository, db, manage, stationFetch, exchange, now = Date.now, log = () => {}, ids = randomUUID,
-  challengeValue = () => randomBytes(32).toString("base64url"), pushFetch = createStationFetch({ timeoutMs: 3000 }), notify, authChanged = () => {}
+  challengeValue = () => randomBytes(32).toString("base64url"), pushFetch = createStationFetch({ timeoutMs: 3000 }), notify, authChanged = () => {},
+  delegatedHostWork = false
 }) {
   // Every transaction here appends events, so each takes the event lock before any row lock (see lockEvents).
   const appending = (work) => db.transaction(async (client) => {
