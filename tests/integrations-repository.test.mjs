@@ -220,6 +220,9 @@ test("countLiveIntegrations counts one account's integrations on one Station tha
   assert.equal(await repo.countLiveIntegrations("st1", "ab1", NOW), 4, "awaiting, paused, revoking and the short one");
   assert.equal(await repo.countLiveIntegrations("st1", "ab1", later(2000)), 3, "i-5 has expired");
   assert.equal(await repo.countLiveIntegrations("st1", "ab2", NOW), 1);
+  // D29 Phase B: with the option a revoking integration no longer counts, since Auth has revoked it already.
+  assert.equal(await repo.countLiveIntegrations("st1", "ab1", NOW, undefined, { revokingHoldsPlace: false }), 3, "awaiting, paused and the short one");
+  assert.equal(await repo.countLiveIntegrations("st1", "ab1", NOW, undefined, { revokingHoldsPlace: true }), 4, "the default");
 });
 
 test("integrations carry who paused them and when Auth said their owner was disabled", async (t) => {

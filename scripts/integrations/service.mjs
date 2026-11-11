@@ -184,8 +184,9 @@ function reportReason(value) {
 
 // A report's body: only integrationId, state and reason; `error` needs a reason, any other report may carry one. With the
 // setting on (`delegated`, D29 Phase B) a report with a reportId is one of the two revocation reports, validated in this
-// order: its shape, the state, the reportId, then the kind's fields. What comes back is the normalised report, which is
-// also what is kept and compared when the same reportId comes again.
+// order: its shape (which fields may come together, and with which state), the state, the reportId, then the kind's
+// fields. What comes back is the normalised report, which is also what is kept and compared when the same reportId
+// comes again.
 function reportBody(body, { delegated = false } = {}) {
   const forms = () => failure(400, delegated ? DELEGATED_REPORT_FORMS : REPORT_FORM, "report");
   if (!plainObject(body) || Object.keys(body).some((key) => !(delegated ? DELEGATED_REPORT_FIELDS : REPORT_FIELDS).includes(key))) throw forms();
@@ -195,6 +196,9 @@ function reportBody(body, { delegated = false } = {}) {
   if (delegated && (reportId === undefined ? given([...APPLIED_FIELDS, ...FINAL_FIELDS]) : reason !== undefined || (given(APPLIED_FIELDS) && given(FINAL_FIELDS)))) throw forms();
   const states = delegated ? [...REPORT_STATES, "revocation_applied"] : REPORT_STATES;
   if (state !== "error" && !states.includes(state)) throw failure(400, "Report a state of " + [...states, "error"].join(", ") + ".", "state");
+  // The state is known, so the fields must fit it (the early check above caught what no state allows): a per-host report
+  // carries no final's fields, a final no per-host fields, and any other report no reportId.
+  if (delegated && (state === "revocation_applied" ? given(FINAL_FIELDS) : state === "revoked" ? given(APPLIED_FIELDS) : reportId !== undefined)) throw forms();
   if (!delegated || (reportId === undefined && state !== "revocation_applied")) {
     if (state === "error" || reason !== undefined) reportReason(reason);
     return { integrationId, state, reason: reason ?? null };
@@ -202,12 +206,10 @@ function reportBody(body, { delegated = false } = {}) {
   if (typeof reportId !== "string" || !ID_GRAMMAR.test(reportId)) throw reportIdInvalid();
   if (state === "revocation_applied") {
     const { host, recordId } = body;
-    if (given(FINAL_FIELDS)) throw forms();
     if (typeof host !== "string" || !ID_GRAMMAR.test(host)) throw hostInvalid();
     if (typeof recordId !== "string" || !RECORD_ID.test(recordId)) throw recordIdInvalid();
     return { integrationId, state, reportId, host, recordId };
   }
-  if (state !== "revoked" || given(APPLIED_FIELDS)) throw forms();
   const { outcome } = body;
   if (!OUTCOMES.includes(outcome) || !Array.isArray(body.pendingHosts)) throw outcomeInvalid();
   const pendingHosts = [...body.pendingHosts];
@@ -319,11 +321,12 @@ export function createIntegrationService({
     return run;
   }
 
-  // Refuses at the plan limit, counting the account's live integrations on a built-in Station. Call it inside
-  // oneAtATime for that account and Station.
+  // Refuses at the plan limit, counting the account's live integrations on a built-in Station. With the setting on
+  // (D29 Phase B) a revoking one isn't live: Auth has revoked it already, and it may wait a day or more for its
+  // Station's final report. Call it inside oneAtATime for that account and Station.
   async function underPlanLimit(accountId, stationId, plan) {
     const limit = builtInIntegrationLimit(plan);
-    if (limit !== null && await repository.countLiveIntegrations(stationId, accountId, now()) >= limit) {
+    if (limit !== null && await repository.countLiveIntegrations(stationId, accountId, now(), undefined, { revokingHoldsPlace: !delegatedHostWork }) >= limit) {
       throw failure(403, "Your plan allows " + limit + " integrations on the built-in Station. Revoke one, upgrade, or use your own Station.", "plan_limit", { limit });
     }
   }

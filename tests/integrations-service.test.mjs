@@ -466,6 +466,50 @@ test("plan limits on the built-in Station: Basic 4, Premium 10, Principal and Fe
   assert.equal((await onBuiltIn(s, built, MEMBER, "basic")).role, "owner", "each account counts its own");
 });
 
+// D29 Phase B: Auth has already revoked a `revoking` integration and issues it no token, but it can stay `revoking` for
+// 24 hours or more, until its Station sends the final report. With the setting on it no longer holds a plan place;
+// with it off it does, as it always has.
+for (const delegated of [true, false]) {
+  test("plan limits: a revoking integration " + (delegated ? "frees its place at once with the setting on" : "still holds its place with the setting off"), async (t) => {
+    const s = await setup(t, { delegatedHostWork: delegated });
+    if (!s) return;
+    const built = await builtIn(s);
+    const refusedAtLimit = (label) => assert.rejects(onBuiltIn(s, built, OWNER, "basic"), refused(403, "plan_limit"), label);
+    const revoke = async (id) => {
+      await s.repository.updateIntegration(id, { state: "ready" });
+      return s.service.revoke(OWNER, id, delegated ? { interruptRunning: false } : undefined);
+    };
+    // Creation: four live ones fill Basic.
+    const ids = [];
+    for (let i = 0; i < 4; i += 1) ids.push((await onBuiltIn(s, built, OWNER, "basic")).id);
+    await refusedAtLimit("at the limit");
+    assert.equal((await revoke(ids[0])).state, "revoking", "the Station has not confirmed");
+    if (delegated) {
+      ids.push((await onBuiltIn(s, built, OWNER, "basic")).id);
+      await refusedAtLimit("four live ones again");
+    } else {
+      await refusedAtLimit("a revoking one counts");
+    }
+    // The final report moves it to revoked, which frees the place either way.
+    await s.repository.updateIntegration(ids[0], { state: "revoked" });
+    if (!delegated) ids.push((await onBuiltIn(s, built, OWNER, "basic")).id);
+    await refusedAtLimit("a revoked one never counts");
+    // Renewal: an expired one renewing counts as a creation, so a revoking one frees its place there too.
+    const separate = MEMBER;
+    const old = (await onBuiltIn(s, built, separate, "basic", { expiresInDays: 1 })).id;
+    s.clock.now += 2 * DAY;
+    const fresh = [];
+    for (let i = 0; i < 4; i += 1) fresh.push((await onBuiltIn(s, built, separate, "basic")).id);
+    await s.repository.updateIntegration(fresh[0], { state: "ready" });
+    assert.equal((await s.service.revoke(separate, fresh[0], delegated ? { interruptRunning: false } : undefined)).state, "revoking");
+    if (delegated) {
+      assert.equal((await s.service.renew(separate, old, { expiresInDays: 30 }, { plan: "basic" })).state, "awaiting_approval", "the revoking one's place goes to the renewal");
+    } else {
+      await assert.rejects(s.service.renew(separate, old, { expiresInDays: 30 }, { plan: "basic" }), refused(403, "plan_limit"), "a revoking one counts");
+    }
+  });
+}
+
 test("two creations racing on the built-in Station can't both pass the plan limit", async (t) => {
   const s = await setup(t);
   if (!s) return;

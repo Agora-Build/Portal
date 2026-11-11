@@ -550,6 +550,14 @@ test("with the setting on, the new reports are validated in order: shape, state,
     { integrationId: id, state: "revoked", outcome: "all_applied", pendingHosts: [] }, { integrationId: id, state: "ready", host: "laptop" }, { integrationId: id, state: "ready", reportId: REPORT_ID(3) },
     { integrationId: id, state: "error", reason: "x", reportId: REPORT_ID(3) }, { ...applied, host: undefined, outcome: "all_applied" }, null, [], "revoked"
   ]) await bad(body, "report", undefined, JSON.stringify(body));
+  // The shape comes before the reportId: a body that doesn't fit the state it names is 400 report, whatever its reportId.
+  for (const body of [
+    { integrationId: id, state: "ready", reportId: "bad id" }, { integrationId: id, state: "error", reportId: "bad id" },
+    { integrationId: id, state: "revoked", reportId: "bad id", host: "laptop" }, { integrationId: id, state: "revocation_applied", reportId: "bad id", outcome: "all_applied" },
+    { integrationId: id, state: "waiting_for_host", reportId: "bad id" }, { integrationId: id, state: "revoked", reportId: "bad id", recordId: RECORD_ID(1), outcome: "all_applied", pendingHosts: [] },
+    { integrationId: id, state: "revocation_applied", reportId: "bad id", host: "bad host", recordId: RECORD_ID(1), pendingHosts: [] },
+    { integrationId: id, state: "revocation_applied", reportId: "bad id", host: "laptop", reason: "done" }
+  ]) await bad(body, "report", undefined, "shape before reportId: " + JSON.stringify(body));
   await bad({ ...applied, state: "paused" }, "state");
   await bad({ ...applied, state: undefined }, "state");
   await bad({ integrationId: id, state: "revocation_applied" }, "report_id", REPORT_ID_MESSAGE, "the state is known: its reportId is missing");

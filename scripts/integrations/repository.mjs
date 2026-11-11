@@ -160,10 +160,12 @@ export function createRepository(db) {
     },
 
     // The account's integrations on a Station that count against a plan limit: every state but revoked, not expired.
-    async countLiveIntegrations(stationId, ownerAccount, now, client) {
+    // With revokingHoldsPlace false (the setting on, D29 Phase B) a revoking one doesn't count either: Auth has revoked
+    // it and issues it no token, though it may stay revoking for a day or more until its Station's final report.
+    async countLiveIntegrations(stationId, ownerAccount, now, client, { revokingHoldsPlace = true } = {}) {
       const { rows } = await run(client,
-        "SELECT count(*)::int AS n FROM integrations WHERE station_id = $1 AND owner_account = $2 AND state <> 'revoked' AND expires_at > $3",
-        [stationId, ownerAccount, when(now)]);
+        "SELECT count(*)::int AS n FROM integrations WHERE station_id = $1 AND owner_account = $2 AND state <> 'revoked' AND ($4 OR state <> 'revoking') AND expires_at > $3",
+        [stationId, ownerAccount, when(now), revokingHoldsPlace]);
       return rows[0].n;
     },
 
