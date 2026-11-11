@@ -32,7 +32,7 @@ const LOCKED_NOTE = "Agora.Build paused this integration. Only Agora.Build can r
 const INTERRUPT_CHOICE = "Also interrupt the tasks running on your hosts now?";
 const EXPIRY_NOTE = "Expiry stops new work and queries. Work already accepted on your hosts runs until its deadline, at most 24 hours. Revoke to cancel work that hasn't started.";
 const PAUSE_NOTE = "Paused: new work is refused, and accepted work that hasn't started waits. Work running now continues.";
-const INDIRECT_NOTE = "Tasks already running on hosts continue; you can interrupt them from each revoked integration within 24 hours.";
+const INDIRECT_NOTE = "Tasks already running on hosts continue. Within 24 hours, the owner of each revoked integration can still interrupt them.";
 const INTERRUPTED_NOTE = "Running tasks were interrupted.";
 const DAY = 24 * 60 * 60 * 1000;
 let me = null;
@@ -468,15 +468,16 @@ function integrationRow(integration) {
     revoke.addEventListener("click", () => confirmed(revoke, output, ["Revoke " + integration.name + "?", "The app loses access through this integration for good. This can't be undone.", "Revoke integration", ...(hostWork ? [INTERRUPT_CHOICE] : [])], () => change("revoke", hostWork ? { interruptRunning: document.querySelector("#integration-confirm-check").checked } : undefined)));
     actions.append(revoke);
   }
-  // Within 24 hours of a revocation that left running tasks alone, either role may still interrupt them.
+  const history = el("button", { class: "inline-link", type: "button", text: "History", "aria-haspopup": "dialog" });
+  history.addEventListener("click", () => openHistory(integration));
+  actions.append(history);
+  // Within 24 hours of a revocation that left running tasks alone, either role may still interrupt them. After History, so
+  // focus after a revoke (the row is re-rendered without Revoke) goes back to History, as before.
   if (hostWork && STOPPED.includes(state) && interruptible(integration)) {
     const interrupt = el("button", { class: "inline-link", type: "button", text: "Interrupt running tasks", "aria-haspopup": "dialog" });
     interrupt.addEventListener("click", () => confirmed(interrupt, output, ["Interrupt running tasks?", "Tasks from " + integration.name + " that are still running on the hosts are interrupted now. This can't be undone.", "Interrupt running tasks"], () => change("interrupt")));
     actions.append(interrupt);
   }
-  const history = el("button", { class: "inline-link", type: "button", text: "History", "aria-haspopup": "dialog" });
-  history.addEventListener("click", () => openHistory(integration));
-  actions.append(history);
   const panels = [];
   if (owner && !STOPPED.includes(state)) {
     panels.push(

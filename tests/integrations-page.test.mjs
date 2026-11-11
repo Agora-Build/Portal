@@ -149,7 +149,8 @@ test("with the setting on the page offers the revoke choice, Interrupt running t
   assert.ok(script.includes(exact("INTERRUPT_CHOICE", "Also interrupt the tasks running on your hosts now?")));
   assert.ok(script.includes(exact("EXPIRY_NOTE", "Expiry stops new work and queries. Work already accepted on your hosts runs until its deadline, at most 24 hours. Revoke to cancel work that hasn't started.")));
   assert.ok(script.includes(exact("PAUSE_NOTE", "Paused: new work is refused, and accepted work that hasn't started waits. Work running now continues.")));
-  assert.ok(script.includes(exact("INDIRECT_NOTE", "Tasks already running on hosts continue; you can interrupt them from each revoked integration within 24 hours.")));
+  // Not "from each revoked integration": after Remove Station its owner no longer sees the members' integrations.
+  assert.ok(script.includes(exact("INDIRECT_NOTE", "Tasks already running on hosts continue. Within 24 hours, the owner of each revoked integration can still interrupt them.")));
   assert.ok(script.includes(exact("INTERRUPTED_NOTE", "Running tasks were interrupted.")));
   // The checkbox sits in the confirmation before its form, hidden and unticked; the host-senders line follows the description.
   const checkbox = "<label id=\"integration-confirm-option\" class=\"checkbox-label\" hidden><input id=\"integration-confirm-check\" type=\"checkbox\"><span id=\"integration-confirm-option-text\"></span></label>";
@@ -173,6 +174,11 @@ test("with the setting on the page offers the revoke choice, Interrupt running t
   assert.match(script, /if \(hostWork && STOPPED\.includes\(state\) && interruptible\(integration\)\) \{/);
   assert.match(script, /el\("button", \{ class: "inline-link", type: "button", text: "Interrupt running tasks", "aria-haspopup": "dialog" \}\)/);
   assert.match(script, /confirmed\(interrupt, output, \["Interrupt running tasks\?", "Tasks from " \+ integration\.name \+ " that are still running on the hosts are interrupted now\. This can't be undone\.", "Interrupt running tasks"\], \(\) => change\("interrupt"\)\)/);
+  // The button comes after History in the row's actions, so focus after a revoke (the row is re-rendered without
+  // Revoke) goes back to History, the first control, as before.
+  const historyAt = script.indexOf("actions.append(history);");
+  assert.ok(historyAt > 0 && historyAt < script.indexOf("if (hostWork && STOPPED.includes(state) && interruptible(integration)) {"), "Interrupt running tasks comes after History");
+  assert.ok(script.indexOf("actions.append(interrupt);") > historyAt, "Interrupt running tasks is appended after History");
   // The 24-hour check is one named function, as the server's: a revokedAt of null (never dated) is too late.
   const day = script.match(/^const DAY = .*;$/m)?.[0] || "";
   const check = script.match(/^const interruptible = .*;$/m)?.[0] || "";
