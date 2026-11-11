@@ -227,6 +227,8 @@ export function createRepository(db) {
         // when() reads undefined as now, and a set owner-disabled time makes Stations deny tokens, a set revocation time starts the
         // interrupt window: only on purpose.
         if ((key === "ownerDisabledAt" || key === "revokedAt") && value === undefined) throw new TypeError(key + " must be a time, or null to clear it.");
+        // A silent null would clear a recorded final outcome or its list of hosts: only on purpose.
+        if ((key === "revocationOutcome" || key === "revocationPendingHosts") && value === undefined) throw new TypeError(key + " must be a value, or null to clear it.");
         // The pending hosts are jsonb: written as JSON, and null stays an SQL null (JSON.stringify would make it a JSON null).
         values.push(key === "expiresAt" || key === "approvedAt" || key === "ownerDisabledAt" || key === "revokedAt" ? (value === null ? null : when(value)) : key === "revocationPendingHosts" && value !== null ? JSON.stringify(value) : value);
         assignments.push(updatable[key] + " = $" + values.length);

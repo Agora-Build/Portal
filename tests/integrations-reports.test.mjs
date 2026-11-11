@@ -438,3 +438,324 @@ test("with the setting on, a Station's report answer stays as it is today: no re
   const own = (await s.service.integrations(OWNER)).integrations.find((entry) => entry.id === id);
   assert.deepEqual([own.interruptRunning, typeof own.revokedAt], [true, "string"]);
 });
+
+// D29 Phase B: a Station's two revocation reports, idempotent by their reportId (the setting on: delegatedHostWork).
+const REPORT_ID = (n) => "rep:" + n.toString(16).padStart(64, "0");
+const RECORD_ID = (n) => "0f8a1b2c-3d4e-4f50-8a6b-" + n.toString(16).padStart(12, "0");
+const appliedReport = (integrationId, n, host = "laptop") => ({ integrationId, state: "revocation_applied", reportId: REPORT_ID(n), host, recordId: RECORD_ID(n) });
+const finalReport = (integrationId, n, outcome = "all_applied", pendingHosts = []) => ({ integrationId, state: "revoked", reportId: REPORT_ID(n), outcome, pendingHosts });
+const ANSWER_KEYS = ["approvedAt", "createdAt", "expiresAt", "id", "kind", "lastError", "name", "pausedFrom", "quotaPerSecond", "r9Svc", "scopes", "state", "stationId", "stationOrigin"];
+const NOT_REVOKED = "This integration isn't revoked.";
+const FINAL_ALREADY = "This integration's revocation already has its final report.";
+const REUSED = "This reportId was already used for another report.";
+
+async function revoking(s, accountId = OWNER, stationId = s.station.id) {
+  const id = await s.approved(accountId, stationId);
+  await s.service.revoke(accountId, id, { interruptRunning: false });
+  return id;
+}
+const ownView = async (s, id, accountId = OWNER) => (await s.service.integrations(accountId)).integrations.find((entry) => entry.id === id);
+const savedReports = async (s) => (await s.db.pool.query("SELECT station_id, report_id, integration_id FROM station_reports ORDER BY report_id")).rows;
+const recordedHosts = async (s, id) => (await s.db.pool.query("SELECT host, record_id, report_id FROM revocation_hosts WHERE integration_id = $1 ORDER BY host", [id])).rows;
+
+test("with the setting on, revocation_applied records a host once, pushes nothing and answers as any report does", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const id = await revoking(s);
+  await s.service._pushesIdle();
+  s.pushFetch.posts.length = 0;
+  const events = (await s.db.pool.query("SELECT count(*)::int AS n FROM integration_events")).rows[0].n;
+
+  const first = await s.service.report(client, appliedReport(id, 1));
+  assert.deepEqual([first.state, Object.keys(first).sort()], ["revoking", ANSWER_KEYS], "the view the Station sees: no role, pausedBy, revokedAt, interruptRunning, stationRemoved or revocation");
+  assert.deepEqual((await ownView(s, id)).revocation, { appliedHosts: 1, outcome: null, unconfirmedHosts: null });
+  await s.service._pushesIdle();
+  assert.deepEqual(s.pushFetch.posts, [], "the reporting Station is not told");
+  assert.equal((await s.db.pool.query("SELECT count(*)::int AS n FROM integration_events")).rows[0].n, events, "no event");
+  assert.equal((await s.repository.integration(id)).state, "revoking", "no row change");
+
+  // The same id with the same body: the recorded answer, nothing new.
+  assert.deepEqual(await s.service.report(client, appliedReport(id, 1)), first);
+  assert.deepEqual([(await recordedHosts(s, id)).length, (await savedReports(s)).length], [1, 1]);
+  // The same id with another host: refused, and the first report stands.
+  await assert.rejects(s.service.report(client, appliedReport(id, 1, "desktop")), (error) => refused(409, "report_id_reused")(error) && error.message === REUSED);
+  assert.deepEqual((await recordedHosts(s, id)).map((row) => row.host), ["laptop"]);
+  assert.deepEqual(await s.service.report(client, appliedReport(id, 1)), first, "still answers the first");
+  // A second host counts; the same host under another id does not, but is recorded under its own id.
+  await s.service.report(client, appliedReport(id, 2, "desktop"));
+  assert.equal((await ownView(s, id)).revocation.appliedHosts, 2);
+  const again = await s.service.report(client, appliedReport(id, 3, "laptop"));
+  assert.equal(again.state, "revoking");
+  assert.equal((await ownView(s, id)).revocation.appliedHosts, 2, "counted once");
+  assert.deepEqual(await recordedHosts(s, id), [
+    { host: "desktop", record_id: RECORD_ID(2), report_id: REPORT_ID(2) },
+    { host: "laptop", record_id: RECORD_ID(1), report_id: REPORT_ID(1) }
+  ], "the first report for a host keeps its record and report ids");
+  assert.deepEqual((await savedReports(s)).map((row) => row.report_id), [REPORT_ID(1), REPORT_ID(2), REPORT_ID(3)], "the repeat is kept under its own id");
+  assert.deepEqual(await s.service.report(client, appliedReport(id, 3)), again);
+  await s.service._pushesIdle();
+  assert.deepEqual(s.pushFetch.posts, []);
+});
+
+test("revocation_applied needs a revoking or revoked integration of this Station and a refused report records nothing", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const live = await s.approved();
+  await assert.rejects(s.service.report(client, appliedReport(live, 1)), (error) => refused(409, "invalid_state")(error) && error.message === NOT_REVOKED);
+  const waiting = await s.create();
+  await assert.rejects(s.service.report(client, appliedReport(waiting, 2)), refused(409, "invalid_state"));
+  await s.service.pause(OWNER, live);
+  await assert.rejects(s.service.report(client, appliedReport(live, 3)), refused(409, "invalid_state"));
+  const other = await s.register(OTHER, "https://two.example");
+  const theirs = await revoking(s, OTHER, other.id);
+  await assert.rejects(s.service.report(client, appliedReport(theirs, 4)), refused(404, "not_found"));
+  await assert.rejects(s.service.report(client, appliedReport("i-missing", 5)), refused(404, "not_found"));
+  await assert.rejects(s.service.report(client, appliedReport(7, 6)), refused(404, "not_found"));
+  assert.deepEqual(await savedReports(s), [], "no id was recorded");
+  assert.deepEqual(await recordedHosts(s, theirs), []);
+  // The ids were never used: the same ids are accepted once the integrations are revoked.
+  await s.service.revoke(OWNER, waiting, { interruptRunning: false });
+  assert.equal((await s.service.report(client, appliedReport(waiting, 2))).state, "revoked", "an integration never approved is revoked at once");
+  const revoked = await revoking(s);
+  await s.service.report(client, { integrationId: revoked, state: "revoked" });
+  assert.equal((await s.service.report(client, appliedReport(revoked, 7))).state, "revoked", "on a revoked integration too");
+  assert.deepEqual((await savedReports(s)).map((row) => row.report_id), [REPORT_ID(2), REPORT_ID(7)]);
+  // Another Station's ids are its own.
+  await s.service.report(other.reportClientId, appliedReport(theirs, 2));
+  assert.deepEqual((await savedReports(s)).map((row) => [row.station_id, row.report_id]), [[s.station.id, REPORT_ID(2)], [other.id, REPORT_ID(2)], [s.station.id, REPORT_ID(7)]]);
+  await assert.rejects(s.service.report(client, appliedReport(theirs, 8)), refused(404, "not_found"), "an integration of another Station is still not found");
+  await assert.rejects(s.service.report(client, appliedReport(theirs, 2)), refused(409, "report_id_reused"), "this Station's id 2 is its own report, whatever another Station did with 2");
+});
+
+test("with the setting on, the new reports are validated in order: shape, state, reportId, then the kind's fields", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const id = await revoking(s);
+  const send = (body) => s.service.report(client, body);
+  const applied = appliedReport(id, 1);
+  const final = finalReport(id, 2);
+  const REPORT_ID_MESSAGE = "Send the reportId as 1 to 128 characters of letters, digits, '.', '_', ':' or '-'.";
+  const HOST_MESSAGE = "Name the host by its id: 1 to 128 characters of letters, digits, '.', '_', ':' or '-'.";
+  const RECORD_MESSAGE = "Send the recordId as the record's lowercase UUID.";
+  const OUTCOME_MESSAGE = "Send all_applied with no pendingHosts, or deadline_passed with the hosts that didn't confirm.";
+  const bad = async (body, code, message, label) => {
+    await assert.rejects(send(body), (error) => refused(400, code)(error) && (message === undefined || error.message === message), label ?? JSON.stringify(body));
+  };
+  // Shape: any other combination of fields is 400 report.
+  for (const body of [
+    { ...applied, reason: "done" }, { ...final, reason: "done" }, { ...applied, extra: 1 }, { ...applied, outcome: "all_applied" }, { ...final, host: "laptop" },
+    { integrationId: id, state: "revoked", outcome: "all_applied", pendingHosts: [] }, { integrationId: id, state: "ready", host: "laptop" }, { integrationId: id, state: "ready", reportId: REPORT_ID(3) },
+    { integrationId: id, state: "error", reason: "x", reportId: REPORT_ID(3) }, { ...applied, host: undefined, outcome: "all_applied" }, null, [], "revoked"
+  ]) await bad(body, "report", undefined, JSON.stringify(body));
+  await bad({ ...applied, state: "paused" }, "state");
+  await bad({ ...applied, state: undefined }, "state");
+  await bad({ integrationId: id, state: "revocation_applied" }, "report_id", REPORT_ID_MESSAGE, "the state is known: its reportId is missing");
+  // reportId.
+  for (const reportId of ["", "x".repeat(129), "has space", "bad/id", "café", "line\nbreak", "trailing\n", 5, null, {}, ["a"]]) {
+    await bad({ ...applied, reportId }, "report_id", REPORT_ID_MESSAGE, "applied " + JSON.stringify(reportId));
+    await bad({ ...final, reportId }, "report_id", REPORT_ID_MESSAGE, "final " + JSON.stringify(reportId));
+  }
+  // host, recordId.
+  for (const host of [undefined, "", "x".repeat(129), "has space", "a/b", "café", "a\nb", 5, null, ["laptop"]]) await bad({ ...applied, host }, "host", HOST_MESSAGE, "host " + JSON.stringify(host));
+  const v4 = RECORD_ID(1);
+  for (const recordId of [undefined, "", v4.toUpperCase(), v4.replace("-4f50-", "-1f50-"), v4.replace("-8a6b-", "-0a6b-"), v4.slice(1), v4 + "0", "not-a-uuid", 5, null]) await bad({ ...applied, recordId }, "record_id", RECORD_MESSAGE, "recordId " + JSON.stringify(recordId));
+  // outcome, pendingHosts.
+  const hosts = (n) => Array.from({ length: n }, (_, index) => "host-" + index);
+  for (const [outcome, pendingHosts] of [
+    ["all_applied", ["laptop"]], ["deadline_passed", []], ["deadline_passed", hosts(101)], ["deadline_passed", ["a", "a"]], ["other", []], [undefined, []], ["all_applied", undefined], ["all_applied", null], ["all_applied", "none"], ["deadline_passed", "laptop"], [5, []], ["all_applied", {}]
+  ]) await bad({ ...final, outcome, pendingHosts }, "outcome", OUTCOME_MESSAGE, JSON.stringify([outcome, pendingHosts]));
+  for (const entry of ["", "x".repeat(129), "has space", 5, null, "a\nb"]) await bad({ ...final, outcome: "deadline_passed", pendingHosts: ["laptop", entry] }, "host", HOST_MESSAGE, "pendingHosts " + JSON.stringify(entry));
+  assert.deepEqual(await savedReports(s), []);
+  assert.deepEqual(await recordedHosts(s, id), []);
+  // The limits themselves are accepted: 100 hosts of 128 characters.
+  const full = Array.from({ length: 100 }, (_, index) => String(index).padStart(3, "0") + "h".repeat(125));
+  assert.equal((await send(finalReport(id, 9, "deadline_passed", full))).state, "revoked");
+  assert.deepEqual(await s.service.report(client, appliedReport(id, 10, "x".repeat(128))), await s.service.report(client, appliedReport(id, 10, "x".repeat(128))));
+  assert.equal((await send(appliedReport(id, 11, "A._:-9"))).state, "revoked", "the grammar's own characters");
+  assert.equal((await send({ ...appliedReport(id, 12, "h12"), reportId: "r".repeat(128) })).state, "revoked", "a reportId of 128 characters");
+});
+
+test("a final revoked report moves a revoking integration to revoked with its outcome, once", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const id = await revoking(s);
+  await s.service._pushesIdle();
+  s.pushFetch.posts.length = 0;
+  const done = await s.service.report(client, finalReport(id, 1));
+  assert.deepEqual([done.state, Object.keys(done).sort()], ["revoked", ANSWER_KEYS]);
+  const row = await s.repository.integration(id);
+  assert.deepEqual([row.state, row.revocationOutcome, row.revocationPendingHosts], ["revoked", "all_applied", []]);
+  assert.deepEqual((await ownView(s, id)).revocation, { appliedHosts: 0, outcome: "all_applied", unconfirmedHosts: null });
+  assert.deepEqual((await s.reports(id)).map((event) => [event.actor, event.account_id, event.state, event.reason, event.details]), [["station", OWNER, "revoked", null, { outcome: "all_applied", unconfirmedHosts: 0 }]]);
+  await s.service._pushesIdle();
+  assert.deepEqual(s.pushFetch.posts, [], "the reporting Station is not told");
+  // The same final again answers the recorded answer; a second final under another id is refused; neither changes anything.
+  assert.deepEqual(await s.service.report(client, finalReport(id, 1)), done);
+  await assert.rejects(s.service.report(client, finalReport(id, 2)), (error) => refused(409, "invalid_state")(error) && error.message === FINAL_ALREADY);
+  await assert.rejects(s.service.report(client, finalReport(id, 3, "deadline_passed", ["laptop"])), refused(409, "invalid_state"));
+  await assert.rejects(s.service.report(client, finalReport(id, 1, "deadline_passed", ["laptop"])), refused(409, "report_id_reused"));
+  await assert.rejects(s.service.report(client, { ...finalReport(id, 1), integrationId: "i-other" }), refused(409, "report_id_reused"), "even with another integration");
+  assert.deepEqual((await savedReports(s)).map((saved) => saved.report_id), [REPORT_ID(1)], "refused reports recorded nothing");
+  assert.equal((await s.reports(id)).length, 1);
+  assert.equal((await s.repository.integration(id)).revocationOutcome, "all_applied");
+  // A late per-host report is welcome on a revoked integration.
+  assert.equal((await s.service.report(client, appliedReport(id, 4))).state, "revoked");
+  assert.equal((await ownView(s, id)).revocation.appliedHosts, 1);
+});
+
+test("a final with deadline_passed names the hosts that didn't confirm; a late per-host report lowers the count", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const id = await revoking(s);
+  await s.service.report(client, appliedReport(id, 1, "phone"));
+  const done = await s.service.report(client, finalReport(id, 2, "deadline_passed", ["laptop", "desktop", "tablet"]));
+  assert.equal(done.state, "revoked");
+  const row = await s.repository.integration(id);
+  assert.deepEqual([row.revocationOutcome, row.revocationPendingHosts], ["deadline_passed", ["laptop", "desktop", "tablet"]]);
+  assert.deepEqual((await s.reports(id)).map((event) => event.details), [{ outcome: "deadline_passed", unconfirmedHosts: 3 }]);
+  assert.deepEqual((await ownView(s, id)).revocation, { appliedHosts: 1, outcome: "deadline_passed", unconfirmedHosts: 3 });
+  assert.equal((await s.service.report(client, appliedReport(id, 3, "laptop"))).state, "revoked", "late, and the integration stays revoked");
+  assert.deepEqual((await ownView(s, id)).revocation, { appliedHosts: 2, outcome: "deadline_passed", unconfirmedHosts: 2 });
+  await s.service.report(client, appliedReport(id, 4, "laptop"));
+  await s.service.report(client, appliedReport(id, 5, "elsewhere"));
+  assert.deepEqual((await ownView(s, id)).revocation, { appliedHosts: 3, outcome: "deadline_passed", unconfirmedHosts: 2 }, "a repeat and a host that was not pending change nothing");
+  await s.service.report(client, appliedReport(id, 6, "desktop"));
+  await s.service.report(client, appliedReport(id, 7, "tablet"));
+  assert.deepEqual((await ownView(s, id)).revocation, { appliedHosts: 5, outcome: "deadline_passed", unconfirmedHosts: 0 });
+  assert.equal((await s.repository.integration(id)).state, "revoked");
+  assert.equal((await s.reports(id)).length, 1, "only the final is an event");
+  // Neither the page's data nor the Station's feed ever names a host.
+  const everything = JSON.stringify([await s.service.integrations(OWNER), await s.service.changes(client, 0), await s.service.history(OWNER, id)]);
+  for (const host of ["laptop", "desktop", "tablet", "phone", "elsewhere"]) assert.equal(everything.includes(host), false, host);
+  const feed = (await s.service.changes(client, 0)).changes.filter((change) => change.kind === "integration_reported");
+  assert.deepEqual(feed.map((change) => [change.state, change.reason]), [["revoked", null]]);
+});
+
+test("a final after a legacy revoked records the outcome with no second event", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const id = await revoking(s);
+  await s.service.report(client, { integrationId: id, state: "revoked" });
+  assert.deepEqual((await ownView(s, id)).revocation, { appliedHosts: 0, outcome: null, unconfirmedHosts: null }, "stopped, with no final yet");
+  assert.equal((await s.reports(id)).length, 1);
+  const before = await s.repository.integration(id);
+  const done = await s.service.report(client, finalReport(id, 1, "deadline_passed", ["laptop"]));
+  assert.deepEqual([done.state, Object.keys(done).sort()], ["revoked", ANSWER_KEYS]);
+  const after = await s.repository.integration(id);
+  assert.deepEqual([after.state, after.revocationOutcome, after.revocationPendingHosts], ["revoked", "deadline_passed", ["laptop"]]);
+  assert.deepEqual({ ...after, updatedAt: null, revocationOutcome: null, revocationPendingHosts: null }, { ...before, updatedAt: null }, "only the two fields changed");
+  assert.equal((await s.reports(id)).length, 1, "no second event");
+  assert.deepEqual(await s.service.report(client, finalReport(id, 1, "deadline_passed", ["laptop"])), done);
+  await assert.rejects(s.service.report(client, finalReport(id, 2)), refused(409, "invalid_state"));
+  // Today's legacy revoked on a revoked integration is still the no-op it was.
+  assert.equal((await s.service.report(client, { integrationId: id, state: "revoked" })).state, "revoked");
+  assert.equal((await s.reports(id)).length, 1);
+});
+
+test("a final is refused on an integration that is not being revoked, and records nothing", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const live = await s.approved();
+  await assert.rejects(s.service.report(client, finalReport(live, 1)), refused(409, "invalid_state"));
+  await s.service.pause(OWNER, live);
+  await assert.rejects(s.service.report(client, finalReport(live, 2)), refused(409, "invalid_state"));
+  const waiting = await s.create();
+  await assert.rejects(s.service.report(client, finalReport(waiting, 3)), refused(409, "invalid_state"));
+  s.clock.now += 91 * DAY;
+  await assert.rejects(s.service.report(client, finalReport(live, 4)), refused(409, "invalid_state"));
+  const other = await s.register(OTHER, "https://two.example");
+  const theirs = await revoking(s, OTHER, other.id);
+  await assert.rejects(s.service.report(client, finalReport(theirs, 5)), refused(404, "not_found"));
+  assert.deepEqual(await savedReports(s), []);
+  assert.deepEqual((await s.db.pool.query("SELECT id FROM integrations WHERE revocation_outcome IS NOT NULL")).rows, []);
+  assert.equal((await s.repository.integration(theirs)).state, "revoking");
+  assert.equal((await s.reports(live)).length, 0);
+});
+
+test("a retry racing itself is recorded once and both calls get the same answer", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const id = await revoking(s);
+  const [first, repeat] = await Promise.all([s.service.report(client, appliedReport(id, 1)), s.service.report(client, appliedReport(id, 1))]);
+  assert.deepEqual(first, repeat);
+  assert.deepEqual([(await savedReports(s)).length, (await recordedHosts(s, id)).length], [1, 1]);
+  const finals = await Promise.all([s.service.report(client, finalReport(id, 2)), s.service.report(client, finalReport(id, 2))]);
+  assert.deepEqual(finals[0], finals[1]);
+  assert.equal((await s.reports(id)).length, 1, "one event");
+  const rival = await Promise.allSettled([s.service.report(client, appliedReport(id, 3, "desktop")), s.service.report(client, appliedReport(id, 3, "tablet"))]);
+  assert.deepEqual(rival.map((outcome) => outcome.status).sort(), ["fulfilled", "rejected"], "the same id with two bodies: one stands");
+  assert.equal(rival.find((outcome) => outcome.status === "rejected").reason.details.code, "report_id_reused");
+  const second = await revoking(s);
+  const finalists = await Promise.allSettled([s.service.report(client, finalReport(second, 4)), s.service.report(client, finalReport(second, 5))]);
+  assert.deepEqual(finalists.map((outcome) => outcome.status).sort(), ["fulfilled", "rejected"], "two finals under two ids: one stands");
+  assert.equal(finalists.find((outcome) => outcome.status === "rejected").reason.details.code, "invalid_state");
+});
+
+test("the integration views count a stopped integration's revocation, for its owner and its Station's owner", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  await s.service.share(OWNER, s.station.id, MEMBER);
+  const live = await s.approved();
+  const mine = await revoking(s);
+  const theirs = await revoking(s, MEMBER);
+  await s.service.report(client, appliedReport(theirs, 1, "phone"));
+  await s.service.report(client, appliedReport(theirs, 2, "laptop"));
+  await s.service.report(client, finalReport(theirs, 3, "deadline_passed", ["tablet", "laptop"]));
+  const owned = (await s.service.integrations(OWNER)).integrations;
+  const find = (list, id) => list.find((entry) => entry.id === id);
+  assert.equal(Object.hasOwn(find(owned, live), "revocation"), false, "a live integration has none");
+  assert.deepEqual(find(owned, mine).revocation, { appliedHosts: 0, outcome: null, unconfirmedHosts: null });
+  assert.deepEqual(find(owned, theirs).revocation, { appliedHosts: 2, outcome: "deadline_passed", unconfirmedHosts: 1 }, "the Station owner's view of a member's integration");
+  assert.deepEqual(find((await s.service.integrations(MEMBER)).integrations, theirs).revocation, { appliedHosts: 2, outcome: "deadline_passed", unconfirmedHosts: 1 });
+  assert.deepEqual(Object.keys(find(owned, theirs).revocation), ["appliedHosts", "outcome", "unconfirmedHosts"]);
+  // The answers to the owner's own calls carry it too.
+  assert.deepEqual((await s.service.revoke(OWNER, mine, { interruptRunning: false })).revocation, { appliedHosts: 0, outcome: null, unconfirmedHosts: null });
+  assert.equal(Object.hasOwn(await s.service.pause(OWNER, live), "revocation"), false);
+});
+
+test("with the setting off, the new reports are unknown fields and a revoked view has no revocation", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const id = await s.approved();
+  await s.service.revoke(OWNER, id);
+  for (const body of [appliedReport(id, 1), finalReport(id, 2), { integrationId: id, state: "revoked", reportId: REPORT_ID(3) }, { integrationId: id, state: "revoked", outcome: "all_applied", pendingHosts: [] }, { integrationId: id, state: "revoked", host: "laptop" }]) {
+    await assert.rejects(s.service.report(client, body), (error) => refused(400, "report")(error) && error.message === "Send a report as { integrationId, state, reason }.", JSON.stringify(body));
+  }
+  await assert.rejects(s.service.report(client, { integrationId: id, state: "revocation_applied" }), refused(400, "state"));
+  assert.deepEqual(await savedReports(s), []);
+  assert.equal((await s.repository.integration(id)).state, "revoking");
+  // Today's report, unchanged.
+  const revoked = await s.service.report(client, { integrationId: id, state: "revoked" });
+  assert.equal(revoked.state, "revoked");
+  assert.equal(Object.hasOwn(revoked, "revocation"), false);
+  assert.equal(Object.hasOwn(await ownView(s, id), "revocation"), false);
+  assert.equal((await s.repository.integration(id)).revocationOutcome, null);
+});
+
+test("with the setting on, today's reports behave as before, and a legacy report is not kept by id", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const id = await s.approved();
+  assert.equal((await s.service.report(client, { integrationId: id, state: "ready" })).state, "ready");
+  assert.equal((await s.service.report(client, { integrationId: id, state: "error", reason: "R9 host unreachable" })).lastError, "R9 host unreachable");
+  await assert.rejects(s.service.report(client, { integrationId: id, state: "ready", extra: 1 }), refused(400, "report"));
+  await assert.rejects(s.service.report(client, { integrationId: id, state: "error" }), refused(400, "reason"));
+  await assert.rejects(s.service.report(client, { integrationId: id, state: "ready", reason: "bell\u0007" }), refused(400, "reason"));
+  await assert.rejects(s.service.report(client, { integrationId: id, state: "provisioning" }), refused(400, "state"));
+  await s.service.revoke(OWNER, id, { interruptRunning: false });
+  assert.equal((await s.service.report(client, { integrationId: id, state: "error", reason: "late" })).state, "revoking", "an error about a revoking integration is as it was");
+  assert.equal((await s.service.report(client, { integrationId: id, state: "revoked" })).state, "revoked");
+  await assert.rejects(s.service.report(client, { integrationId: id, state: "error", reason: "later" }), refused(409, "invalid_state"));
+  assert.deepEqual(await savedReports(s), []);
+});

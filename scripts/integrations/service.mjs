@@ -21,6 +21,16 @@ const R9_SVC = /^[0-9a-f]{64}$/;
 const CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
 const STOPPED = ["revoking", "revoked"];
 const REPORT_FIELDS = ["integrationId", "state", "reason"];
+// With the setting on (D29 Phase B) a Station also sends two revocation reports, each with a reportId and its own fields:
+// one per host that applied the revocation, and the final one, with how it ended.
+const APPLIED_FIELDS = ["host", "recordId"];
+const FINAL_FIELDS = ["outcome", "pendingHosts"];
+const DELEGATED_REPORT_FIELDS = [...REPORT_FIELDS, "reportId", ...APPLIED_FIELDS, ...FINAL_FIELDS];
+const OUTCOMES = ["all_applied", "deadline_passed"];
+const PENDING_HOSTS_MAX = 100;
+// The grammar of a reportId and of a host id (the one of Atem's device list), and a record's id: a lowercase UUID v4.
+const ID_GRAMMAR = /^[A-Za-z0-9._:-]{1,128}$/;
+const RECORD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PRINTABLE_REASON = /^[^\p{Cc}]{1,200}$/u;
 const CURSOR = /^\d{1,15}$/;
 const FEED_LIMIT = 500;
@@ -33,6 +43,16 @@ const unknownStation = () => failure(403, "This Station is not registered.", "st
 const expiredChallenge = () => failure(400, "This check has expired or was already used. Start again.", "challenge");
 // D29: with the setting on, a revocation says whether to interrupt the tasks running on the owner's hosts.
 const interruptRunningRequired = () => failure(400, "Say whether to interrupt running tasks: send interruptRunning as true or false.", "interrupt_running");
+const REPORT_FORM = "Send a report as { integrationId, state, reason }.";
+const DELEGATED_REPORT_FORMS = REPORT_FORM.slice(0, -1) + ', { integrationId, state: "revocation_applied", reportId, host, recordId } or { integrationId, state: "revoked", reportId, outcome, pendingHosts }.';
+const IDENTIFIER = "1 to 128 characters of letters, digits, '.', '_', ':' or '-'.";
+const reportIdInvalid = () => failure(400, "Send the reportId as " + IDENTIFIER, "report_id");
+const hostInvalid = () => failure(400, "Name the host by its id: " + IDENTIFIER, "host");
+const recordIdInvalid = () => failure(400, "Send the recordId as the record's lowercase UUID.", "record_id");
+const outcomeInvalid = () => failure(400, "Send all_applied with no pendingHosts, or deadline_passed with the hosts that didn't confirm.", "outcome");
+const reportIdReused = () => failure(409, "This reportId was already used for another report.", "report_id_reused");
+const notRevokedYet = () => failure(409, "This integration isn't revoked.", "invalid_state");
+const finalReported = () => failure(409, "This integration's revocation already has its final report.", "invalid_state");
 const SYSTEM = "system";
 const BUILT_IN_FIXED = "The built-in Station is always there: it can't be removed, shared or left.";
 const BUILT_IN_ORIGIN = "This is the built-in Station. Every account already has it.";
@@ -162,16 +182,44 @@ function reportReason(value) {
   return value;
 }
 
-// A report's body: only integrationId, state and reason; `error` needs a reason, any other report may carry one.
-function reportBody(body) {
-  if (!plainObject(body) || Object.keys(body).some((key) => !REPORT_FIELDS.includes(key))) {
-    throw failure(400, "Send a report as { integrationId, state, reason }.", "report");
+// A report's body: only integrationId, state and reason; `error` needs a reason, any other report may carry one. With the
+// setting on (`delegated`, D29 Phase B) a report with a reportId is one of the two revocation reports, validated in this
+// order: its shape, the state, the reportId, then the kind's fields. What comes back is the normalised report, which is
+// also what is kept and compared when the same reportId comes again.
+function reportBody(body, { delegated = false } = {}) {
+  const forms = () => failure(400, delegated ? DELEGATED_REPORT_FORMS : REPORT_FORM, "report");
+  if (!plainObject(body) || Object.keys(body).some((key) => !(delegated ? DELEGATED_REPORT_FIELDS : REPORT_FIELDS).includes(key))) throw forms();
+  const { integrationId, state, reason, reportId } = body;
+  const given = (names) => names.some((name) => body[name] !== undefined);
+  // The new fields come with a reportId, never with a reason, and never from both kinds at once.
+  if (delegated && (reportId === undefined ? given([...APPLIED_FIELDS, ...FINAL_FIELDS]) : reason !== undefined || (given(APPLIED_FIELDS) && given(FINAL_FIELDS)))) throw forms();
+  const states = delegated ? [...REPORT_STATES, "revocation_applied"] : REPORT_STATES;
+  if (state !== "error" && !states.includes(state)) throw failure(400, "Report a state of " + [...states, "error"].join(", ") + ".", "state");
+  if (!delegated || (reportId === undefined && state !== "revocation_applied")) {
+    if (state === "error" || reason !== undefined) reportReason(reason);
+    return { integrationId, state, reason: reason ?? null };
   }
-  const { integrationId, state, reason } = body;
-  if (state !== "error" && !REPORT_STATES.includes(state)) throw failure(400, "Report a state of " + [...REPORT_STATES, "error"].join(", ") + ".", "state");
-  if (state === "error" || reason !== undefined) reportReason(reason);
-  return { integrationId, state, reason: reason ?? null };
+  if (typeof reportId !== "string" || !ID_GRAMMAR.test(reportId)) throw reportIdInvalid();
+  if (state === "revocation_applied") {
+    const { host, recordId } = body;
+    if (given(FINAL_FIELDS)) throw forms();
+    if (typeof host !== "string" || !ID_GRAMMAR.test(host)) throw hostInvalid();
+    if (typeof recordId !== "string" || !RECORD_ID.test(recordId)) throw recordIdInvalid();
+    return { integrationId, state, reportId, host, recordId };
+  }
+  if (state !== "revoked" || given(APPLIED_FIELDS)) throw forms();
+  const { outcome } = body;
+  if (!OUTCOMES.includes(outcome) || !Array.isArray(body.pendingHosts)) throw outcomeInvalid();
+  const pendingHosts = [...body.pendingHosts];
+  if (pendingHosts.some((host) => typeof host !== "string" || !ID_GRAMMAR.test(host))) throw hostInvalid();
+  // all_applied leaves none pending; deadline_passed names the ones that didn't confirm, each once.
+  const fitting = outcome === "all_applied" ? pendingHosts.length === 0 : pendingHosts.length >= 1 && pendingHosts.length <= PENDING_HOSTS_MAX;
+  if (!fitting || new Set(pendingHosts).size !== pendingHosts.length) throw outcomeInvalid();
+  return { integrationId, state, reportId, outcome, pendingHosts };
 }
+
+// A body as one string whatever order its keys come in: jsonb does not keep them in the order they were sent.
+const canonical = (value) => JSON.stringify(value, (key, member) => (plainObject(member) ? Object.fromEntries(Object.entries(member).sort(([one], [other]) => (one < other ? -1 : 1))) : member));
 
 function feedCursor(value) {
   const cursor = typeof value === "string" && CURSOR.test(value) ? Number(value) : value;
@@ -569,7 +617,19 @@ export function createIntegrationService({
   // Shown as paused while its own state is not: its owner's account is disabled.
   const shownPaused = (row) => row.state !== "paused" && effectiveState(row, now()) === "paused";
 
-  function integrationView(row, role, station) {
+  // How a stopped integration's revocation went, as counts (D29 Phase B): the hosts that applied it, its final outcome, and
+  // with deadline_passed how many of the hosts that didn't confirm have not applied it since. Host names are never shown.
+  function revocationCounts(row, hosts) {
+    const pending = row.revocationOutcome === "deadline_passed" ? row.revocationPendingHosts ?? [] : null;
+    return { appliedHosts: hosts.size, outcome: row.revocationOutcome, unconfirmedHosts: pending ? pending.filter((host) => !hosts.has(host)).length : null };
+  }
+
+  // The hosts recorded for a stopped integration's revocation, read only when a view shows them (the setting on).
+  const revocationHostsOf = (row) => (delegatedHostWork && STOPPED.includes(row.state) ? repository.revocationHosts(row.id) : undefined);
+
+  // `hosts` (revocationHostsOf) is for a view that shows the revocation's counts; a Station's own answer and a new
+  // integration are given none.
+  function integrationView(row, role, station, hosts) {
     const state = effectiveState(row, now());
     const view = {
       id: row.id, kind: row.kind, name: row.name, stationId: row.stationId, stationOrigin: station?.origin ?? null, scopes: row.scopes,
@@ -583,12 +643,13 @@ export function createIntegrationService({
     if (delegatedHostWork && STOPPED.includes(state)) {
       Object.assign(view, { revokedAt: row.revokedAt, interruptRunning: row.interruptRunning });
       if (station?.status === "removed") view.stationRemoved = true;
+      if (hosts) view.revocation = revocationCounts(row, hosts);
     }
     return view;
   }
 
   async function viewOf(row, role) {
-    return integrationView(row, role, await repository.station(row.stationId));
+    return integrationView(row, role, await repository.station(row.stationId), await revocationHostsOf(row));
   }
 
   // The row and the account's part in it: "owner", "station_owner" (it owns the integration's custom Station) or null.
@@ -615,6 +676,63 @@ export function createIntegrationService({
     const { row, role } = await visible(accountId, id);
     if (role !== "owner") throw failure(403, "Only the integration's owner can do this.", "forbidden");
     return row;
+  }
+
+  // A refusal names the state the Station is shown: paused, for an integration whose owner's account is disabled.
+  function shownRefusal(error, row) {
+    return error.details?.code === "invalid_state" && shownPaused(row) ? failure(409, "This integration is paused and cannot take that action.", "invalid_state") : error;
+  }
+
+  // The answer to an accepted report: the integration as its Station sees it. As in its feed, the Station is not told who
+  // paused an integration, nor (the setting on, D29) when it was revoked or the counts of its revocation (the Station
+  // sent those), nor whether that interrupts running tasks: the feed says the latter, and the answer stays as it is today.
+  function reportAnswer(row, station) {
+    const { role, pausedBy, revokedAt, interruptRunning, stationRemoved, revocation, ...view } = integrationView(row, null, station);
+    return view;
+  }
+
+  // A report with a reportId (the setting on, D29 Phase B): `revocation_applied` for one host, or the final `revoked` with
+  // how the revocation ended. Ids are per Station and kept forever with the report and its answer: the same id with the
+  // same body answers what was recorded and changes nothing, with another body it is refused. All of it runs in one
+  // transaction under the event lock, so a retry racing itself waits for the first and then finds its answer, and a
+  // refused report (the transaction rolls back) records nothing. Nobody is pushed: the Station made the change itself.
+  function identifiedReport(station, report) {
+    const { integrationId, reportId } = report;
+    return appending(async (client) => {
+      const kept = await repository.stationReport(station.id, reportId, client);
+      if (kept) {
+        if (canonical(kept.body) !== canonical(report)) throw reportIdReused();
+        return kept.answer;
+      }
+      const found = typeof integrationId === "string" && integrationId ? await repository.integration(integrationId, client) : null;
+      if (!found || found.stationId !== station.id) throw notFound();
+      let row = await repository.integrationForUpdate(integrationId, client);
+      if (report.state === "revocation_applied") {
+        // A host counts once: the first report for it stands, and a later one (late ones too) is only kept under its own id.
+        if (!STOPPED.includes(row.state)) throw notRevokedYet();
+        await repository.recordRevocationHost({ integrationId, host: report.host, recordId: report.recordId, reportId }, client);
+      } else {
+        if (row.revocationOutcome != null) throw finalReported();
+        // From revoking it revokes, as today's report does; on a revoked integration (a legacy report came first) it only
+        // records the outcome.
+        let fields = {};
+        if (row.state !== "revoked") {
+          try {
+            fields = { ...transition(row, "report:revoked", now()), lastError: null };
+          } catch (error) {
+            throw shownRefusal(error, row);
+          }
+        }
+        await repository.updateIntegration(integrationId, { ...fields, revocationOutcome: report.outcome, revocationPendingHosts: report.pendingHosts }, client);
+        if (row.state !== "revoked") {
+          await repository.appendEvent({ stationId: row.stationId, integrationId, accountId: row.ownerAccount, actor: "station", kind: "integration_reported", state: "revoked", details: { outcome: report.outcome, unconfirmedHosts: report.pendingHosts.length } }, client);
+        }
+        row = await repository.integration(integrationId, client);
+      }
+      const answer = reportAnswer(row, station);
+      await repository.saveStationReport({ stationId: station.id, reportId, integrationId, body: report, answer }, client);
+      return answer;
+    });
   }
 
   // The Portal half of a change Auth has already made: under the row lock `apply` re-checks the current row and returns
@@ -889,7 +1007,7 @@ export function createIntegrationService({
       for (const station of await repository.stationsFor(accountId)) {
         if (station.role !== "owner") continue;
         for (const row of await repository.integrationsOnStation(station.id)) {
-          if (row.ownerAccount !== accountId) views.push(integrationView(row, "station_owner", station));
+          if (row.ownerAccount !== accountId) views.push(integrationView(row, "station_owner", station, await revocationHostsOf(row)));
         }
       }
       return { integrations: views, stale: !listed };
@@ -1020,9 +1138,12 @@ export function createIntegrationService({
 
     // An authenticated Station's report about one of its integrations. Only these reports move an integration into
     // waiting_for_host, ready or revoked (Portal never sets ready itself); `error` records lastError and keeps the state.
+    // With the setting on, a report with a reportId is one of the two revocation reports (identifiedReport).
     async report(clientId, body) {
       const station = await reportingStation(clientId);
-      const { integrationId, state, reason } = reportBody(body);
+      const parsed = reportBody(body, { delegated: delegatedHostWork });
+      if (parsed.reportId !== undefined) return identifiedReport(station, parsed);
+      const { integrationId, state, reason } = parsed;
       const row = typeof integrationId === "string" && integrationId ? await repository.integration(integrationId) : null;
       // Integrations of other Stations get the same answer as unknown ones.
       if (!row || row.stationId !== station.id) throw notFound();
@@ -1036,20 +1157,15 @@ export function createIntegrationService({
         if (current.state === state || (current.state === "paused" && current.resumeState === state)) return null;
         return { fields: { ...transition(current, "report:" + state, now()), lastError: null }, event };
       };
-      // The Station made this change itself, so it is not pushed back to it. A refusal names the state the Station is
-      // shown: paused, for an integration whose owner's account is disabled.
+      // The Station made this change itself, so it is not pushed back to it.
       let updated;
       try {
         apply(row);
         updated = await commit(row.id, apply, { push: false });
       } catch (error) {
-        if (error.details?.code === "invalid_state" && shownPaused(row)) throw failure(409, "This integration is paused and cannot take that action.", "invalid_state");
-        throw error;
+        throw shownRefusal(error, row);
       }
-      // As in its feed, the Station is not told who paused an integration, nor (the setting on, D29) when it was revoked
-      // or whether that interrupts running tasks: the feed says the latter, and the report answer stays as it is today.
-      const { role, pausedBy, revokedAt, interruptRunning, stationRemoved, ...view } = integrationView(updated, null, station);
-      return view;
+      return reportAnswer(updated, station);
     },
 
     // This Station's changes after `cursor`, oldest first, each with its integration's current settings. From cursor 0

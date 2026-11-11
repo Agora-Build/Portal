@@ -445,6 +445,21 @@ test("integrations carry a revocation's final outcome and the hosts that didn't 
   await assert.rejects(repo.updateIntegration("i-1", { revocationOutcome: "done" }), { code: "23514" }, "only the two outcomes");
 });
 
+test("updateIntegration refuses an undefined final outcome or pending list: a silent null would clear a recorded one", async (t) => {
+  const { repo } = await setup(t);
+  if (!repo) return;
+  await station(repo, "st1");
+  await repo.insertIntegration(sample("i-1"));
+  await repo.updateIntegration("i-1", { state: "revoked", revocationOutcome: "deadline_passed", revocationPendingHosts: ["laptop"] });
+  await assert.rejects(repo.updateIntegration("i-1", { revocationOutcome: undefined }), TypeError);
+  await assert.rejects(repo.updateIntegration("i-1", { revocationPendingHosts: undefined }), TypeError);
+  await assert.rejects(repo.updateIntegration("i-1", { state: "revoking", revocationOutcome: undefined }), TypeError);
+  const kept = await repo.integration("i-1");
+  assert.deepEqual([kept.state, kept.revocationOutcome, kept.revocationPendingHosts], ["revoked", "deadline_passed", ["laptop"]], "a refused update changes nothing");
+  await repo.updateIntegration("i-1", { revocationOutcome: null, revocationPendingHosts: null });
+  assert.deepEqual([(await repo.integration("i-1")).revocationOutcome, (await repo.integration("i-1")).revocationPendingHosts], [null, null], "null still clears them, on purpose");
+});
+
 test("a Station's report is kept by its id with the body and the answer, per Station", async (t) => {
   const { repo, db } = await setup(t);
   if (!repo) return;
