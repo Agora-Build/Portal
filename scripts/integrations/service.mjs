@@ -552,7 +552,7 @@ export function createIntegrationService({
     let applied = false;
     for (const station of stations) {
       const written = await appending(async (client) => {
-        if (await repository.accountChangeApplied(station.id, entry.cursor, entry.at, client)) return false;
+        if (await repository.accountChangeApplied(station.id, entry.cursor, entry.at, entry.owner, client)) return false;
         await repository.appendEvent({
           stationId: station.id, integrationId: null, accountId: entry.owner, actor, kind: entry.kind, state: null, reason,
           details: { authCursor: entry.cursor, authAt: entry.at, admin: entry.admin === true }

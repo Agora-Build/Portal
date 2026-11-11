@@ -352,22 +352,24 @@ test("the Station's feed reads each event with the account it was recorded for",
   assert.deepEqual((await repo.changesSince("st1", 0)).map((event) => event.accountId), ["ab7"]);
 });
 
-test("an account-level entry of Auth's change feed is found by its Station, cursor and time", async (t) => {
+test("an account-level entry of Auth's change feed is found by its Station, account, cursor and time", async (t) => {
   const { repo, db } = await setup(t);
   if (!repo) return;
   await station(repo, "st1");
   await station(repo, "st2", "ab2");
   const at = "2026-11-10T10:00:00.000Z";
-  assert.equal(await repo.accountChangeApplied("st1", "YzEy", at), false);
+  assert.equal(await repo.accountChangeApplied("st1", "YzEy", at, "ab1"), false);
   await db.transaction((client) => repo.appendEvent({ stationId: "st1", accountId: "ab1", actor: "system", kind: "account_disabled", details: { authCursor: "YzEy", authAt: at } }, client));
-  assert.equal(await repo.accountChangeApplied("st1", "YzEy", at), true);
-  assert.equal(await repo.accountChangeApplied("st1", "YzEy", "2026-11-10T11:00:00.000Z"), false, "the same cursor at another time is another change (Auth's database was restored)");
-  assert.equal(await repo.accountChangeApplied("st1", "YzEz", at), false);
-  assert.equal(await repo.accountChangeApplied("st2", "YzEy", at), false, "another Station's");
+  assert.equal(await repo.accountChangeApplied("st1", "YzEy", at, "ab1"), true);
+  assert.equal(await repo.accountChangeApplied("st1", "YzEy", at, "ab2"), false, "another account's");
+  assert.equal(await repo.accountChangeApplied("st1", "YzEy", "2026-11-10T11:00:00.000Z", "ab1"), false, "the same cursor at another time is another change (Auth's database was restored)");
+  assert.equal(await repo.accountChangeApplied("st1", "YzEz", at, "ab1"), false);
+  assert.equal(await repo.accountChangeApplied("st2", "YzEy", at, "ab1"), false, "another Station's");
   await db.transaction((client) => repo.appendEvent({ stationId: "st2", accountId: "ab1", actor: "system", kind: "account_enabled", details: { authCursor: "YzEz", authAt: at } }, client));
-  assert.equal(await repo.accountChangeApplied("st2", "YzEz", at), true, "an enable counts too");
+  assert.equal(await repo.accountChangeApplied("st2", "YzEz", at, "ab1"), true, "an enable counts too");
   await db.transaction((client) => repo.appendEvent({ stationId: "st1", integrationId: "i-1", accountId: "ab1", actor: "system", kind: "integration_paused", details: { authCursor: "YzE0", authAt: at } }, client));
-  assert.equal(await repo.accountChangeApplied("st1", "YzE0", at), false, "an integration's own entry is not an account-level one (authChangeApplied finds it)");
+  assert.equal(await repo.accountChangeApplied("st1", "YzE0", at, "ab1"), false, "an integration's own entry is not an account-level one (authChangeApplied finds it)");
+  await db.transaction(async (client) => assert.equal(await repo.accountChangeApplied("st1", "YzEy", at, "ab1", client), true, "inside a transaction"));
 });
 
 test("the accounts whose latest account-level event on a Station is a disable are listed, for the cursor-0 snapshot", async (t) => {
@@ -407,7 +409,7 @@ test("accountChangeApplied and disabledAccounts are served by the Station and ac
     await client.query("BEGIN");
     await client.query("SET LOCAL enable_seqscan = off");
     const explaining = { query: async (text, values) => { plans.push((await client.query("EXPLAIN " + text, values)).rows.map((row) => row["QUERY PLAN"]).join("\n")); return { rows: [], rowCount: 0 }; } };
-    await repo.accountChangeApplied("st1", "YzEy", "2026-11-10T10:00:00.000Z", explaining);
+    await repo.accountChangeApplied("st1", "YzEy", "2026-11-10T10:00:00.000Z", "ab1", explaining);
     await repo.disabledAccounts("st1", explaining);
     await client.query("ROLLBACK");
   } finally {
@@ -415,4 +417,6 @@ test("accountChangeApplied and disabledAccounts are served by the Station and ac
   }
   assert.equal(plans.length, 2);
   for (const plan of plans) assert.match(plan, /Index Scan using \S*station_id_account_id_id_idx on /, plan);
+  // The first read names the account too, so the index is used on its first two columns, not the Station alone.
+  assert.match(plans[0], /Index Cond: \(\(station_id = 'st1'::text\) AND \(account_id = 'ab1'::text\)\)/, plans[0]);
 });

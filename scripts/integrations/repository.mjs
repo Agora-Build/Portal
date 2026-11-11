@@ -283,9 +283,10 @@ export function createRepository(db) {
       return rows.length > 0;
     },
 
-    // Whether an account-level entry of Auth's change feed was already recorded for this Station (service.applyAuthChange).
-    async accountChangeApplied(stationId, cursor, at, client) {
-      const { rows } = await run(client, "SELECT 1 FROM integration_events WHERE station_id = $1 AND integration_id IS NULL AND kind IN ('account_disabled', 'account_enabled') AND details->>'authCursor' = $2 AND details->>'authAt' = $3 LIMIT 1", [stationId, cursor, at]);
+    // Whether an account-level entry of Auth's change feed, about this account, was already recorded for this Station
+    // (service.applyAuthChange). By Station and account, so integration_events_station_account_idx serves it.
+    async accountChangeApplied(stationId, cursor, at, accountId, client) {
+      const { rows } = await run(client, "SELECT 1 FROM integration_events WHERE station_id = $1 AND integration_id IS NULL AND kind IN ('account_disabled', 'account_enabled') AND details->>'authCursor' = $2 AND details->>'authAt' = $3 AND account_id = $4 LIMIT 1", [stationId, cursor, at, accountId]);
       return rows.length > 0;
     },
 

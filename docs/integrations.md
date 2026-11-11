@@ -991,11 +991,11 @@ the Station (and its operator) can use it, and that prompts with retrieved conte
 Status: [Partly built] — Phase A built in Auth, the Portal and the admin site, off by default (DELEGATED_HOST_WORK); Phase B
 and C not started. Agreed by Atem, Astation and Auth/Portal on 2026-11-08; Atem's build has started.
 
-**Phases.** Phase A is the first slice of Auth/Portal's part (below): `interruptRunning` on revocations, the later
-interrupt, the native revoke, the account-level feed entries and the page copy. It is defined by the Phase A plans for
-Auth, the Portal and the admin site (`plans/2026-11-11-d29-phase-a-*.md`, kept with the working notes outside this
-repository), and sits at step 6 of the design's order of work (V.2 in the design below). Phases B and C are the later
-slices of that list and of V.2; no document defines them further yet.
+**Phases.** Phase A is the first slice of Auth/Portal's part (below), built behind the settings. `interruptRunning` on
+revocations, the later interrupt, the native revoke and the page copy belong to step 6 of the design's order of work (V.2
+in the design below). The account-level feed entries (`account_disabled`, `account_enabled`) belong to its step 10 (III.5,
+disabled accounts): they are built ahead of it, behind the setting, and their shape is provisional until Auth/Portal and
+Astation define III.5 jointly. Phases B and C are later slices, not started.
 
 **The decision.** Atem owns accepted tasks of delegated senders: integrations a Station's control feed covers, native members, and host senders with project grants. Natural expiry and renewal don't touch accepted tasks, and each task's deadline (at most 24 h) bounds it, running turns included. A revocation cancels unstarted tasks and interrupts running ones only when the owner chooses it. An integration's pause holds its unstarted tasks; host senders have no pause, only revoke and readmit. Stops reach hosts as signed control records (from the Station for integrations, from native managers for host senders) or as device-list entries, and a host reconciles its feeds and mailbox before it starts queued remote work. R9 authorization stays with native managers, outside Agora.Build's kill switch. Agora.Build's service availability is separate: disabling an Agora.Build account suspends the built-in Station's relay and mailbox service for that account's hosts, and revokes nothing.
 

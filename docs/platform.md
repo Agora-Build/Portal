@@ -839,9 +839,12 @@ Known Phase A limits:
   account entry, with Auth's setting on. Accounts disabled before that are not listed. Closing this waits for the joint
   service-suspension design (Atem's `designs/delegated-host-work.md`, III.5).
 - A `revoked` entry the Portal followed while its setting was off is not applied again, so an admin's revocation that
-  asked to interrupt running tasks stays recorded as not interrupting. This happens only if the order above is broken (the
-  admin site's setting on while the Portal's is off). An admin's later Interrupt running tasks is still followed, and is
-  the remedy.
+  asked to interrupt running tasks stays recorded in the Portal as not interrupting. This happens only if the order above
+  is broken (the admin site's setting on while the Portal's is off). An admin's later Interrupt running tasks is no
+  remedy: Auth already holds the revocation's `interrupt_running: true` as asked, so it answers `changed: false` and writes
+  no feed entry, and the Portal never hears of it. The remedy is within 24 hours of the revocation: the integration's
+  owner (or the owner of its custom Station) uses Interrupt running tasks on the account page, since the Portal's row
+  still says `false`. The Portal records it and pushes the Station; after 24 hours it refuses (409 `too_late`).
 
 If the setting is turned off again, what was recorded while it was on stays, and is served as recorded: the Station feed
 keeps its entries, but `interruptRunning` is no longer carried, neither on changes nor on `integration` objects, and
