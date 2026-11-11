@@ -540,10 +540,17 @@ export function createIntegrationService({
   // An entry of Auth's change feed about an account, not an integration (D29, the setting on): an admin disabled or
   // enabled it. Each built-in Station records it, once, so its feed can tell the Station (a cursor-0 read lists the
   // accounts disabled now); a custom Station never gets one, since an admin's action against a person isn't disclosed
-  // to a third-party operator (design III.5). Returns "applied" when any Station recorded it, else "skipped".
+  // to a third-party operator (design III.5). Each Station is pushed as its own write commits, so one whose write fails
+  // (the reader then reads the entry again) doesn't hold back the others. Returns "applied" when any Station recorded
+  // it, else "skipped".
   async function accountChange(entry, actor, reason) {
-    const recorded = [];
-    for (const station of await repository.builtInStations()) {
+    const stations = await repository.builtInStations();
+    if (!stations.length) {
+      log("Auth account change skipped: no built-in Station.");
+      return "skipped";
+    }
+    let applied = false;
+    for (const station of stations) {
       const written = await appending(async (client) => {
         if (await repository.accountChangeApplied(station.id, entry.cursor, entry.at, client)) return false;
         await repository.appendEvent({
@@ -552,10 +559,11 @@ export function createIntegrationService({
         }, client);
         return true;
       });
-      if (written) recorded.push(station.id);
+      if (!written) continue;
+      applied = true;
+      changed(station.id);
     }
-    for (const stationId of recorded) changed(stationId);
-    return recorded.length ? "applied" : "skipped";
+    return applied ? "applied" : "skipped";
   }
 
   // Shown as paused while its own state is not: its owner's account is disabled.
@@ -1047,9 +1055,9 @@ export function createIntegrationService({
       const rows = await repository.integrationsOnStation(station.id);
       const at = now();
       const current = new Map(rows.map((row) => [row.id, row]));
-      // Account entries recorded while the setting was on are not shown once it is off: the feed is as it was.
-      const changes = events.filter(({ kind }) => delegatedHostWork || !ACCOUNT_KINDS.includes(kind)).map(({ id, at: when, integrationId, accountId, kind, state, reason, details }) => {
-        // An admin's disabling or enabling of an account: the admin and their reason stay in the Portal's event.
+      const changes = events.map(({ id, at: when, integrationId, accountId, kind, state, reason, details }) => {
+        // An admin's disabling or enabling of an account: the admin and their reason stay in the Portal's event. Served as
+        // recorded, as Auth does, even if the setting has been turned off since.
         if (ACCOUNT_KINDS.includes(kind)) return { id, at: when, integrationId: null, kind, state: null, reason: AGORA_BUILD, account: accountId };
         // Agora.Build's changes say only that: the admin and their reason stay in the Portal's event (spec §3.3.4).
         const masked = Object.hasOwn(OWNER_EVENTS, kind);

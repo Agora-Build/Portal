@@ -19,8 +19,9 @@ const ADMIN_PAUSED = "Agora.Build paused this integration. Only Agora.Build can 
 const publicJwk = () => generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey.export({ format: "jwk" });
 
 // `delegatedHostWork` turns the setting on in the service (D29), and Auth's side with it unless `authDelegated` says
-// otherwise (the fake then writes the account entries a delegated Auth does).
-async function setup(t, { delegatedHostWork = false, authDelegated = delegatedHostWork } = {}) {
+// otherwise (the fake then writes the account entries a delegated Auth does). `wrap` wraps the repository the service
+// uses; the one the tests read is the plain one.
+async function setup(t, { delegatedHostWork = false, authDelegated = delegatedHostWork, wrap = (repository) => repository } = {}) {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
   const repository = createRepository(db);
@@ -31,7 +32,7 @@ async function setup(t, { delegatedHostWork = false, authDelegated = delegatedHo
   const logs = [];
   let asked = 0;
   const service = createIntegrationService({
-    repository, db, manage, stationFetch: { async get() { return { status: 404, body: "" }; } }, exchange: async () => ({}),
+    repository: wrap(repository), db, manage, stationFetch: { async get() { return { status: 404, body: "" }; } }, exchange: async () => ({}),
     now: () => clock.now, log: (line) => logs.push(line), notify: (stationId) => notified.push(stationId), authChanged: () => { asked += 1; }, delegatedHostWork
   });
   await service.syncBuiltIn();
@@ -629,8 +630,12 @@ test("with the setting off, Auth's interrupt and account entries are skipped as 
   s.manage.interruptChange(id, { actor: ADMIN, reason: "Interrupt" });
   s.manage.setOwnerDisabled(OWNER, true, { actor: ADMIN, reason: "Abuse" });
   assert.deepEqual(s.manage.feed.map((entry) => entry.kind), ["revoked", "revoked", "interrupt_requested", "account_disabled", "owner_disabled"]);
+  // The skipped entries push no Station; the others push the built-in Station.
   s.notified.length = 0;
+  for (const entry of s.manage.feed.slice(2, 4)) assert.equal(await s.service.applyAuthChange(entry), "skipped");
+  assert.deepEqual(s.notified, []);
   assert.deepEqual(await s.follow(), ["applied", "applied", "skipped", "skipped", "applied"]);
+  assert.deepEqual([...new Set(s.notified)], [s.built.id]);
   assert.ok(s.logs.includes("Auth change skipped: not a change entry."));
   const written = await s.db.pool.query("SELECT kind FROM integration_events WHERE kind IN ('integration_interrupt_requested', 'account_disabled', 'account_enabled')");
   assert.deepEqual(written.rows, []);
@@ -641,18 +646,47 @@ test("with the setting off, Auth's interrupt and account entries are skipped as 
   assert.equal(Object.hasOwn(await s.stationFeed(), "disabledAccounts"), false);
 });
 
-// Account entries written while the setting was on aren't shown to a Station once it is off: its feed is as it was.
-test("with the setting turned off again, a Station's feed shows none of the account entries recorded while it was on", async (t) => {
-  const s = await setup(t, { delegatedHostWork: true });
+// Each built-in Station is pushed as its own write commits: a later Station's failure (the reader reads the entry again)
+// doesn't hold back the earlier ones, and the entry then completes without writing or pushing the first again.
+test("with the setting on, an account entry pushes each built-in Station as its own write commits, and a later Station's failed write leaves the earlier one pushed", async (t) => {
+  const control = { failStation: null, noBuiltIn: false };
+  const s = await setup(t, {
+    delegatedHostWork: true,
+    wrap: (repository) => ({
+      ...repository,
+      appendEvent: async (event, client) => {
+        if (event.stationId === control.failStation && event.kind === "account_disabled") throw new Error("write failed");
+        return repository.appendEvent(event, client);
+      },
+      builtInStations: async (...args) => (control.noBuiltIn ? [] : repository.builtInStations(...args))
+    })
+  });
   if (!s) return;
+  const second = s.manage.seedBuiltIn({ id: "stbuiltin2", origin: "https://station2.agora.test", name: "Second", integrations: true, admins: [ADMIN], reportClientId: "s-" + "0".repeat(24) + "b2" });
+  assert.equal(await s.service.syncBuiltIn(), true);
   s.manage.accountChange(OWNER, true, { actor: ADMIN, reason: "Abuse" });
-  await s.follow();
-  assert.equal((await s.stationFeed()).changes.some((change) => change.kind === "account_disabled"), true);
-  const off = createIntegrationService({ repository: s.repository, db: s.db, manage: s.manage, stationFetch: { async get() { return { status: 404, body: "" }; } }, exchange: async () => ({}), now: () => s.clock.now });
-  const feed = await off.changes(s.built.reportClientId, 0);
-  assert.equal(feed.changes.some((change) => change.kind.startsWith("account_")), false);
-  assert.equal(Object.hasOwn(feed, "disabledAccounts"), false);
-  assert.equal(feed.cursor, (await s.stationFeed()).cursor, "the cursor still moves past them");
+  const [entry] = s.manage.feed;
+
+  control.failStation = second.id;
+  s.notified.length = 0;
+  await assert.rejects(s.service.applyAuthChange(entry), /write failed/);
+  assert.deepEqual(s.notified, [s.built.id], "the first Station is pushed, as its write committed");
+  assert.equal((await s.accountEvents(s.built.id)).length, 1);
+  assert.equal((await s.accountEvents(second.id)).length, 0);
+
+  control.failStation = null;
+  s.notified.length = 0;
+  assert.equal(await s.service.applyAuthChange(entry), "applied", "read again, it completes");
+  assert.deepEqual(s.notified, [second.id], "only the Station that was missing");
+  assert.deepEqual([(await s.accountEvents(s.built.id)).length, (await s.accountEvents(second.id)).length], [1, 1]);
+  assert.equal(await s.service.applyAuthChange(entry), "skipped");
+
+  // With no active built-in Station there is nothing to record, and the skip is logged.
+  control.noBuiltIn = true;
+  s.notified.length = 0;
+  assert.equal(await s.service.applyAuthChange({ ...entry, cursor: "another" }), "skipped");
+  assert.ok(s.logs.includes("Auth account change skipped: no built-in Station."));
+  assert.deepEqual(s.notified, []);
 });
 
 function stateOf(answer, id) {
