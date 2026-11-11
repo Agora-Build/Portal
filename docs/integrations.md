@@ -443,7 +443,8 @@ use. The full field list is in
 - **Plan limits.** The Portal, not Auth, enforces them: Auth knows nothing of plans. It counts the account's
   integrations on the built-in Station in every state except `revoked`, and not expired, and at the plan's limit
   answers `403 plan_limit` ("Your plan allows N integrations on the built-in Station. Revoke one, upgrade, or use your
-  own Station."). Renewing an expired one counts as a creation. After a move to a plan with a lower limit, existing
+  own Station."). With `DELEGATED_HOST_WORK` on (D29), `revoking` doesn't count either: Auth has already revoked the
+  integration, and its hosts may take up to 24 hours to confirm. Renewing an expired one counts as a creation. After a move to a plan with a lower limit, existing
   integrations keep working and new ones wait until the account is under its limit. The count is exact within one
   Portal process; several replicas could pass it by one (accepted).
 - The feed and reports work as for any Station: its report client sees every integration on it, each with
