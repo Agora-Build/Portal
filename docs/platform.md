@@ -546,7 +546,7 @@ The tables:
 | `stations` | Auth's Station ID, origin, owner (none for a built-in Station), report client ID, `active` or `removed`, `built_in`, `access` (`members` or `any_account`), `integrations_enabled`, `name` |
 | `station_members` | accounts a Station is shared with, with who added or removed them and when |
 | `station_challenges` | issued proof values, valid 10 minutes, single use |
-| `integrations` | Auth's `i-` client ID, owner, Station, scopes, state, `resume_state`, `r9_svc`, quota, expiry, `last_error`, `paused_by` (who paused it, as Auth says: `owner`, `station` or `admin`), `owner_disabled_at` (while Agora.Build has the owner's account disabled) |
+| `integrations` | Auth's `i-` client ID, owner, Station, scopes, state, `resume_state`, `r9_svc`, quota, expiry, `last_error`, `paused_by` (who paused it, as Auth says: `owner`, `station` or `admin`), `owner_disabled_at` (while Agora.Build has the owner's account disabled), `revoked_at` (when it was revoked; empty for one revoked before migration 004), `interrupt_running` (whether its revocation interrupts the tasks running on the owner's hosts; see below) |
 | `integration_events` | every change, kept forever; also the Stations' change feed |
 | `auth_change_feed` | one row: where the Portal is in Auth's change feed (Auth's cursor) |
 
@@ -572,6 +572,18 @@ Auth's clients file must be set up for this:
 - the `portal` client has `"manage": true`, `"exchange": true`,
   `"stationScopes": ["station.read"]`, its `backchannelLogoutUri`, and
   `"changesNudgeUri": "<SITE_URL>/auth/integration-changes"` (see "Admin Changes From Auth").
+
+Migration `004_delegated_host_work.sql` adds `integrations.revoked_at` and `integrations.interrupt_running`. `revoked_at`
+is recorded for every revocation, whatever the setting (one from Auth's feed takes Auth's time); `interrupt_running` is set
+only with `DELEGATED_HOST_WORK=1`, below.
+
+**With `DELEGATED_HOST_WORK=1` (off by default):** the Portal offers delegated host work, Phase A of
+[D29](integrations.md#311-delegated-host-work-d29): a revocation says whether to interrupt the tasks running on the
+owner's hosts, those tasks can be interrupted later within 24 hours, and the built-in Station hears when an admin
+disables or enables an account. The Portal reads the one variable when it starts; only `1` turns it on, and any other
+value or none is off. Off is today's behaviour exactly: the routes, bodies, views and feed entries below do not exist and
+the account page shows nothing new. On, `GET /api/me` also answers `"delegatedHostWork": true`, which the page reads. Turn
+it on in the order in "Turning On Delegated Host Work".
 
 ### The Built-in Station
 
@@ -695,6 +707,20 @@ integration's Station refuses still-valid tokens and closes open sessions at onc
   lift. To check by hand, compare the Portal's
   `SELECT id, owner_account, owner_disabled_at FROM integrations WHERE owner_disabled_at IS NOT NULL;` with Auth's
   `accounts.disabled_at` for those owners. A flag on an account Auth shows enabled is stale.
+- **With `DELEGATED_HOST_WORK=1` (off by default):** the Portal follows three more kinds of Auth's feed, which Auth
+  writes only with its own `AUTH_DELEGATED_HOST_WORK` on.
+  - `interrupt_requested`: an admin asked to interrupt the running tasks of a revoked integration. The Portal sets the
+    integration's `interruptRunning`, records `integration_interrupt_requested` with the admin as `actor`, appends it to
+    the Station's feed and pushes the Station. A `revoked` entry now also carries `interruptRunning`: when it is true the
+    Portal sets the choice too, also on an integration its owner revoked first (the revocation keeps its first time). The
+    choice only ever goes from false to true.
+  - `account_disabled` and `account_enabled`: an admin disabled or enabled an account. They name the account (`owner`)
+    and no integration, and come ahead of the per-integration owner-disabled entries, which are followed as above. Each
+    active built-in Station records one, once (an event with no integration), and is pushed; a custom Station never gets
+    one, since an admin's action against a person is not disclosed to a Station's operator. With no built-in Station the
+    log says `Auth account change skipped: no built-in Station.`
+  - With the setting off the Portal skips these kinds like any entry it does not know (`Auth change skipped: not a
+    change entry.`) and its cursor moves past them.
 
 #### Rolling Out Admin Changes (Dev First)
 
@@ -778,6 +804,31 @@ Portal keep working.
 - **After restoring the Portal's database** the Stations' own feed refuses an old cursor (see "Cursors"). The reader
   continues from the backup's cursor and applies again, by itself, the admin changes Auth made since the backup.
 
+#### Turning On Delegated Host Work
+
+**With `DELEGATED_HOST_WORK=1` (off by default),** in this order:
+
+1. **Auth first.** Turn on Auth's `AUTH_DELEGATED_HOST_WORK`. A Portal with the setting on sends `interruptRunning` with
+   a revocation, and an Auth with its setting off refuses that unknown field (400), so no revocation would work.
+2. **Then the Portal.** Set `DELEGATED_HOST_WORK=1` and restart. Migration 004 runs when the server starts, whatever the
+   setting.
+3. **Reset the Portal's Auth cursor once**, with `UPDATE auth_change_feed SET cursor = NULL;` on the Portal database (the
+   step already given for a restore; reading again is safe, since changes it applied are recognised and skipped). While
+   the setting was off, the reader skipped Auth's new entries (an admin's interrupt requests and account changes) and
+   moved past them, and an account entry read before a built-in Station existed was skipped too; reading again brings
+   them in.
+
+Known Phase A limits:
+
+- The cursor-0 `disabledAccounts` (see "For Station Builders") lists only accounts whose disabling Auth recorded as an
+  account entry, with Auth's setting on. Accounts disabled before that are not listed. Closing this waits for the joint
+  service-suspension design (Atem's `designs/delegated-host-work.md`, III.5).
+- A `revoked` entry the Portal followed while its setting was off is not applied again, so an admin's revocation that
+  asked to interrupt running tasks stays recorded as not interrupting.
+
+If the setting is turned off again, what was recorded while it was on (the interrupt choice, interrupt requests, account
+events) stays in the Station feed; readers skip kinds they don't know.
+
 ### Routes
 
 Browser routes use the session cookie and are not accepted with tokens. Request
@@ -804,6 +855,33 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
 | `POST /api/v1/integrations/<id>/approval` `{ r9Svc }` | token, `integrations:approve` | native approval; `r9Svc` is 64 lower-case hex characters |
 | `POST /api/v1/stations/reports` | token, `station.report` | a Station's report |
 | `GET /api/v1/stations/changes?cursor=` | token, `station.report` | the Station's change feed |
+
+**With `DELEGATED_HOST_WORK=1` (off by default):**
+
+| Route | Who | What |
+| --- | --- | --- |
+| `POST /api/integrations/<id>/revoke` `{ interruptRunning }` | browser | revoke, saying whether to also interrupt the tasks running on the owner's hosts now (true or false); the body is required |
+| `POST /api/integrations/<id>/interrupt` | browser | interrupt those tasks later, within 24 hours of the revocation; by the integration's owner or the owner of its custom Station |
+| `POST /api/v1/integrations/<id>/revoke` `{ interruptRunning }` | token, `integrations:approve` | Astation revokes the token's account's own integration, with the same body |
+
+- The choice goes to Auth with the revocation and is kept on the integration and in the revoke event. A request
+  without a JSON body is 415; a missing or non-boolean `interruptRunning` is 400 `interrupt_running` ("Say whether to interrupt running
+  tasks: send interruptRunning as true or false."), answered before the integration is looked up and before Auth is asked.
+  Pause and resume still take no body. Revocations the Portal makes for someone else (a member removed, a Station
+  removed, an integration Auth no longer lists) never interrupt: they record `false`.
+- `interrupt` takes no body and answers the integration. It needs a revoking or revoked integration (else 409
+  `invalid_state`: "Only a revoked integration's running tasks can be interrupted.") and at most 24 hours since
+  `revokedAt`, 24 hours exactly included (else 409 `too_late`: "Running tasks can be interrupted only within 24 hours of
+  the revocation."). An integration revoked before migration 004 has no `revokedAt` and is too late. An account that
+  may not see the integration gets 404. Asking again once it is interrupted, even after the 24 hours, answers the same
+  and changes nothing. Auth is not asked: the Portal records it (`integration_interrupt_requested`, with `owner` or
+  `station_owner` as the reason) and pushes the Station. It shares the limit of 30 changes a minute given below.
+- The native revoke is for the integration's owner only: any other account, the custom Station's owner included, gets 404.
+  Errors, answer and limit are the browser's; the event records the app's client ID. A repeated revoke is a 200 that
+  changes nothing. A token on the unversioned path gets the usual `/api/v1` 404, and a token without
+  `integrations:approve` 403 `insufficient_scope`.
+- A revoking or revoked integration's view (the lists, and the answers above) also has `revokedAt` (its time, or null) and
+  `interruptRunning`.
 
 Apps and Stations that send an access token use `/api/v1/` only: a bearer
 token on the unversioned `/api/...` path gets 404 naming the `/api/v1` path.
@@ -958,6 +1036,31 @@ owner had paused it). As soon as an integration's `state` is `paused`,
 open sessions and streams; its tokens are never trusted past their 300-second
 lifetime anyway. A removed Station cannot read its feed any more (its report client is
 gone at Auth), so it never sees its own `station_removed`.
+
+**With `DELEGATED_HOST_WORK=1` (off by default),** the feed also says what to do about tasks already running on the
+Station's hosts ([D29](integrations.md#311-delegated-host-work-d29)). None of the following appears while the setting
+is off.
+
+- `integration.interruptRunning` is the integration's current choice: whether to interrupt the tasks running on the
+  owner's hosts. It is on the `integration` of a change and on each `integrations` snapshot entry, for integrations whose
+  `state` is `revoking` or `revoked` only. It only ever goes from `false` to `true`; act on it as you do on `state`.
+- A revoked change's own `interruptRunning`, on `integration_revoked`, is what that change stated: `true` when the
+  revocation asked to interrupt, and `false` when it did not, for an indirect revocation (a member removed, an
+  integration Auth no longer lists) and for one recorded before the setting was on.
+- `integration_interrupt_requested` is a new kind: after the revocation, the integration's owner (`reason` `owner`) or
+  its custom Station's owner (`station_owner`), within 24 hours of it, or an Agora.Build admin (`agora_build`), asked to
+  interrupt the running tasks. The change has `interruptRunning: true` and an `integration` with its `state` (`revoking`
+  or `revoked`) and `interruptRunning: true`. It can arrive more than once for one integration; the choice stays true.
+- `account_disabled` and `account_enabled` are for the built-in Station only: an Agora.Build admin disabled or enabled an
+  account. The change is `{ id, at, integrationId: null, kind, state: null, reason: "agora_build", account }` with
+  `account` the `ab…` account ID, and has no `integration`. It comes with the `integration_paused` and
+  `integration_resumed` changes for that account's integrations. A cursor-0 read of the built-in Station also has
+  `disabledAccounts`, the account IDs disabled now. A custom Station gets neither the changes nor `disabledAccounts`.
+  Known Phase A limit: `disabledAccounts` lists only accounts whose disabling Auth recorded as an account entry (with
+  Auth's setting on); accounts disabled before that are not listed.
+- A report's answer does not carry `revokedAt` or `interruptRunning`; the feed does, for the latter.
+- Readers skip kinds they don't know. A kind with no `integration`, such as the account changes, has nothing to act on;
+  move the cursor on.
 
 **The push nudge.** After a committed change the Portal sends
 `POST <origin>/agora-build/v1/changes` with `{ "cursor": <n> }` to the Station,

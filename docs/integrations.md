@@ -73,7 +73,7 @@ Status: [Partly built] — each row has its own tags; the notes under the table 
 | The admin site (§3.3.4) | D26 | [Built] | [Built] | [Built] | [Built] | n/a |
 | Management through the admin site (§3.3.5) | D27 | [Not built] | [Not built] | [Not built] | n/a | n/a |
 | Launch, message and notify (§3.1.3) | D28 | [Built] | [Built] | n/a | [Built, off] | [Built] |
-| Delegated host work (§3.11) | D29 | [Not built] | [Not built] | [Not built] | [Not built] | [Not built] |
+| Delegated host work (§3.11) | D29 | [Built, off] | [Built, off] | [Not built] | [Not built] | [Not built] |
 | Hosted agent execution (§3.3.2) | D2, D24 | n/a | n/a | n/a | [Built] | [Built] |
 | Discord (§3.8) | D18, D22 | n/a | [Not built] | n/a | [Not built] | n/a |
 | The assistant (§3.9) | D8, D20 | [Not built] | [Not built] | n/a | [Not built] | n/a |
@@ -90,9 +90,10 @@ Notes:
 - **Launch, message and notify, Station (Astation):** the Station maps the three scopes to Atem's operations only with
   the Cargo feature `host-work-api`, which is off on every Station. Astation's consent review, signing gate and native
   launch are merged; its message inbox is not built.
-- **Delegated host work:** the design was agreed by Atem, Astation and Auth/Portal on 2026-11-08. Nothing is built; Atem
-  has started its shared core, and nothing new is activated until the agreed schemas, compatible verifiers and
-  end-to-end tests are in place.
+- **Delegated host work:** the design was agreed by Atem, Astation and Auth/Portal on 2026-11-08. Phase A is built in
+  Auth and the Portal, off by default (`DELEGATED_HOST_WORK`, and Auth's `AUTH_DELEGATED_HOST_WORK`); Phases B and C are
+  not started. Atem has started its shared core, and nothing new is activated until the agreed schemas, compatible
+  verifiers and end-to-end tests are in place.
 - **Hosted agent execution:** the dev Station image is built with the Cargo feature `hosted-agent-api`; default and
   production builds keep it closed.
 - **Production:** no production Auth, Portal or built-in Station is set up. The admin site's code accepts only its dev
@@ -985,8 +986,8 @@ the Station (and its operator) can use it, and that prompts with retrieved conte
 
 ### 3.11 Delegated host work (D29)
 
-Status: [Not built] — agreed by Atem, Astation and Auth/Portal on 2026-11-08; Atem's build has started, Auth/Portal's
-part is not started.
+Status: [Partly built] — Phase A built in the Portal and Auth, off by default (DELEGATED_HOST_WORK); Phase B and C not
+started. Agreed by Atem, Astation and Auth/Portal on 2026-11-08; Atem's build has started.
 
 **The decision.** Atem owns accepted tasks of delegated senders: integrations a Station's control feed covers, native members, and host senders with project grants. Natural expiry and renewal don't touch accepted tasks, and each task's deadline (at most 24 h) bounds it, running turns included. A revocation cancels unstarted tasks and interrupts running ones only when the owner chooses it. An integration's pause holds its unstarted tasks; host senders have no pause, only revoke and readmit. Stops reach hosts as signed control records (from the Station for integrations, from native managers for host senders) or as device-list entries, and a host reconciles its feeds and mailbox before it starts queued remote work. R9 authorization stays with native managers, outside Agora.Build's kill switch. Agora.Build's service availability is separate: disabling an Agora.Build account suspends the built-in Station's relay and mailbox service for that account's hosts, and revokes nothing.
 
