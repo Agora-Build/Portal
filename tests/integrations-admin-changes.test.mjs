@@ -12,24 +12,27 @@ import { testDatabase } from "./helpers/test-db.mjs";
 
 const OWNER = "ab" + "0".repeat(25) + "1";
 const OTHER = "ab" + "0".repeat(25) + "2";
+const THIRD = "ab" + "0".repeat(25) + "3";
 const ADMIN = "ab" + "0".repeat(25) + "4";
 const R9 = "a".repeat(64);
 const ADMIN_PAUSED = "Agora.Build paused this integration. Only Agora.Build can resume it.";
 const publicJwk = () => generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey.export({ format: "jwk" });
 
-async function setup(t) {
+// `delegatedHostWork` turns the setting on in the service (D29), and Auth's side with it unless `authDelegated` says
+// otherwise (the fake then writes the account entries a delegated Auth does).
+async function setup(t, { delegatedHostWork = false, authDelegated = delegatedHostWork } = {}) {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
   const repository = createRepository(db);
   const clock = { now: Date.now() };
-  const manage = fakeManage({ now: () => clock.now });
+  const manage = fakeManage({ now: () => clock.now, delegated: authDelegated });
   const built = manage.seedBuiltIn({ integrations: true, admins: [ADMIN] });
   const notified = [];
   const logs = [];
   let asked = 0;
   const service = createIntegrationService({
     repository, db, manage, stationFetch: { async get() { return { status: 404, body: "" }; } }, exchange: async () => ({}),
-    now: () => clock.now, log: (line) => logs.push(line), notify: (stationId) => notified.push(stationId), authChanged: () => { asked += 1; }
+    now: () => clock.now, log: (line) => logs.push(line), notify: (stationId) => notified.push(stationId), authChanged: () => { asked += 1; }, delegatedHostWork
   });
   await service.syncBuiltIn();
   const create = async (accountId = OWNER) => (await service.createIntegration(accountId, { stationId: built.id, name: "Hosted", scopes: [], publicJwk: publicJwk() })).id;
@@ -50,7 +53,9 @@ async function setup(t) {
   };
   const events = async (id) => (await db.pool.query("SELECT kind, state, actor, reason, details FROM integration_events WHERE integration_id = $1 ORDER BY id", [id])).rows;
   const stationFeed = () => service.changes(built.reportClientId, "0");
-  return { db, repository, manage, clock, service, built, create, ready, follow, events, stationFeed, notified, logs, authAsked: () => asked };
+  // The account-level events of a Station (no integration), oldest first.
+  const accountEvents = async (stationId) => (await db.pool.query("SELECT id, kind, state, actor, reason, account_id, details FROM integration_events WHERE station_id = $1 AND integration_id IS NULL AND kind IN ('account_disabled', 'account_enabled') ORDER BY id", [stationId])).rows;
+  return { db, repository, manage, clock, service, built, create, ready, follow, events, accountEvents, stationFeed, notified, logs, authAsked: () => asked };
 }
 
 test("an admin's pause in Auth's feed pauses the Portal's row, records the admin and the reason, and pushes the Station", async (t) => {
@@ -428,6 +433,226 @@ test("the Station's report answer does not say who paused an integration", async
   assert.deepEqual([answer.id, answer.state, answer.pausedFrom], [id, "paused", "ready"]);
   assert.equal(Object.hasOwn(answer, "pausedBy"), false);
   assert.equal(Object.hasOwn(answer, "role"), false);
+});
+
+// D29 (the setting on: delegatedHostWork): Auth's revoked entry says whether the revocation interrupts running tasks.
+test("with the setting on, an admin's revocation with interruptRunning revokes the row with the choice and Auth's time, and the Station's feed says so", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const id = await s.ready();
+  const plain = await s.ready();
+  const declined = await s.ready();
+  s.clock.now += 5000;
+  s.manage.adminChange(id, { status: "revoked", actor: ADMIN, reason: "Confirmed abuse", interruptRunning: true });
+  s.manage.adminChange(plain, { status: "revoked", actor: ADMIN, reason: "Confirmed abuse" });
+  s.manage.adminChange(declined, { status: "revoked", actor: ADMIN, reason: "Confirmed abuse", interruptRunning: false });
+  const [entry] = s.manage.feed;
+  assert.equal(entry.interruptRunning, true);
+  assert.equal(s.manage.integrationRecords.find((record) => record.clientId === id).interruptRunning, true, "Auth's record agrees with its entry");
+  assert.deepEqual(await s.follow(), ["applied", "applied", "applied"]);
+  const row = await s.repository.integration(id);
+  assert.deepEqual([row.state, row.interruptRunning, row.revokedAt], ["revoking", true, entry.at], "dated as Auth dated it");
+  assert.deepEqual((await s.events(id)).at(-1).details, { authCursor: entry.cursor, authAt: entry.at, admin: true, interruptRunning: true });
+  // An entry that doesn't say, or says false, means don't interrupt.
+  for (const other of [plain, declined]) {
+    assert.equal((await s.repository.integration(other)).interruptRunning, false);
+    assert.equal((await s.events(other)).at(-1).details.interruptRunning, false);
+  }
+  const feed = await s.stationFeed();
+  const revoked = feed.changes.filter((change) => change.kind === "integration_revoked");
+  assert.deepEqual(revoked.map((change) => [change.integrationId, change.reason, change.interruptRunning]), [[id, "agora_build", true], [plain, "agora_build", false], [declined, "agora_build", false]]);
+  assert.equal(revoked[0].integration.interruptRunning, true);
+  assert.equal(feed.integrations.find((entry) => entry.id === id).interruptRunning, true);
+});
+
+test("with the setting on, an admin's revocation entry for a row the owner already revoked still sets the choice, and only ever to true", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const id = await s.ready();
+  await s.service.revoke(OWNER, id, { interruptRunning: false });
+  const own = s.manage.feed.at(-1);
+  assert.deepEqual([own.kind, own.admin, own.interruptRunning], ["revoked", false, false]);
+  const before = await s.repository.integration(id);
+  const admins = (interruptRunning, n) => ({ ...own, cursor: "admin" + n, at: new Date(Date.parse(own.at) + n * 1000).toISOString(), actorAccountId: ADMIN, reason: "Confirmed abuse", admin: true, interruptRunning });
+  assert.equal(await s.service.applyAuthChange(admins(true, 1)), "applied");
+  const row = await s.repository.integration(id);
+  assert.deepEqual([row.state, row.interruptRunning, row.revokedAt], ["revoking", true, before.revokedAt], "the revocation's date stays");
+  assert.equal(await s.service.applyAuthChange(admins(false, 2)), "applied", "recorded");
+  assert.equal((await s.repository.integration(id)).interruptRunning, true, "never back to false");
+});
+
+test("with the setting on, an admin's interrupt after the owner's own revocation sets the row's flag, is written once as Agora.Build's, and reaches the Station", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const id = await s.ready();
+  const untouched = await s.ready();
+  await s.service.revoke(OWNER, id, { interruptRunning: false });
+  await s.service.revoke(OWNER, untouched, { interruptRunning: false });
+  s.clock.now += 3600000;
+  s.manage.interruptChange(id, { actor: ADMIN, reason: "Still running" });
+  s.manage.interruptChange(id, { actor: ADMIN, reason: "Again" });
+  const entry = s.manage.feed.at(-1);
+  assert.deepEqual([entry.kind, entry.status, entry.interruptRunning, entry.admin], ["interrupt_requested", "revoked", true, true]);
+  assert.equal(s.manage.feed.filter((change) => change.kind === "interrupt_requested").length, 1, "Auth writes an entry only for a real change");
+  s.notified.length = 0;
+  assert.deepEqual(await s.follow(), ["skipped", "skipped", "applied"], "the owner's two revocations are the Portal's own");
+  const row = await s.repository.integration(id);
+  assert.deepEqual([row.state, row.interruptRunning], ["revoking", true]);
+  assert.equal((await s.repository.integration(untouched)).interruptRunning, false);
+  const interrupts = (await s.events(id)).filter((event) => event.kind === "integration_interrupt_requested");
+  assert.equal(interrupts.length, 1);
+  assert.deepEqual([interrupts[0].state, interrupts[0].actor, interrupts[0].reason], ["revoking", ADMIN, "Still running"]);
+  assert.deepEqual(interrupts[0].details, { authCursor: entry.cursor, authAt: entry.at, admin: true, interruptRunning: true });
+  assert.deepEqual(s.notified, [s.built.id], "the Station is pushed");
+  // The owner's history names Agora.Build, not the admin or the reason.
+  const [latest] = (await s.service.history(OWNER, id)).events;
+  assert.deepEqual([latest.kind, latest.state, latest.reason, latest.actor], ["integration_interrupt_requested", "revoking", null, "agora_build"]);
+  // The Station's feed has it as Agora.Build's change, with the integration carrying the flag.
+  const change = (await s.stationFeed()).changes.at(-1);
+  assert.deepEqual([change.integrationId, change.kind, change.state, change.reason, change.interruptRunning, change.integration.interruptRunning], [id, "integration_interrupt_requested", "revoking", "agora_build", true, true]);
+  // The same entry again changes nothing.
+  s.notified.length = 0;
+  assert.equal(await s.service.applyAuthChange(entry), "skipped");
+  assert.equal((await s.events(id)).filter((event) => event.kind === "integration_interrupt_requested").length, 1);
+  assert.deepEqual(s.notified, []);
+});
+
+test("with the setting on, an account's disabling is one event per built-in Station and none on a custom Station, ahead of its integrations' owner_disabled events", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const second = s.manage.seedBuiltIn({ id: "stbuiltin2", origin: "https://station2.agora.test", name: "Second", integrations: true, admins: [ADMIN], reportClientId: "s-" + "0".repeat(24) + "b2" });
+  assert.equal(await s.service.syncBuiltIn(), true);
+  const custom = await s.manage.registerStation({ origin: "https://custom.example", owner: OWNER, reportKey: publicJwk(), actor: OWNER });
+  await s.service.stations(OWNER); // brings the custom Station in
+  const customStation = await s.repository.station(custom.id);
+  assert.equal(customStation.builtIn, false);
+  const liveA = await s.ready();
+  const liveB = await s.ready();
+  await s.ready(OTHER);
+
+  s.manage.setOwnerDisabled(OWNER, true, { actor: ADMIN, reason: "Abusive integrations" });
+  s.manage.accountChange(THIRD, true, { actor: ADMIN, reason: "Owns no integration" });
+  assert.deepEqual(s.manage.feed.map((entry) => [entry.kind, entry.clientId === null]), [["account_disabled", true], ["owner_disabled", false], ["owner_disabled", false], ["account_disabled", true]], "Auth writes the account's entry first");
+  const [account] = s.manage.feed;
+  assert.deepEqual([account.stationId, account.status, account.owner, account.actorAccountId, account.reason, account.admin, Object.hasOwn(account, "interruptRunning")], [null, null, OWNER, ADMIN, "Abusive integrations", true, false]);
+  s.notified.length = 0;
+  assert.equal(await s.service.applyAuthChange(account), "applied");
+  assert.deepEqual([...s.notified].sort(), [s.built.id, second.id].sort(), "each built-in Station is pushed, the custom Station not");
+  assert.deepEqual(await s.follow(), ["skipped", "applied", "applied", "applied"], "the first entry was applied once already");
+
+  // One event on each built-in Station for each account, naming the account, the admin and their reason.
+  for (const station of [s.built, second]) {
+    const written = await s.accountEvents(station.id);
+    assert.deepEqual(written.map((event) => [event.kind, event.state, event.actor, event.reason, event.account_id]), [
+      ["account_disabled", null, ADMIN, "Abusive integrations", OWNER], ["account_disabled", null, ADMIN, "Owns no integration", THIRD]
+    ], station.id);
+    assert.deepEqual(written[0].details, { authCursor: account.cursor, authAt: account.at, admin: true });
+  }
+  assert.deepEqual(await s.accountEvents(custom.id), [], "a custom Station's operator isn't told");
+
+  // The Station's feed: the account's change comes ahead of its integrations' pauses, as Agora.Build's, and a
+  // cursor-0 read lists every account disabled now.
+  const feed = await s.stationFeed();
+  const kinds = feed.changes.filter((change) => ["account_disabled", "integration_paused"].includes(change.kind));
+  assert.deepEqual(kinds.map((change) => [change.kind, change.integrationId, change.account ?? null]), [["account_disabled", null, OWNER], ["integration_paused", liveA, null], ["integration_paused", liveB, null], ["account_disabled", null, THIRD]]);
+  const change = kinds[0];
+  assert.deepEqual(Object.keys(change).sort(), ["account", "at", "id", "integrationId", "kind", "reason", "state"]);
+  assert.deepEqual([change.integrationId, change.kind, change.state, change.reason, change.account], [null, "account_disabled", null, "agora_build", OWNER]);
+  assert.deepEqual(feed.disabledAccounts, [OWNER, THIRD]);
+  assert.deepEqual((await s.service.changes(second.reportClientId, 0)).disabledAccounts, [OWNER, THIRD], "every built-in Station has it");
+  assert.equal(Object.hasOwn(await s.service.changes(s.built.reportClientId, String(feed.cursor)), "disabledAccounts"), false, "only the snapshot of cursor 0 does");
+  const customFeed = await s.service.changes(customStation.reportClientId, 0);
+  assert.equal(Object.hasOwn(customFeed, "disabledAccounts"), false);
+  assert.equal(customFeed.changes.some((entry) => entry.kind.startsWith("account_")), false);
+
+  // Enabling clears the account from the snapshot and is a change of its own.
+  s.manage.setOwnerDisabled(OWNER, false, { actor: ADMIN, reason: "Appeal accepted" });
+  assert.deepEqual(await s.follow(), ["applied", "applied", "applied"]);
+  const back = await s.stationFeed();
+  assert.deepEqual(back.disabledAccounts, [THIRD]);
+  const enabled = back.changes.filter((entry) => entry.kind === "account_enabled");
+  assert.deepEqual(enabled.map((entry) => [entry.integrationId, entry.state, entry.reason, entry.account]), [[null, null, "agora_build", OWNER]]);
+  assert.deepEqual((await s.accountEvents(s.built.id)).slice(-1).map((event) => [event.kind, event.reason]), [["account_enabled", "Appeal accepted"]]);
+  s.manage.accountChange(THIRD, false, { actor: ADMIN, reason: "Cleared" });
+  await s.follow();
+  assert.deepEqual((await s.stationFeed()).disabledAccounts, []);
+  assert.deepEqual((await s.service.changes(second.reportClientId, 0)).disabledAccounts, []);
+});
+
+test("with the setting on, an account entry is applied once however often it is read, and again at another time", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  s.manage.accountChange(OWNER, true, { actor: ADMIN, reason: "Abuse" });
+  const [entry] = s.manage.feed;
+  assert.equal(await s.service.applyAuthChange(entry), "applied");
+  s.notified.length = 0;
+  assert.equal(await s.service.applyAuthChange(entry), "skipped");
+  assert.equal(await s.service.applyAuthChange({ ...entry }), "skipped");
+  assert.equal((await s.accountEvents(s.built.id)).length, 1);
+  assert.deepEqual(s.notified, []);
+  // The same cursor at another time is another change (Auth's database was restored and handed it out again).
+  assert.equal(await s.service.applyAuthChange({ ...entry, at: new Date(Date.parse(entry.at) + 1000).toISOString() }), "applied");
+  assert.equal((await s.accountEvents(s.built.id)).length, 2);
+  assert.deepEqual((await s.stationFeed()).disabledAccounts, [OWNER], "once, however many times it was disabled");
+});
+
+test("with the setting on, entries of the wrong shape for their kind are skipped and logged, and an account entry is Auth's admin's or system's only", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const id = await s.ready();
+  s.manage.accountChange(OWNER, true, { actor: ADMIN, reason: "Abuse" });
+  s.manage.adminChange(id, { status: "paused", actor: ADMIN, reason: "Spam" });
+  const [account, paused] = s.manage.feed;
+  const bad = [
+    { ...account, clientId: id }, { ...account, clientId: undefined }, { ...account, owner: "not an account" }, { ...account, owner: undefined }, { ...account, owner: null },
+    { ...paused, clientId: null }, { ...paused, clientId: undefined }, { ...account, kind: "account_deleted" }
+  ];
+  for (const entry of bad) assert.equal(await s.service.applyAuthChange(entry), "skipped", JSON.stringify(entry));
+  assert.ok(s.logs.includes("Auth change skipped: not a change entry."));
+  assert.equal((await s.accountEvents(s.built.id)).length, 0);
+  assert.equal((await s.events(id)).filter((event) => event.kind === "integration_paused").length, 0);
+  // A person's own change is the Portal's own; Auth writes these two kinds for its admin or system only.
+  assert.equal(await s.service.applyAuthChange({ ...account, admin: false, actorAccountId: OTHER }), "skipped");
+  assert.equal((await s.accountEvents(s.built.id)).length, 0);
+  assert.equal(await s.service.applyAuthChange({ ...account, admin: false, actorAccountId: null }), "applied", "Auth's own, with no actor");
+  assert.deepEqual((await s.accountEvents(s.built.id)).map((event) => [event.actor, event.details.admin]), [["system", false]]);
+});
+
+test("with the setting off, Auth's interrupt and account entries are skipped as not change entries and nothing is written; a revocation's choice is ignored", async (t) => {
+  const s = await setup(t, { authDelegated: true });
+  if (!s) return;
+  const id = await s.ready();
+  const chosen = await s.ready();
+  const live = await s.ready();
+  s.manage.adminChange(id, { status: "revoked", actor: ADMIN, reason: "Abuse", interruptRunning: false });
+  s.manage.adminChange(chosen, { status: "revoked", actor: ADMIN, reason: "Abuse", interruptRunning: true });
+  s.manage.interruptChange(id, { actor: ADMIN, reason: "Interrupt" });
+  s.manage.setOwnerDisabled(OWNER, true, { actor: ADMIN, reason: "Abuse" });
+  assert.deepEqual(s.manage.feed.map((entry) => entry.kind), ["revoked", "revoked", "interrupt_requested", "account_disabled", "owner_disabled"]);
+  s.notified.length = 0;
+  assert.deepEqual(await s.follow(), ["applied", "applied", "skipped", "skipped", "applied"]);
+  assert.ok(s.logs.includes("Auth change skipped: not a change entry."));
+  const written = await s.db.pool.query("SELECT kind FROM integration_events WHERE kind IN ('integration_interrupt_requested', 'account_disabled', 'account_enabled')");
+  assert.deepEqual(written.rows, []);
+  for (const revoked of [id, chosen]) assert.equal((await s.repository.integration(revoked)).interruptRunning, false);
+  const [entry] = s.manage.feed;
+  assert.deepEqual((await s.events(id)).at(-1).details, { authCursor: entry.cursor, authAt: entry.at, admin: true }, "as before the setting");
+  assert.ok((await s.repository.integration(live)).ownerDisabledAt, "the entries before and after it are followed as they were");
+  assert.equal(Object.hasOwn(await s.stationFeed(), "disabledAccounts"), false);
+});
+
+// Account entries written while the setting was on aren't shown to a Station once it is off: its feed is as it was.
+test("with the setting turned off again, a Station's feed shows none of the account entries recorded while it was on", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  s.manage.accountChange(OWNER, true, { actor: ADMIN, reason: "Abuse" });
+  await s.follow();
+  assert.equal((await s.stationFeed()).changes.some((change) => change.kind === "account_disabled"), true);
+  const off = createIntegrationService({ repository: s.repository, db: s.db, manage: s.manage, stationFetch: { async get() { return { status: 404, body: "" }; } }, exchange: async () => ({}), now: () => s.clock.now });
+  const feed = await off.changes(s.built.reportClientId, 0);
+  assert.equal(feed.changes.some((change) => change.kind.startsWith("account_")), false);
+  assert.equal(Object.hasOwn(feed, "disabledAccounts"), false);
+  assert.equal(feed.cursor, (await s.stationFeed()).cursor, "the cursor still moves past them");
 });
 
 function stateOf(answer, id) {

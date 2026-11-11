@@ -11,8 +11,10 @@ export const BUILT_IN_REPORT_CLIENT = "s-" + "0".repeat(24) + "bs";
 // Auth's change feed (integrationChanges): every status change and owner account change, whoever made it; adminChange,
 // systemRevoke and setOwnerDisabled stand in for the admin site's calls and Auth's own changes, and call `onNudge` as
 // Auth nudges the Portal (Auth D26 Task 13). `failNext` makes the next call of that name fail with the given status and
-// code (after the gate, so the call is still recorded).
-export function fakeManage({ now = Date.now } = {}) {
+// code (after the gate, so the call is still recorded). `delegated` is Auth with delegated host work on (D29): disabling
+// or enabling an account then writes its own entry (no integration, no Station) ahead of the per-integration ones;
+// interruptChange and accountChange stand in for the admin site's interrupt and account calls.
+export function fakeManage({ now = Date.now, delegated = false } = {}) {
   const stations = [];
   const integrations = [];
   // Accounts an admin has disabled (setOwnerDisabled): Auth refuses them as actor.
@@ -38,12 +40,19 @@ export function fakeManage({ now = Date.now } = {}) {
   // cursor as Auth hands it out.
   const feed = [];
   const feedCursor = (n) => Buffer.from("c" + n, "utf8").toString("base64url");
-  // A revoked entry carries interruptRunning when the revocation stated it (D29).
+  // A revoked entry carries interruptRunning when the revocation stated it, an interrupt_requested one always (D29).
   function recordChange(integration, kind, { actor = null, reason = null, admin = false, interruptRunning } = {}) {
     feed.push({
       cursor: feedCursor(feed.length + 1), at: new Date(now()).toISOString(), kind, clientId: integration.clientId, stationId: integration.stationId,
       owner: integration.owner, status: integration.status, pausedBy: integration.status === "paused" ? integration.pausedBy ?? null : null,
-      actorAccountId: actor, reason, admin, ...(kind === "revoked" && interruptRunning !== undefined ? { interruptRunning } : {})
+      actorAccountId: actor, reason, admin, ...((kind === "revoked" || kind === "interrupt_requested") && interruptRunning !== undefined ? { interruptRunning } : {})
+    });
+  }
+  // An account-level entry: no integration, no Station, no status, and no interruptRunning (D29).
+  function recordAccount(account, disabled, { actor = null, reason = null } = {}) {
+    feed.push({
+      cursor: feedCursor(feed.length + 1), at: new Date(now()).toISOString(), kind: disabled ? "account_disabled" : "account_enabled", clientId: null, stationId: null,
+      owner: account, status: null, pausedBy: null, actorAccountId: actor, reason, admin: true
     });
   }
   const statusKind = (status) => (status === "paused" ? "paused" : status === "revoked" ? "revoked" : "resumed");
@@ -230,8 +239,30 @@ export function fakeManage({ now = Date.now } = {}) {
       integration.status = status;
       integration.pausedBy = status === "paused" ? "admin" : null;
       recordChange(integration, statusKind(status), { actor, reason, admin: true, interruptRunning });
+      // The last value given on a call that went through, as changeIntegration keeps it.
+      if (interruptRunning !== undefined) integration.interruptRunning = interruptRunning;
       auth.onNudge?.();
       return listed(integration);
+    },
+    // An Agora.Build admin's interrupt of a revoked integration's running tasks (D29), after the revocation: on a
+    // built-in Station the admin administers, with a reason; an interrupt_requested entry with admin: true, then
+    // Auth's nudge. Interrupting an already interrupted integration changes nothing and writes no entry, as at Auth.
+    interruptChange(id, { actor, reason = "Admin test" }) {
+      const integration = auth.findIntegration(id);
+      const station = stations.find((entry) => entry.id === integration.stationId);
+      if (!station.builtIn || !station.admins.includes(actor)) fail(403, "forbidden");
+      if (integration.status !== "revoked") fail(409, "not_revoked");
+      if (integration.interruptRunning === true) return listed(integration);
+      integration.interruptRunning = true;
+      recordChange(integration, "interrupt_requested", { actor, reason, admin: true, interruptRunning: true });
+      auth.onNudge?.();
+      return listed(integration);
+    },
+    // An admin disabling or enabling an account, as its own entry only (setOwnerDisabled writes it too when
+    // `delegated`): for an account that owns no integration, say.
+    accountChange(account, disabled, { actor = null, reason = null } = {}) {
+      recordAccount(account, disabled, { actor, reason });
+      auth.onNudge?.();
     },
     // Auth's own change (no actor): a built-in Station retired by its clients file revokes its integrations.
     systemRevoke(id, reason = "configuration") {
@@ -244,11 +275,15 @@ export function fakeManage({ now = Date.now } = {}) {
     },
     // An admin disabling or enabling an account: Auth then refuses it as actor, or accepts it again, and writes one
     // owner_disabled or owner_enabled entry per integration it owns that is not revoked, each with that integration's
-    // status (Auth D26 R24).
+    // status (Auth D26 R24). With delegated host work (`delegated`) the account's own entry comes first (D29).
     setOwnerDisabled(account, disabled, { actor = null, reason = null } = {}) {
       if (disabled) disabledAccounts.add(account);
       else disabledAccounts.delete(account);
       let written = 0;
+      if (delegated) {
+        recordAccount(account, disabled, { actor, reason });
+        written += 1;
+      }
       for (const integration of integrations) {
         if (integration.owner !== account || integration.status === "revoked") continue;
         recordChange(integration, disabled ? "owner_disabled" : "owner_enabled", { actor, reason, admin: actor !== null });

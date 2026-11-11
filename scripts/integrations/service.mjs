@@ -48,6 +48,11 @@ const ownerDisabled = () => failure(409, OWNER_DISABLED, "owner_disabled");
 // AUTH_CURSOR, shared with the repository).
 const AUTH_KINDS = ["paused", "resumed", "revoked", "owner_disabled", "owner_enabled"];
 const OWNER_KINDS = ["owner_disabled", "owner_enabled"];
+// With the setting on (D29) Auth's feed also has an admin's later interrupt of a revoked integration's running tasks and
+// an admin's disabling or enabling of an account: the account entries name no integration (clientId null) and are for
+// the built-in Stations only.
+const DELEGATED_AUTH_KINDS = [...AUTH_KINDS, "interrupt_requested", "account_disabled", "account_enabled"];
+const ACCOUNT_KINDS = ["account_disabled", "account_enabled"];
 const AUTH_REASON_MAX = 500;
 // How the Station's feed and an integration's history name a change an Agora.Build admin made (spec §3.3.4): the admin
 // and the reason they gave stay in the Portal's event (actor, reason) and in Auth's audit.
@@ -198,6 +203,16 @@ function authTime(value) {
   return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
 }
 
+// Whether an entry of Auth's change feed is one this Portal follows: a kind it knows, a cursor and a time as Auth writes
+// them, and the subject the kind has. An integration's entry names its integration (clientId); an account entry (the
+// setting on, D29) names no integration (clientId null) and an account (owner).
+function changeEntry(entry, delegated) {
+  if (!plainObject(entry) || !(delegated ? DELEGATED_AUTH_KINDS : AUTH_KINDS).includes(entry.kind)) return false;
+  if (typeof entry.cursor !== "string" || !AUTH_CURSOR.test(entry.cursor) || !authTime(entry.at)) return false;
+  if (ACCOUNT_KINDS.includes(entry.kind)) return entry.clientId === null && typeof entry.owner === "string" && ACCOUNT_ID.test(entry.owner);
+  return typeof entry.clientId === "string";
+}
+
 // What an entry of Auth's change feed does to the Portal's row: the event kind and the fields to write. Auth is
 // authoritative, so following it is not held back by expiry: transitions are checked at time 0, as in reconcile. A
 // stopped integration is revoked at Auth, which changes it no more, so an entry about it is older than that and is
@@ -205,10 +220,19 @@ function authTime(value) {
 // is its own flag, not a pause of the row (effectiveState shows it as paused), so enabling it restores each
 // integration as it was. The flag holds the time of the latest disable, written again by every disable, so a flag
 // the Portal saw before an owner's call (byActor) is told apart from one that came after it.
-function authEffect(row, entry) {
+//
+// With the setting on (`delegated`, D29) a revocation that says it interrupts running tasks sets the row's choice, on a
+// stopped row too (the owner revoked first): it only ever goes from false to true. An admin's later interrupt sets it
+// too, whatever the row's state: Auth writes one only for a revoked integration.
+function authEffect(row, entry, { delegated = false } = {}) {
   const stopped = STOPPED.includes(row.state);
-  // A live row's revocation is dated as Auth dated it.
-  if (entry.kind === "revoked") return { kind: "integration_revoked", fields: stopped ? {} : { ...step(row, "revoke", 0), pausedBy: null, revokedAt: entry.at } };
+  const interrupt = delegated && !row.interruptRunning ? { interruptRunning: true } : {};
+  if (delegated && entry.kind === "interrupt_requested") return { kind: "integration_interrupt_requested", fields: interrupt };
+  if (entry.kind === "revoked") {
+    // A live row's revocation is dated as Auth dated it.
+    const revoke = stopped ? {} : { ...step(row, "revoke", 0), pausedBy: null, revokedAt: entry.at };
+    return { kind: "integration_revoked", fields: entry.interruptRunning === true ? { ...revoke, ...interrupt } : revoke };
+  }
   if (stopped) return { kind: "integration_" + entry.kind, fields: {} };
   if (entry.kind === "paused") {
     const pausedBy = PAUSED_BY.includes(entry.pausedBy) ? entry.pausedBy : null;
@@ -511,6 +535,27 @@ export function createIntegrationService({
       log("Built-in Station added from Auth.");
       changed(entry.id);
     }
+  }
+
+  // An entry of Auth's change feed about an account, not an integration (D29, the setting on): an admin disabled or
+  // enabled it. Each built-in Station records it, once, so its feed can tell the Station (a cursor-0 read lists the
+  // accounts disabled now); a custom Station never gets one, since an admin's action against a person isn't disclosed
+  // to a third-party operator (design III.5). Returns "applied" when any Station recorded it, else "skipped".
+  async function accountChange(entry, actor, reason) {
+    const recorded = [];
+    for (const station of await repository.builtInStations()) {
+      const written = await appending(async (client) => {
+        if (await repository.accountChangeApplied(station.id, entry.cursor, entry.at, client)) return false;
+        await repository.appendEvent({
+          stationId: station.id, integrationId: null, accountId: entry.owner, actor, kind: entry.kind, state: null, reason,
+          details: { authCursor: entry.cursor, authAt: entry.at, admin: entry.admin === true }
+        }, client);
+        return true;
+      });
+      if (written) recorded.push(station.id);
+    }
+    for (const stationId of recorded) changed(stationId);
+    return recorded.length ? "applied" : "skipped";
   }
 
   // Shown as paused while its own state is not: its owner's account is disabled.
@@ -1002,7 +1047,10 @@ export function createIntegrationService({
       const rows = await repository.integrationsOnStation(station.id);
       const at = now();
       const current = new Map(rows.map((row) => [row.id, row]));
-      const changes = events.map(({ id, at: when, integrationId, kind, state, reason, details }) => {
+      // Account entries recorded while the setting was on are not shown once it is off: the feed is as it was.
+      const changes = events.filter(({ kind }) => delegatedHostWork || !ACCOUNT_KINDS.includes(kind)).map(({ id, at: when, integrationId, accountId, kind, state, reason, details }) => {
+        // An admin's disabling or enabling of an account: the admin and their reason stay in the Portal's event.
+        if (ACCOUNT_KINDS.includes(kind)) return { id, at: when, integrationId: null, kind, state: null, reason: AGORA_BUILD, account: accountId };
         // Agora.Build's changes say only that: the admin and their reason stay in the Portal's event (spec §3.3.4).
         const masked = Object.hasOwn(OWNER_EVENTS, kind);
         const change = { id, at: when, integrationId, kind: masked ? OWNER_EVENTS[kind] : kind, state, reason: masked || details?.admin === true ? AGORA_BUILD : reason };
@@ -1014,7 +1062,11 @@ export function createIntegrationService({
         return change;
       });
       const answer = { changes, cursor: events.length ? events.at(-1).id : cursor };
-      if (cursor === 0) answer.integrations = rows.map((row) => ({ id: row.id, ...feedIntegration(row, at, delegatedHostWork) }));
+      if (cursor === 0) {
+        answer.integrations = rows.map((row) => ({ id: row.id, ...feedIntegration(row, at, delegatedHostWork) }));
+        // A built-in Station's snapshot includes every account disabled now (design III.5).
+        if (delegatedHostWork && station.builtIn) answer.disabledAccounts = await repository.disabledAccounts(station.id);
+      }
       return answer;
     },
 
@@ -1045,6 +1097,9 @@ export function createIntegrationService({
     // owner's next listing brings them in). Each entry is applied once: its cursor and time are kept in the event's
     // details. Returns "applied" or "skipped"; only a database failure throws, so the reader reads it again.
     //
+    // With the setting on (D29) an admin's interrupt_requested entry is followed the same way, and an account entry
+    // (account_disabled, account_enabled; no integration) is recorded once on each built-in Station (accountChange).
+    //
     // The feed may be read after the Portal already followed a newer change (an owner's listing, the owner's own call,
     // or a revocation). Such an entry is still recorded, and a pause or revocation still applies: a pause that is out
     // of date errs on the safe side, and the owner's next listing follows Auth again. A resume applies only if it is not older
@@ -1052,22 +1107,23 @@ export function createIntegrationService({
     // keeps its state and the event says so (details.superseded), so a resume read late never undoes a newer pause
     // (Ruling R-A). Auth's clock and the Portal's are compared here, so they are kept in sync.
     async applyAuthChange(entry) {
-      if (!plainObject(entry) || !AUTH_KINDS.includes(entry.kind) || typeof entry.clientId !== "string" || typeof entry.cursor !== "string" || !AUTH_CURSOR.test(entry.cursor) || !authTime(entry.at)) {
+      if (!changeEntry(entry, delegatedHostWork)) {
         log("Auth change skipped: not a change entry.");
         return "skipped";
       }
       const ours = !OWNER_KINDS.includes(entry.kind) && entry.admin !== true && entry.actorAccountId !== null;
       if (ours) return "skipped";
+      const actor = typeof entry.actorAccountId === "string" && ACCOUNT_ID.test(entry.actorAccountId) ? entry.actorAccountId : SYSTEM;
+      const reason = typeof entry.reason === "string" && entry.reason ? [...entry.reason].slice(0, AUTH_REASON_MAX).join("") : null;
+      if (ACCOUNT_KINDS.includes(entry.kind)) return accountChange(entry, actor, reason);
       if (!(await repository.integration(entry.clientId))) {
         log("Auth change skipped: the integration is unknown to Portal.");
         return "skipped";
       }
-      const actor = typeof entry.actorAccountId === "string" && ACCOUNT_ID.test(entry.actorAccountId) ? entry.actorAccountId : SYSTEM;
-      const reason = typeof entry.reason === "string" && entry.reason ? [...entry.reason].slice(0, AUTH_REASON_MAX).join("") : null;
       const applied = await appending(async (client) => {
         const row = await repository.integrationForUpdate(entry.clientId, client);
         if (!row || await repository.authChangeApplied(row.id, entry.cursor, entry.at, client)) return null;
-        const effect = authEffect(row, entry);
+        const effect = authEffect(row, entry, { delegated: delegatedHostWork });
         let superseded = false;
         if (entry.kind === "resumed" && Object.keys(effect.fields).length) {
           const { at: latest } = await repository.latestStatus(row.id, client);
@@ -1081,6 +1137,9 @@ export function createIntegrationService({
           state: effectiveState(after, 0), reason,
           details: {
             authCursor: entry.cursor, authAt: entry.at, admin: entry.admin === true,
+            // The choice the entry states, as the Portal's own revocation and interrupt record it (D29).
+            ...(delegatedHostWork && entry.kind === "revoked" ? { interruptRunning: entry.interruptRunning === true } : {}),
+            ...(delegatedHostWork && entry.kind === "interrupt_requested" ? { interruptRunning: true } : {}),
             ...(after.state === "paused" && PAUSED_BY.includes(after.pausedBy) ? { pausedBy: after.pausedBy } : {}),
             ...(superseded ? { superseded: true } : {})
           }
