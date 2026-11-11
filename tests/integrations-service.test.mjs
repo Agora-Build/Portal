@@ -15,12 +15,14 @@ const R9 = "a".repeat(64);
 
 const publicJwk = () => generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey.export({ format: "jwk" });
 
-async function setup(t, { wrap = (repository) => repository, delegatedHostWork = false } = {}) {
+// `delegatedHostWork` turns the setting on in the service (D29), and Auth's side with it unless `authDelegated` says
+// otherwise (an Auth with its setting off refuses interruptRunning).
+async function setup(t, { wrap = (repository) => repository, delegatedHostWork = false, authDelegated = delegatedHostWork } = {}) {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
   const repository = createRepository(db);
   const clock = { now: Date.now() };
-  const manage = fakeManage({ now: () => clock.now });
+  const manage = fakeManage({ now: () => clock.now, delegated: authDelegated });
   const served = { status: 200, body: "" };
   const stationFetch = { async get() { return { ...served }; } };
   const notified = [];
@@ -715,7 +717,7 @@ test("to its Station and the Station's owner, an integration whose owner is disa
 const INTERRUPT_RUNNING = "Say whether to interrupt running tasks: send interruptRunning as true or false.";
 const iso = (ms) => new Date(ms).toISOString();
 
-test("with the setting on, a revoke sends interruptRunning to Auth and keeps it, and revokedAt, on the row, the event and the view", async (t) => {
+test("with the setting on, a revoke sends interruptRunning to Auth only when it is true, and keeps the choice, and revokedAt, on the row, the event and the view", async (t) => {
   const s = await setup(t, { delegatedHostWork: true });
   if (!s) return;
   for (const interruptRunning of [true, false]) {
@@ -723,7 +725,11 @@ test("with the setting on, a revoke sends interruptRunning to Auth and keeps it,
     await s.repository.updateIntegration(id, { state: "ready" });
     s.clock.now += 1000;
     const view = await s.service.revoke(OWNER, id, { interruptRunning });
-    assert.equal(s.record(id).interruptRunning, interruptRunning, "Auth received it");
+    // An unticked revoke sends exactly the body it sent before the setting: a delegated Auth records it as false.
+    const sent = s.manage.sent.at(-1);
+    assert.equal(sent.id, id);
+    assert.deepEqual(sent.fields, { status: "revoked", ...(interruptRunning ? { interruptRunning: true } : {}), actor: OWNER }, "what Auth was sent");
+    assert.equal(s.record(id).interruptRunning, interruptRunning, "Auth recorded the choice");
     assert.equal(s.manage.feed.at(-1).interruptRunning, interruptRunning, "and wrote it in its feed");
     const row = await s.repository.integration(id);
     assert.deepEqual([row.state, row.interruptRunning, row.revokedAt], ["revoking", interruptRunning, iso(s.clock.now)]);
@@ -778,6 +784,36 @@ test("with the setting on, a repeated revoke changes nothing: Auth is not asked 
   assert.deepEqual(await s.repository.integration(id), first, "the row is as it was");
   assert.equal(s.record(id).interruptRunning, false);
   assert.deepEqual([s.manage.calls.length, (await s.events()).length, s.notified.length], [calls, events, notified]);
+});
+
+// The rollout order is Auth's setting first (docs/platform.md); if it is broken, Auth is the one that refuses a ticked
+// revoke as an unknown field, and an unticked one, which sends nothing about it, still works.
+test("with the Portal's setting on and Auth's off, an unticked revoke succeeds and a ticked one is Auth's 400 with nothing written on the Portal", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true, authDelegated: false });
+  if (!s) return;
+  const unticked = (await s.create()).id;
+  const ticked = (await s.create()).id;
+  const native = (await s.create()).id;
+  for (const id of [unticked, ticked, native]) await s.repository.updateIntegration(id, { state: "ready" });
+  s.notified.length = 0;
+  const view = await s.service.revoke(OWNER, unticked, { interruptRunning: false });
+  assert.deepEqual([view.state, view.interruptRunning], ["revoking", false], "the Portal still records its own choice");
+  assert.deepEqual(s.manage.sent.at(-1).fields, { status: "revoked", actor: OWNER }, "and Auth gets today's body");
+  assert.equal(s.record(unticked).status, "revoked");
+  assert.deepEqual([(await s.events("integration_revoked")).at(-1).details.interruptRunning, s.notified.length], [false, 1]);
+  assert.equal((await s.service.revokeNative(OWNER, native, { interruptRunning: false, clientId: "astation" })).state, "revoking", "and so does the native route");
+
+  // A ticked one: Auth refuses the unknown field before it changes anything, and the Portal writes nothing.
+  const before = await s.repository.integration(ticked);
+  const events = (await s.events()).length;
+  s.notified.length = 0;
+  for (const revoke of [() => s.service.revoke(OWNER, ticked, { interruptRunning: true }), () => s.service.revokeNative(OWNER, ticked, { interruptRunning: true, clientId: "astation" })]) {
+    await assert.rejects(revoke(), refused(400, "invalid_request"));
+  }
+  assert.deepEqual(s.manage.sent.slice(-2).map((call) => call.fields.interruptRunning), [true, true], "it was sent, and refused");
+  assert.equal(s.record(ticked).status, "active", "Auth changed nothing");
+  assert.deepEqual(await s.repository.integration(ticked), before, "the row is as it was");
+  assert.deepEqual([(await s.events()).length, s.notified.length], [events, 0], "no event, no push");
 });
 
 test("with the setting on, the Station owner's revoke of a member's integration carries the choice", async (t) => {
@@ -1043,6 +1079,57 @@ test("the history shows the interrupt, as you to the one who asked and by name t
   assert.deepEqual(first((await s.service.history(OWNER, id)).events), ["integration_interrupt_requested", "revoking", "station_owner", "you"]);
   assert.deepEqual(first((await s.service.history(MEMBER, id)).events), ["integration_interrupt_requested", "revoking", "station_owner", OWNER]);
   assert.equal((await s.service.history(OWNER, id)).events[1].kind, "integration_revoked", "newest first");
+});
+
+// A removed Station never reads its feed again, so an interrupt recorded for its integrations would reach no host: it is
+// refused, and the views of its stopped integrations say why so the page can hide the button.
+const INTERRUPT_REMOVED = "This integration's Station has been removed, so its running tasks can't be interrupted here.";
+
+test("a removed Station's integrations can't be interrupted (409 station_removed, nothing written), and their views say stationRemoved", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  await s.service.share(OWNER, s.station.id, MEMBER);
+  const mine = await revokedWithout(s);
+  const theirs = await revokedWithout(s, MEMBER);
+  const { id: live } = await s.create();
+  // Another Station, still there, with a revoked integration of the same owner.
+  const other = await s.register(OWNER, "https://two.example");
+  const { id: elsewhere } = await s.service.createIntegration(OWNER, { stationId: other.id, name: "Elsewhere", scopes: [], publicJwk: publicJwk() });
+  await s.service.revoke(OWNER, elsewhere, { interruptRunning: false });
+  const flag = async (accountId, id) => (await s.service.integrations(accountId)).integrations.find((entry) => entry.id === id);
+  assert.equal(Object.hasOwn(await flag(OWNER, mine), "stationRemoved"), false, "before the removal");
+
+  // Removing a Station revokes the rest, with no interrupt (an indirect revocation).
+  await s.service.removeStation(OWNER, s.station.id);
+  assert.equal((await s.repository.integration(live)).state, "revoked", "revoked at once: it was never approved");
+  const calls = s.manage.calls.length;
+  const events = (await s.events()).length;
+  const notified = s.notified.length;
+  const message = (error) => refused(409, "station_removed")(error) && error.message === INTERRUPT_REMOVED;
+  for (const [accountId, id] of [[OWNER, mine], [MEMBER, theirs], [OWNER, live], [OWNER, theirs]]) await assert.rejects(s.service.interrupt(accountId, id), message, id);
+  await assert.rejects(s.service.interrupt(STRANGER, mine), refused(404, "not_found"), "a stranger is still told nothing");
+  assert.deepEqual([(await s.repository.integration(mine)).interruptRunning, (await s.repository.integration(live)).interruptRunning], [false, false]);
+  assert.deepEqual([(await s.events()).length, s.notified.length, s.manage.calls.length], [events, notified, calls], "nothing was written, pushed or asked of Auth");
+  assert.equal((await s.events("integration_interrupt_requested")).length, 0);
+
+  // The views of stopped integrations on a removed Station carry the flag; others, and the Station that is there, don't.
+  const views = [await flag(OWNER, mine), await flag(MEMBER, theirs), await flag(OWNER, live)];
+  assert.deepEqual(views.map((view) => [view.state, view.stationRemoved]), [["revoking", true], ["revoking", true], ["revoked", true]]);
+  assert.equal(Object.hasOwn(await flag(OWNER, elsewhere), "stationRemoved"), false, "a Station that is still there");
+  assert.equal(await s.service.interrupt(OWNER, elsewhere).then((view) => view.interruptRunning), true, "and its integration can still be interrupted");
+  // A view from any call: a repeated revoke of one of them answers with its view.
+  assert.equal((await s.service.revoke(OWNER, mine, { interruptRunning: false })).stationRemoved, true);
+});
+
+test("with the setting off, a removed Station's integrations carry no stationRemoved and interrupt finds nothing", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const { id } = await s.create();
+  await s.repository.updateIntegration(id, { state: "ready" });
+  await s.service.removeStation(OWNER, s.station.id);
+  const view = (await s.service.integrations(OWNER)).integrations.find((entry) => entry.id === id);
+  assert.deepEqual([view.state, Object.hasOwn(view, "stationRemoved")], ["revoking", false]);
+  await assert.rejects(s.service.interrupt(OWNER, id), refused(404, "not_found"));
 });
 
 test("with the setting off, interrupt finds nothing", async (t) => {

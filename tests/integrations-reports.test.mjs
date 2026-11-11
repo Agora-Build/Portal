@@ -46,7 +46,7 @@ async function setup(t, { delegatedHostWork = false } = {}) {
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
   const repository = createRepository(db);
   const clock = { now: Date.now() };
-  const manage = fakeManage({ now: () => clock.now });
+  const manage = fakeManage({ now: () => clock.now, delegated: delegatedHostWork });
   const served = { status: 200, body: "" };
   const stationFetch = { async get() { return { ...served }; } };
   const pushFetch = fakePush();

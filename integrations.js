@@ -33,7 +33,10 @@ const INTERRUPT_CHOICE = "Also interrupt the tasks running on your hosts now?";
 const EXPIRY_NOTE = "Expiry stops new work and queries. Work already accepted on your hosts runs until its deadline, at most 24 hours. Revoke to cancel work that hasn't started.";
 const PAUSE_NOTE = "Paused: new work is refused, and accepted work that hasn't started waits. Work running now continues.";
 const INDIRECT_NOTE = "Tasks already running on hosts continue. Within 24 hours, the owner of each revoked integration can still interrupt them.";
-const INTERRUPTED_NOTE = "Running tasks were interrupted.";
+// A removed Station never reads its feed again, so removing it offers no interrupt: only that running tasks continue.
+const REMOVED_NOTE = "Tasks already running on hosts continue.";
+// What the Portal knows is that an interrupt was requested, not what the hosts then did.
+const INTERRUPTED_NOTE = "Running tasks: an interrupt was requested.";
 const DAY = 24 * 60 * 60 * 1000;
 let me = null;
 let stations = [];
@@ -54,8 +57,10 @@ const stateLabel = (state) => STATE_LABELS[state] || String(state || "Unknown").
 const words = (value) => String(value || "").replace(/_/g, " ");
 // Running tasks can still be interrupted: not asked for yet, and within 24 hours of the revocation. A revokedAt of null (never dated) is too late, as at the server.
 const interruptible = (integration) => !integration.interruptRunning && Boolean(integration.revokedAt) && Date.now() - Date.parse(integration.revokedAt) <= DAY;
-// A removal that revokes integrations says, with the setting on, that tasks already running on the hosts continue.
+// A removal that revokes integrations says, with the setting on, that tasks already running on the hosts continue; unless
+// the Station is removed, the owner of each revoked integration can still interrupt them.
 const indirect = (text) => me?.delegatedHostWork ? text + " " + INDIRECT_NOTE : text;
+const removing = (text) => me?.delegatedHostWork ? text + " " + REMOVED_NOTE : text;
 async function copy(text, label) {
   try { await navigator.clipboard.writeText(text); notify(label + " copied."); }
   catch { notify("Copying isn't available here. Select the text instead."); }
@@ -244,7 +249,7 @@ function stationRow(station) {
   actions.append(details);
   if (owner) {
     const remove = el("button", { class: "inline-link", type: "button", text: "Remove Station", "aria-haspopup": "dialog" });
-    remove.addEventListener("click", () => confirmed(remove, output, ["Remove " + station.origin + "?", indirect("Every integration on this Station is revoked and its members lose access. This can't be undone."), "Remove Station"], async () => {
+    remove.addEventListener("click", () => confirmed(remove, output, ["Remove " + station.origin + "?", removing("Every integration on this Station is revoked and its members lose access. This can't be undone."), "Remove Station"], async () => {
       await request("/api/stations/" + segment(station.id), { method: "DELETE" });
       notify("Station removed.");
       await loadAll();
@@ -471,9 +476,10 @@ function integrationRow(integration) {
   const history = el("button", { class: "inline-link", type: "button", text: "History", "aria-haspopup": "dialog" });
   history.addEventListener("click", () => openHistory(integration));
   actions.append(history);
-  // Within 24 hours of a revocation that left running tasks alone, either role may still interrupt them. After History, so
-  // focus after a revoke (the row is re-rendered without Revoke) goes back to History, as before.
-  if (hostWork && STOPPED.includes(state) && interruptible(integration)) {
+  // Within 24 hours of a revocation that left running tasks alone, either role may still interrupt them, unless the Station
+  // has been removed (the server refuses it then). After History, so focus after a revoke (the row is re-rendered without
+  // Revoke) goes back to History, as before.
+  if (hostWork && STOPPED.includes(state) && interruptible(integration) && !integration.stationRemoved) {
     const interrupt = el("button", { class: "inline-link", type: "button", text: "Interrupt running tasks", "aria-haspopup": "dialog" });
     interrupt.addEventListener("click", () => confirmed(interrupt, output, ["Interrupt running tasks?", "Tasks from " + integration.name + " that are still running on the hosts are interrupted now. This can't be undone.", "Interrupt running tasks"], () => change("interrupt")));
     actions.append(interrupt);

@@ -447,6 +447,10 @@ test("with the setting on, an admin's revocation with interruptRunning revokes t
   s.manage.adminChange(id, { status: "revoked", actor: ADMIN, reason: "Confirmed abuse", interruptRunning: true });
   s.manage.adminChange(plain, { status: "revoked", actor: ADMIN, reason: "Confirmed abuse" });
   s.manage.adminChange(declined, { status: "revoked", actor: ADMIN, reason: "Confirmed abuse", interruptRunning: false });
+  // A delegated Auth records false when the choice is left out; an entry that doesn't say at all is one written while
+  // Auth's setting was off, so take its key out.
+  assert.equal(s.manage.feed[1].interruptRunning, false);
+  delete s.manage.feed[1].interruptRunning;
   const [entry] = s.manage.feed;
   assert.equal(entry.interruptRunning, true);
   assert.equal(s.manage.integrationRecords.find((record) => record.clientId === id).interruptRunning, true, "Auth's record agrees with its entry");
@@ -644,6 +648,44 @@ test("with the setting off, Auth's interrupt and account entries are skipped as 
   assert.deepEqual((await s.events(id)).at(-1).details, { authCursor: entry.cursor, authAt: entry.at, admin: true }, "as before the setting");
   assert.ok((await s.repository.integration(live)).ownerDisabledAt, "the entries before and after it are followed as they were");
   assert.equal(Object.hasOwn(await s.stationFeed(), "disabledAccounts"), false);
+});
+
+// The Station's feed reports what was recorded (as Auth's does), but it carries the new fields only while the setting is
+// on: a service with it off, reading the events and rows recorded while it was on, serves the account changes (with their
+// account) and the interrupt kind, but no interruptRunning anywhere and no disabledAccounts.
+test("a service with the setting off serves what was recorded while it was on: account changes and the interrupt kind, without interruptRunning or disabledAccounts", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const id = await s.ready();
+  const revoked = await s.ready();
+  await s.service.revoke(OWNER, id, { interruptRunning: false });
+  s.manage.setOwnerDisabled(OTHER, true, { actor: ADMIN, reason: "Abuse" });
+  s.manage.adminChange(revoked, { status: "revoked", actor: ADMIN, reason: "Confirmed abuse", interruptRunning: true });
+  s.clock.now += 1000;
+  s.manage.interruptChange(id, { actor: ADMIN, reason: "Still running" });
+  await s.follow();
+  const on = await s.stationFeed();
+  assert.deepEqual(on.disabledAccounts, [OTHER], "while on, the snapshot lists it");
+  assert.equal(on.changes.some((change) => change.kind === "integration_interrupt_requested" && change.interruptRunning === true && change.integration.interruptRunning === true), true, "and the interrupt carries the choice");
+
+  // The same database and rows, read by a service with the setting off.
+  const off = createIntegrationService({
+    repository: s.repository, db: s.db, manage: s.manage, stationFetch: { async get() { return { status: 404, body: "" }; } }, exchange: async () => ({}),
+    now: () => s.clock.now, log: () => {}, notify: () => {}, authChanged: () => {}
+  });
+  const feed = await off.changes(s.built.reportClientId, "0");
+  const account = feed.changes.find((change) => change.kind === "account_disabled");
+  assert.deepEqual(account, { id: account.id, at: account.at, integrationId: null, kind: "account_disabled", state: null, reason: "agora_build", account: OTHER }, "an account change is served as recorded, with its account");
+  assert.equal(Object.hasOwn(feed, "disabledAccounts"), false, "no snapshot of disabled accounts");
+  const interrupt = feed.changes.find((change) => change.kind === "integration_interrupt_requested");
+  assert.ok(interrupt, "the interrupt kind is served");
+  assert.equal(interrupt.integrationId, id);
+  assert.equal(Object.hasOwn(interrupt, "interruptRunning"), false, "without the choice");
+  assert.equal(Object.hasOwn(interrupt.integration, "interruptRunning"), false, "on its integration either");
+  for (const change of feed.changes.filter((entry) => entry.integration)) assert.equal(Object.hasOwn(change, "interruptRunning") || Object.hasOwn(change.integration, "interruptRunning"), false, change.kind);
+  for (const entry of feed.integrations) assert.equal(Object.hasOwn(entry, "interruptRunning"), false, entry.id);
+  assert.equal((await s.repository.integration(id)).interruptRunning, true, "the Portal still has the row's choice");
+  assert.equal(Object.hasOwn(await off.changes(s.built.reportClientId, String(feed.cursor)), "disabledAccounts"), false);
 });
 
 // Each built-in Station is pushed as its own write commits: a later Station's failure (the reader reads the entry again)

@@ -151,7 +151,10 @@ test("with the setting on the page offers the revoke choice, Interrupt running t
   assert.ok(script.includes(exact("PAUSE_NOTE", "Paused: new work is refused, and accepted work that hasn't started waits. Work running now continues.")));
   // Not "from each revoked integration": after Remove Station its owner no longer sees the members' integrations.
   assert.ok(script.includes(exact("INDIRECT_NOTE", "Tasks already running on hosts continue. Within 24 hours, the owner of each revoked integration can still interrupt them.")));
-  assert.ok(script.includes(exact("INTERRUPTED_NOTE", "Running tasks were interrupted.")));
+  // The Portal records a request; it can't know the outcome on the hosts.
+  assert.ok(script.includes(exact("INTERRUPTED_NOTE", "Running tasks: an interrupt was requested.")));
+  // A removed Station never reads its feed again, so its removal offers no interrupt: only that running tasks continue.
+  assert.ok(script.includes(exact("REMOVED_NOTE", "Tasks already running on hosts continue.")));
   // The checkbox sits in the confirmation before its form, hidden and unticked; the host-senders line follows the description.
   const checkbox = "<label id=\"integration-confirm-option\" class=\"checkbox-label\" hidden><input id=\"integration-confirm-check\" type=\"checkbox\"><span id=\"integration-confirm-option-text\"></span></label>";
   const dialog = html.match(/<dialog id="integration-confirm"[\s\S]*?<\/dialog>/)?.[0] || "";
@@ -171,13 +174,13 @@ test("with the setting on the page offers the revoke choice, Interrupt running t
   assert.match(script, /const change = async \(action, body\) => \{ await request\(path \+ action, \{ method: "POST", body \}\); await loadIntegrations\(\); \};/);
   assert.match(script, /"Revoke integration", \.\.\.\(hostWork \? \[INTERRUPT_CHOICE\] : \[\]\)\], \(\) => change\("revoke", hostWork \? \{ interruptRunning: document\.querySelector\("#integration-confirm-check"\)\.checked \} : undefined\)\)\);/);
   // Interrupt running tasks: on a stopped integration still within its 24 hours, behind its own confirmation.
-  assert.match(script, /if \(hostWork && STOPPED\.includes\(state\) && interruptible\(integration\)\) \{/);
+  assert.match(script, /if \(hostWork && STOPPED\.includes\(state\) && interruptible\(integration\) && !integration\.stationRemoved\) \{/);
   assert.match(script, /el\("button", \{ class: "inline-link", type: "button", text: "Interrupt running tasks", "aria-haspopup": "dialog" \}\)/);
   assert.match(script, /confirmed\(interrupt, output, \["Interrupt running tasks\?", "Tasks from " \+ integration\.name \+ " that are still running on the hosts are interrupted now\. This can't be undone\.", "Interrupt running tasks"\], \(\) => change\("interrupt"\)\)/);
   // The button comes after History in the row's actions, so focus after a revoke (the row is re-rendered without
   // Revoke) goes back to History, the first control, as before.
   const historyAt = script.indexOf("actions.append(history);");
-  assert.ok(historyAt > 0 && historyAt < script.indexOf("if (hostWork && STOPPED.includes(state) && interruptible(integration)) {"), "Interrupt running tasks comes after History");
+  assert.ok(historyAt > 0 && historyAt < script.indexOf("if (hostWork && STOPPED.includes(state) && interruptible(integration) && !integration.stationRemoved) {"), "Interrupt running tasks comes after History");
   assert.ok(script.indexOf("actions.append(interrupt);") > historyAt, "Interrupt running tasks is appended after History");
   // The 24-hour check is one named function, as the server's: a revokedAt of null (never dated) is too late.
   const day = script.match(/^const DAY = .*;$/m)?.[0] || "";
@@ -203,13 +206,20 @@ test("with the setting on the page offers the revoke choice, Interrupt running t
   assert.equal(indirect(null)("Text."), "Text.");
   assert.equal(indirect({ account: {} })("Text."), "Text.");
   assert.equal(indirect({ delegatedHostWork: true })("Text."), "Text. NOTE");
+  // Remove Station has its own helper and note: no interrupt is offered for a Station that is gone.
+  const removing = script.match(/^const removing = .*;$/m)?.[0] || "";
+  assert.equal(removing, "const removing = (text) => me?.delegatedHostWork ? text + \" \" + REMOVED_NOTE : text;");
+  const removal = (account) => new Function("me", "REMOVED_NOTE", removing + "\nreturn removing;")(account, "GONE");
+  assert.equal(removal(null)("Text."), "Text.");
+  assert.equal(removal({ account: {} })("Text."), "Text.");
+  assert.equal(removal({ delegatedHostWork: true })("Text."), "Text. GONE");
   assert.match(script, /\["Remove this member\?", indirect\(member\.account \+ " loses this Station, and their integrations on it are revoked\."\), "Remove member"\]/);
-  assert.match(script, /\["Remove " \+ station\.origin \+ "\?", indirect\("Every integration on this Station is revoked and its members lose access\. This can't be undone\."\), "Remove Station"\]/);
+  assert.match(script, /\["Remove " \+ station\.origin \+ "\?", removing\("Every integration on this Station is revoked and its members lose access\. This can't be undone\."\), "Remove Station"\]/);
   assert.match(script, /\["Leave " \+ station\.origin \+ "\?", indirect\("You lose this Station, and your integrations on it are revoked\."\), "Leave Station"\]/);
   // The host-senders line shows only for a signed-in account, with the setting on.
   assert.match(script, /document\.querySelector\("#host-senders-note"\)\.hidden = !\(shown && me\.delegatedHostWork\);/);
   // Everything new is behind the setting: each use of the new copy is on a line that tests it.
-  for (const name of ["INTERRUPT_CHOICE", "EXPIRY_NOTE", "PAUSE_NOTE", "INDIRECT_NOTE", "INTERRUPTED_NOTE"]) {
+  for (const name of ["INTERRUPT_CHOICE", "EXPIRY_NOTE", "PAUSE_NOTE", "INDIRECT_NOTE", "REMOVED_NOTE", "INTERRUPTED_NOTE"]) {
     const uses = script.split("\n").filter((line) => new RegExp("\\b" + name + "\\b").test(line) && !line.startsWith("const " + name + " ="));
     assert.ok(uses.length, name + " is used");
     for (const line of uses) assert.match(line, /\bhostWork\b|me\?\.delegatedHostWork/, name + ": " + line.trim());

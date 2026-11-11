@@ -569,22 +569,26 @@ export function createIntegrationService({
   // Shown as paused while its own state is not: its owner's account is disabled.
   const shownPaused = (row) => row.state !== "paused" && effectiveState(row, now()) === "paused";
 
-  function integrationView(row, role, origin) {
+  function integrationView(row, role, station) {
     const state = effectiveState(row, now());
     const view = {
-      id: row.id, kind: row.kind, name: row.name, stationId: row.stationId, stationOrigin: origin, scopes: row.scopes,
+      id: row.id, kind: row.kind, name: row.name, stationId: row.stationId, stationOrigin: station?.origin ?? null, scopes: row.scopes,
       // An integration shown as paused because its owner's account is disabled reads like an admin's pause: what it was
       // paused from is its own state.
       state, pausedFrom: state === "paused" && row.state !== "paused" ? row.state : row.resumeState, pausedBy: pausedByOf(row, state), r9Svc: row.r9Svc, quotaPerSecond: row.quotaPerSecond,
       expiresAt: row.expiresAt, approvedAt: row.approvedAt, lastError: row.lastError, createdAt: row.createdAt, role
     };
-    // When it was revoked and whether that interrupts running tasks (delegated, D29).
-    if (delegatedHostWork && STOPPED.includes(state)) Object.assign(view, { revokedAt: row.revokedAt, interruptRunning: row.interruptRunning });
+    // When it was revoked and whether that interrupts running tasks (delegated, D29), and, for one whose Station has been
+    // removed, that: the Station never reads its feed again, so an interrupt could reach no host and none is offered.
+    if (delegatedHostWork && STOPPED.includes(state)) {
+      Object.assign(view, { revokedAt: row.revokedAt, interruptRunning: row.interruptRunning });
+      if (station?.status === "removed") view.stationRemoved = true;
+    }
     return view;
   }
 
   async function viewOf(row, role) {
-    return integrationView(row, role, (await repository.station(row.stationId))?.origin ?? null);
+    return integrationView(row, role, await repository.station(row.stationId));
   }
 
   // The row and the account's part in it: "owner", "station_owner" (it owns the integration's custom Station) or null.
@@ -636,8 +640,10 @@ export function createIntegrationService({
   // records who paused it as Auth answers (an admin's pause already there stays the admin's: Auth never lowers it), or
   // by role from an Auth without the admin pause lock. A revocation clears it, and is dated (revokedAt) whatever the
   // setting. With the setting on a revocation must say whether to interrupt the tasks running on the owner's hosts
-  // (D29): that is checked first, so a malformed call is refused the same for everyone, and it goes to Auth, the row
-  // and the event. `details` is added to the event's; `mineOnly` refuses the Station's owner (404), as approval does.
+  // (D29): that is checked first, so a malformed call is refused the same for everyone. The row and the event keep the
+  // choice either way, but Auth is sent it only when it is true: an unticked revoke is then exactly today's call, and
+  // survives an Auth whose own setting is still off (which refuses the field), while Auth records a missing one as
+  // false. `details` is added to the event's; `mineOnly` refuses the Station's owner (404), as approval does.
   async function stop(accountId, id, event, { interruptRunning, details, mineOnly = false } = {}) {
     const choice = delegatedHostWork && event === "revoke";
     if (choice && typeof interruptRunning !== "boolean") throw interruptRunningRequired();
@@ -646,7 +652,7 @@ export function createIntegrationService({
     // Shown as paused (its owner's account disabled): a pause is refused as for any paused integration, before Auth.
     step(shownPaused(row) ? { ...row, state: "paused", resumeState: row.state } : row, event, now());
     if (event === "revoke" && STOPPED.includes(row.state)) return viewOf(row, role);
-    const answer = await byActor(accountId, () => manage.changeIntegration(id, { status: event === "pause" ? "paused" : "revoked", ...(choice ? { interruptRunning } : {}) }, accountId));
+    const answer = await byActor(accountId, () => manage.changeIntegration(id, { status: event === "pause" ? "paused" : "revoked", ...(choice && interruptRunning ? { interruptRunning: true } : {}) }, accountId));
     const kind = event === "pause" ? "integration_paused" : "integration_revoked";
     const pausedBy = event !== "pause" ? null : PAUSED_BY.includes(answer?.pausedBy) ? answer.pausedBy : role === "owner" ? "owner" : "station";
     const updated = await commit(id, (current) => {
@@ -734,7 +740,7 @@ export function createIntegrationService({
       await repository.appendEvent({ stationId, integrationId: created.clientId, accountId, actor: accountId, kind: "integration_created", state: "awaiting_approval", details: { scopes: fields.scopes, name: fields.name } }, client);
     });
     changed(stationId);
-    return integrationView(await repository.integration(created.clientId), "owner", station.origin);
+    return integrationView(await repository.integration(created.clientId), "owner", station);
   }
 
   return {
@@ -883,7 +889,7 @@ export function createIntegrationService({
       for (const station of await repository.stationsFor(accountId)) {
         if (station.role !== "owner") continue;
         for (const row of await repository.integrationsOnStation(station.id)) {
-          if (row.ownerAccount !== accountId) views.push(integrationView(row, "station_owner", station.origin));
+          if (row.ownerAccount !== accountId) views.push(integrationView(row, "station_owner", station));
         }
       }
       return { integrations: views, stale: !listed };
@@ -917,11 +923,13 @@ export function createIntegrationService({
 
     // Interrupt running tasks (D29): within 24 hours of the revocation, the owner or the custom Station's owner adds the
     // interrupt they didn't ask for at first. The Portal's own record (Auth is not asked), pushed to the Station; once
-    // made it can't be undone, and asking again, even after the 24 hours, answers the same and changes nothing. The
-    // setting on only.
+    // made it can't be undone, and asking again, even after the 24 hours, answers the same and changes nothing. Never
+    // for an integration whose Station has been removed: it reads its feed no more, so the record would reach no host.
+    // The setting on only.
     async interrupt(accountId, id) {
       if (!delegatedHostWork) throw notFound();
       const { row, role } = await visible(accountId, id);
+      if ((await repository.station(row.stationId))?.status === "removed") throw failure(409, "This integration's Station has been removed, so its running tasks can't be interrupted here.", "station_removed");
       // True when there is something to record. A row that was never dated (revoked before revokedAt) is too late.
       const check = (current) => {
         if (!STOPPED.includes(current.state)) throw failure(409, "Only a revoked integration's running tasks can be interrupted.", "invalid_state");
@@ -1039,7 +1047,7 @@ export function createIntegrationService({
       }
       // As in its feed, the Station is not told who paused an integration, nor (the setting on, D29) when it was revoked
       // or whether that interrupts running tasks: the feed says the latter, and the report answer stays as it is today.
-      const { role, pausedBy, revokedAt, interruptRunning, ...view } = integrationView(updated, null, station.origin);
+      const { role, pausedBy, revokedAt, interruptRunning, stationRemoved, ...view } = integrationView(updated, null, station);
       return view;
     },
 

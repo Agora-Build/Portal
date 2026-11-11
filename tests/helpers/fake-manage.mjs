@@ -13,7 +13,9 @@ export const BUILT_IN_REPORT_CLIENT = "s-" + "0".repeat(24) + "bs";
 // Auth nudges the Portal (Auth D26 Task 13). `failNext` makes the next call of that name fail with the given status and
 // code (after the gate, so the call is still recorded). `delegated` is Auth with delegated host work on (D29): disabling
 // or enabling an account then writes its own entry (no integration, no Station) ahead of the per-integration ones;
-// interruptChange and accountChange stand in for the admin site's interrupt and account calls.
+// interruptChange and accountChange stand in for the admin site's interrupt and account calls. A delegated Auth also
+// takes `interruptRunning` on a revocation and records it as `=== true` (false when it is left out); an Auth without
+// the setting refuses the key with 400 invalid_request. `sent` keeps each changeIntegration body as it went over the wire.
 export function fakeManage({ now = Date.now, delegated = false } = {}) {
   const stations = [];
   const integrations = [];
@@ -59,6 +61,8 @@ export function fakeManage({ now = Date.now, delegated = false } = {}) {
   const auth = {
     down: false,
     calls: [],
+    // The body of each changeIntegration call as it went over the wire (no undefined keys), refused or not.
+    sent: [],
     failNext: {},
     records: stations,
     integrationRecords: integrations,
@@ -187,8 +191,17 @@ export function fakeManage({ now = Date.now, delegated = false } = {}) {
       integration.keys.push(JSON.stringify(publicJwk));
       return { kid: "kid-" + integration.keys.length, overlapEndsAt: new Date(now() + 600000).toISOString() };
     },
-    async changeIntegration(id, { status, r9Svc, quotaPerSecond, expiresAt, interruptRunning } = {}, actor) {
+    async changeIntegration(id, fields = {}, actor) {
+      const { status, r9Svc, quotaPerSecond, expiresAt } = fields;
+      let { interruptRunning } = fields;
+      // What went over the wire: JSON leaves out what is undefined, so only the keys the Portal really sent are kept.
+      auth.sent.push({ id, fields: JSON.parse(JSON.stringify({ ...fields, actor })) });
       await auth.gate("changeIntegration", actor);
+      // interruptRunning is a field only for an Auth with the setting on, and then a boolean that goes with a revocation:
+      // otherwise it is an unknown or a malformed field, 400 invalid_request, before anything else is decided.
+      if (interruptRunning !== undefined && (!delegated || typeof interruptRunning !== "boolean" || status !== "revoked")) fail(400, "invalid_request");
+      // Auth records `interruptRunning === true` for every revocation it makes while its setting is on.
+      if (delegated && status === "revoked") interruptRunning = interruptRunning === true;
       const integration = auth.findIntegration(id);
       const others = [r9Svc, quotaPerSecond, expiresAt].some((value) => value !== undefined);
       const station = stations.find((entry) => entry.id === integration.stationId);
@@ -226,6 +239,9 @@ export function fakeManage({ now = Date.now, delegated = false } = {}) {
     // nudge. Resuming an active integration and revoking a revoked one change nothing, as at Auth. Not a Portal call,
     // so it is not recorded in calls.
     adminChange(id, { status, actor, reason = "Admin test", interruptRunning }) {
+      // As in changeIntegration: only a delegated Auth takes interruptRunning, and it then records it for every revocation.
+      if (interruptRunning !== undefined && !delegated) fail(400, "invalid_request");
+      if (delegated && status === "revoked") interruptRunning = interruptRunning === true;
       const integration = auth.findIntegration(id);
       const station = stations.find((entry) => entry.id === integration.stationId);
       const lifts = status === "active" && ((integration.status === "paused" && integration.pausedBy === "admin") || integration.status === "active");
