@@ -44,6 +44,24 @@ test("migration 002 leaves an existing database's custom Stations, integrations 
   assert.deepEqual(row, { owner_account: "ab1", status: "active", built_in: false, access: "members", integrations_enabled: true, name: null });
 });
 
+// accountChangeApplied (inside the global event lock) and disabledAccounts read a built-in Station's account-level events
+// by Station and account; without this index they scan every event of the Station.
+test("migration 004 indexes the account-level events by Station and account, on the table and on its partitions, beside 001's account index", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) return t.skip("PORTAL_TEST_DATABASE_URL is not set");
+  const { rows } = await db.pool.query("SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'integration_events' ORDER BY indexname");
+  const named = Object.fromEntries(rows.map((row) => [row.indexname, row.indexdef]));
+  assert.match(named.integration_events_station_account_idx, /\(station_id, account_id, id\) WHERE \(integration_id IS NULL\)$/);
+  assert.match(named.integration_events_account_idx, /\(account_id, at\)$/, "001's index is still there, with its own columns");
+  const { rows: partitions } = await db.pool.query(
+    "SELECT count(*)::int AS n FROM pg_inherits i JOIN pg_class parent ON parent.oid = i.inhparent WHERE parent.relname = 'integration_events_station_account_idx' AND parent.relnamespace = current_schema()::regnamespace");
+  assert.equal(partitions[0].n, 1, "the default partition has it too; so will each partition made later");
+  await db.ensureEventPartitions({ now: new Date("2031-01-01T00:00:00Z") });
+  const { rows: after } = await db.pool.query(
+    "SELECT count(*)::int AS n FROM pg_inherits i JOIN pg_class parent ON parent.oid = i.inhparent WHERE parent.relname = 'integration_events_station_account_idx' AND parent.relnamespace = current_schema()::regnamespace");
+  assert.equal(after[0].n, 3, "a new month's partitions get it as they are made");
+});
+
 test("ensureEventPartitions creates this and next month once and adopts rows from the default partition", async (t) => {
   const db = await testDatabase(t);
   if (!db) return t.skip("PORTAL_TEST_DATABASE_URL is not set");

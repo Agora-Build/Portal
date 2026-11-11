@@ -394,3 +394,25 @@ test("the accounts whose latest account-level event on a Station is a disable ar
   assert.deepEqual(await repo.disabledAccounts("st1"), ["ab2"]);
   await db.transaction(async (client) => assert.deepEqual(await repo.disabledAccounts("st1", client), ["ab2"], "inside a transaction"));
 });
+
+// The two account-level reads are the only ones by Station and account, and the first runs inside the global event lock:
+// migration 004's partial index (station, account, id) serves them, so neither scans every event of the Station. The
+// repository's own SQL is explained, through a client that runs EXPLAIN on what it is given, with sequential scans off.
+test("accountChangeApplied and disabledAccounts are served by the Station and account index", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  const plans = [];
+  const client = await db.pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL enable_seqscan = off");
+    const explaining = { query: async (text, values) => { plans.push((await client.query("EXPLAIN " + text, values)).rows.map((row) => row["QUERY PLAN"]).join("\n")); return { rows: [], rowCount: 0 }; } };
+    await repo.accountChangeApplied("st1", "YzEy", "2026-11-10T10:00:00.000Z", explaining);
+    await repo.disabledAccounts("st1", explaining);
+    await client.query("ROLLBACK");
+  } finally {
+    client.release();
+  }
+  assert.equal(plans.length, 2);
+  for (const plan of plans) assert.match(plan, /Index Scan using \S*station_id_account_id_id_idx on /, plan);
+});
