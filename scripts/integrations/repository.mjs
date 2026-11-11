@@ -12,7 +12,9 @@ const updatable = {
   pausedBy: "paused_by",
   ownerDisabledAt: "owner_disabled_at",
   revokedAt: "revoked_at",
-  interruptRunning: "interrupt_running"
+  interruptRunning: "interrupt_running",
+  revocationOutcome: "revocation_outcome",
+  revocationPendingHosts: "revocation_pending_hosts"
 };
 
 function iso(value) {
@@ -72,6 +74,8 @@ function integrationRow(row) {
     ownerDisabledAt: iso(row.owner_disabled_at) ?? null,
     revokedAt: iso(row.revoked_at) ?? null,
     interruptRunning: row.interrupt_running === true,
+    revocationOutcome: row.revocation_outcome ?? null,
+    revocationPendingHosts: row.revocation_pending_hosts ?? null,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at)
   };
@@ -223,11 +227,38 @@ export function createRepository(db) {
         // when() reads undefined as now, and a set owner-disabled time makes Stations deny tokens, a set revocation time starts the
         // interrupt window: only on purpose.
         if ((key === "ownerDisabledAt" || key === "revokedAt") && value === undefined) throw new TypeError(key + " must be a time, or null to clear it.");
-        values.push(key === "expiresAt" || key === "approvedAt" || key === "ownerDisabledAt" || key === "revokedAt" ? (value === null ? null : when(value)) : value);
+        // The pending hosts are jsonb: written as JSON, and null stays an SQL null (JSON.stringify would make it a JSON null).
+        values.push(key === "expiresAt" || key === "approvedAt" || key === "ownerDisabledAt" || key === "revokedAt" ? (value === null ? null : when(value)) : key === "revocationPendingHosts" && value !== null ? JSON.stringify(value) : value);
         assignments.push(updatable[key] + " = $" + values.length);
       }
       assignments.push("updated_at = now()");
       await run(client, "UPDATE integrations SET " + assignments.join(", ") + " WHERE id = $1", values);
+    },
+
+    // A Station's report by its id: { integrationId, body, answer }, or null (service.report). Ids are per Station and
+    // kept forever, with the body and the answer they got.
+    async stationReport(stationId, reportId, client) {
+      const { rows } = await run(client, "SELECT integration_id, body, answer FROM station_reports WHERE station_id = $1 AND report_id = $2", [stationId, reportId]);
+      return rows[0] ? { integrationId: rows[0].integration_id, body: rows[0].body, answer: rows[0].answer } : null;
+    },
+
+    // Keeps an accepted report. The caller has found no report under this id (stationReport, in the same transaction
+    // under the event lock); a second one with the same id is refused by the key, not replaced.
+    async saveStationReport({ stationId, reportId, integrationId, body, answer }, client) {
+      await run(client, "INSERT INTO station_reports (station_id, report_id, integration_id, body, answer) VALUES ($1, $2, $3, $4, $5)", [stationId, reportId, integrationId, JSON.stringify(body), JSON.stringify(answer)]);
+    },
+
+    // Records that `host` applied the integration's revocation; returns false when it was already recorded (the first
+    // report's record and report ids stand).
+    async recordRevocationHost({ integrationId, host, recordId, reportId }, client) {
+      const { rowCount } = await run(client, "INSERT INTO revocation_hosts (integration_id, host, record_id, report_id) VALUES ($1, $2, $3, $4) ON CONFLICT (integration_id, host) DO NOTHING", [integrationId, host, recordId, reportId]);
+      return rowCount > 0;
+    },
+
+    // The hosts recorded for a revocation, as a Set of names.
+    async revocationHosts(integrationId, client) {
+      const { rows } = await run(client, "SELECT host FROM revocation_hosts WHERE integration_id = $1", [integrationId]);
+      return new Set(rows.map((row) => row.host));
     },
 
     // The lock appendEvent takes. A transaction that will append takes it first, before any row lock, so two of them
