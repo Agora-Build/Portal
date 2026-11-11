@@ -701,6 +701,45 @@ test("a Station report client's own token reaches only the report routes and nev
   assert.equal((await app.store.snapshot()).accounts.some((account) => account.id === STATION_CLIENT), false, "no Portal account for the report client");
 });
 
+// D29 Phase B: a Station's revocation reports over HTTP (the setting on). A final names at most 100 hosts of 128
+// characters, which fits the 16 KiB body limit.
+test("with the setting on, a Station sends revocation_applied and the final revoked at /api/v1/stations/reports", async (t) => {
+  const integrations = await stack(t, { delegatedHostWork: true });
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const owner = await signIn(app);
+  const { station } = await registerStation(app, integrations, owner.cookie);
+  const integration = await createIntegration(app, owner.cookie, station.id);
+  await integrations.service.approve(owner.sub, integration.id, { r9Svc: R9 });
+  await integrations.service.revoke(owner.sub, integration.id, { interruptRunning: false });
+  const token = await app.fake.issueAccessToken({ sub: owner.sub, client_id: station.reportClientId, scope: "station.report" });
+  const report = (data) => call(app.base, "/api/v1/stations/reports", { bearer: token, method: "POST", data });
+  const applied = { integrationId: integration.id, state: "revocation_applied", reportId: "revocation_applied:" + "a".repeat(64), host: "laptop", recordId: "0f8a1b2c-3d4e-4f50-8a6b-7c8d9e0f1a2b" };
+  const first = await report(applied);
+  assert.equal(first.status, 200);
+  const answer = await first.json();
+  assert.deepEqual([answer.id, answer.state], [integration.id, "revoking"]);
+  for (const hidden of ["role", "pausedBy", "revokedAt", "interruptRunning", "stationRemoved", "revocation"]) assert.equal(hidden in answer, false, hidden);
+  assert.deepEqual(await (await report(applied)).json(), answer, "the same id and body: the recorded answer");
+  const reused = await report({ ...applied, host: "desktop" });
+  assert.deepEqual([reused.status, await reused.json()], [409, { error: "This reportId was already used for another report.", code: "report_id_reused" }]);
+  const invalid = await report({ ...applied, recordId: "nope" });
+  assert.deepEqual([invalid.status, (await invalid.json()).code], [400, "record_id"]);
+  const notNew = await report({ ...applied, reason: "done" });
+  assert.deepEqual([notNew.status, (await notNew.json()).code], [400, "report"]);
+
+  const hosts = Array.from({ length: 100 }, (_, index) => String(index).padStart(3, "0") + "h".repeat(125));
+  const final = { integrationId: integration.id, state: "revoked", reportId: "revoked:" + "b".repeat(64), outcome: "deadline_passed", pendingHosts: hosts };
+  assert.ok(JSON.stringify(final).length > 13000 && JSON.stringify(final).length < 16384);
+  const done = await report(final);
+  assert.equal(done.status, 200);
+  assert.equal((await done.json()).state, "revoked");
+  const second = await report({ ...final, reportId: "revoked:" + "c".repeat(64) });
+  assert.deepEqual([second.status, (await second.json()).code], [409, "invalid_state"]);
+  const mine = (await (await call(app.base, "/api/integrations", { cookie: owner.cookie })).json()).integrations.find((entry) => entry.id === integration.id);
+  assert.deepEqual(mine.revocation, { appliedHosts: 1, outcome: "deadline_passed", unconfirmedHosts: 100 });
+});
+
 test("a read token for a Station comes from exchanging the session's ID token", async (t) => {
   const integrations = await stack(t);
   if (!integrations) return;

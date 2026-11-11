@@ -220,6 +220,9 @@ test("countLiveIntegrations counts one account's integrations on one Station tha
   assert.equal(await repo.countLiveIntegrations("st1", "ab1", NOW), 4, "awaiting, paused, revoking and the short one");
   assert.equal(await repo.countLiveIntegrations("st1", "ab1", later(2000)), 3, "i-5 has expired");
   assert.equal(await repo.countLiveIntegrations("st1", "ab2", NOW), 1);
+  // D29 Phase B: with the option a revoking integration no longer counts, since Auth has revoked it already.
+  assert.equal(await repo.countLiveIntegrations("st1", "ab1", NOW, undefined, { revokingHoldsPlace: false }), 3, "awaiting, paused and the short one");
+  assert.equal(await repo.countLiveIntegrations("st1", "ab1", NOW, undefined, { revokingHoldsPlace: true }), 4, "the default");
 });
 
 test("integrations carry who paused them and when Auth said their owner was disabled", async (t) => {
@@ -419,4 +422,84 @@ test("accountChangeApplied and disabledAccounts are served by the Station and ac
   for (const plan of plans) assert.match(plan, /Index Scan using \S*station_id_account_id_id_idx on /, plan);
   // The first read names the account too, so the index is used on its first two columns, not the Station alone.
   assert.match(plans[0], /Index Cond: \(\(station_id = 'st1'::text\) AND \(account_id = 'ab1'::text\)\)/, plans[0]);
+});
+
+test("integrations carry a revocation's final outcome and the hosts that didn't confirm it", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  await station(repo, "st1");
+  await repo.insertIntegration(sample("i-1"));
+  const fresh = await repo.integration("i-1");
+  assert.deepEqual([fresh.revocationOutcome, fresh.revocationPendingHosts], [null, null], "unset: no final outcome, no list");
+  await db.transaction((client) => repo.updateIntegration("i-1", { state: "revoked", revocationOutcome: "deadline_passed", revocationPendingHosts: ["laptop", "desk top"] }, client));
+  const revoked = await repo.integration("i-1");
+  assert.deepEqual([revoked.revocationOutcome, revoked.revocationPendingHosts], ["deadline_passed", ["laptop", "desk top"]], "the list is written as JSON and read as an array");
+  assert.deepEqual((await repo.integrationsFor("ab1")).map((row) => [row.revocationOutcome, row.revocationPendingHosts]), [["deadline_passed", ["laptop", "desk top"]]]);
+  assert.deepEqual((await repo.integrationsOnStation("st1")).map((row) => row.revocationOutcome), ["deadline_passed"]);
+  await db.transaction(async (client) => assert.deepEqual((await repo.integrationForUpdate("i-1", client)).revocationPendingHosts, ["laptop", "desk top"]));
+  await repo.updateIntegration("i-1", { revocationOutcome: "all_applied", revocationPendingHosts: [] });
+  const done = await repo.integration("i-1");
+  assert.deepEqual([done.revocationOutcome, done.revocationPendingHosts], ["all_applied", []], "an empty list is an array, not null");
+  await repo.updateIntegration("i-1", { revocationOutcome: null, revocationPendingHosts: null });
+  const cleared = await repo.integration("i-1");
+  assert.deepEqual([cleared.revocationOutcome, cleared.revocationPendingHosts], [null, null], "null clears both (a JSON null is not stored)");
+  const { rows } = await db.pool.query("SELECT revocation_pending_hosts IS NULL AS sql_null FROM integrations WHERE id = 'i-1'");
+  assert.equal(rows[0].sql_null, true);
+  await assert.rejects(repo.updateIntegration("i-1", { revocationOutcome: "done" }), { code: "23514" }, "only the two outcomes");
+});
+
+test("updateIntegration refuses an undefined final outcome or pending list: a silent null would clear a recorded one", async (t) => {
+  const { repo } = await setup(t);
+  if (!repo) return;
+  await station(repo, "st1");
+  await repo.insertIntegration(sample("i-1"));
+  await repo.updateIntegration("i-1", { state: "revoked", revocationOutcome: "deadline_passed", revocationPendingHosts: ["laptop"] });
+  await assert.rejects(repo.updateIntegration("i-1", { revocationOutcome: undefined }), TypeError);
+  await assert.rejects(repo.updateIntegration("i-1", { revocationPendingHosts: undefined }), TypeError);
+  await assert.rejects(repo.updateIntegration("i-1", { state: "revoking", revocationOutcome: undefined }), TypeError);
+  const kept = await repo.integration("i-1");
+  assert.deepEqual([kept.state, kept.revocationOutcome, kept.revocationPendingHosts], ["revoked", "deadline_passed", ["laptop"]], "a refused update changes nothing");
+  await repo.updateIntegration("i-1", { revocationOutcome: null, revocationPendingHosts: null });
+  assert.deepEqual([(await repo.integration("i-1")).revocationOutcome, (await repo.integration("i-1")).revocationPendingHosts], [null, null], "null still clears them, on purpose");
+});
+
+test("a Station's report is kept by its id with the body and the answer, per Station", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  await station(repo, "st1");
+  await station(repo, "st2", "ab2");
+  assert.equal(await repo.stationReport("st1", "r-1"), null);
+  const body = { integrationId: "i-1", state: "revocation_applied", reportId: "r-1", host: "laptop", recordId: "0f8a1b2c-3d4e-4f50-8a6b-7c8d9e0f1a2b" };
+  const answer = { id: "i-1", state: "revoking", name: "App" };
+  await db.transaction((client) => repo.saveStationReport({ stationId: "st1", reportId: "r-1", integrationId: "i-1", body, answer }, client));
+  assert.deepEqual(await repo.stationReport("st1", "r-1"), { integrationId: "i-1", body, answer }, "round-trips as objects");
+  await db.transaction(async (client) => assert.deepEqual(await repo.stationReport("st1", "r-1", client), { integrationId: "i-1", body, answer }, "inside a transaction"));
+  assert.equal(await repo.stationReport("st1", "r-2"), null);
+  assert.equal(await repo.stationReport("st2", "r-1"), null, "another Station's report id is another report");
+  const other = { ...body, host: "desktop" };
+  await db.transaction((client) => repo.saveStationReport({ stationId: "st2", reportId: "r-1", integrationId: "i-2", body: other, answer: { id: "i-2" } }, client));
+  assert.deepEqual(await repo.stationReport("st2", "r-1"), { integrationId: "i-2", body: other, answer: { id: "i-2" } }, "the same id on another Station is allowed");
+  assert.deepEqual((await repo.stationReport("st1", "r-1")).body, body, "and leaves the first alone");
+  await assert.rejects(db.transaction((client) => repo.saveStationReport({ stationId: "st1", reportId: "r-1", integrationId: "i-1", body: other, answer: {} }, client)), { code: "23505" }, "an id is saved once per Station");
+  assert.deepEqual((await repo.stationReport("st1", "r-1")).body, body, "the first report stands");
+  await assert.rejects(db.transaction((client) => repo.saveStationReport({ stationId: "st1", reportId: "bad id", integrationId: "i-1", body, answer }, client)), { code: "23514" });
+});
+
+test("a revocation's hosts are recorded once each, per integration, and read back as a set of names", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  const record = (integrationId, host, reportId = "r-" + host) => db.transaction((client) => repo.recordRevocationHost({ integrationId, host, recordId: "0f8a1b2c-3d4e-4f50-8a6b-7c8d9e0f1a2b", reportId }, client));
+  assert.deepEqual(await repo.revocationHosts("i-1"), new Set(), "none yet: an empty Set");
+  assert.equal(await record("i-1", "laptop"), true);
+  assert.equal(await record("i-1", "laptop", "r-again"), false, "already recorded, even under another report id");
+  assert.equal(await record("i-1", "desktop"), true);
+  assert.equal(await record("i-2", "laptop"), true, "another integration's");
+  const hosts = await repo.revocationHosts("i-1");
+  assert.ok(hosts instanceof Set);
+  assert.deepEqual([...hosts].sort(), ["desktop", "laptop"]);
+  assert.deepEqual([...await repo.revocationHosts("i-2")], ["laptop"]);
+  await db.transaction(async (client) => assert.deepEqual([...await repo.revocationHosts("i-1", client)].sort(), ["desktop", "laptop"], "inside a transaction"));
+  const { rows } = await db.pool.query("SELECT record_id, report_id FROM revocation_hosts WHERE integration_id = 'i-1' AND host = 'laptop'");
+  assert.deepEqual(rows, [{ record_id: "0f8a1b2c-3d4e-4f50-8a6b-7c8d9e0f1a2b", report_id: "r-laptop" }], "the first report's ids stand");
+  assert.equal(await record("i-1", "Laptop"), true, "host names are compared as sent");
 });

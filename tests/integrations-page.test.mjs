@@ -197,8 +197,36 @@ test("with the setting on the page offers the revoke choice, Interrupt running t
   assert.equal(interruptible({ interruptRunning: false, revokedAt: "not a date" }), false);
   assert.equal(interruptible({ interruptRunning: true, revokedAt: ago(1) }), false, "already asked for");
   // The notes: pause and expiry, and that running tasks were interrupted, as muted notes after the Agora.Build lock note.
-  assert.match(script, /const notes = !hostWork \? \[\] : \[state === "paused" && PAUSE_NOTE, state === "expired" && EXPIRY_NOTE, STOPPED\.includes\(state\) && integration\.interruptRunning && INTERRUPTED_NOTE\]\.filter\(Boolean\);/);
+  assert.match(script, /const notes = !hostWork \? \[\] : \[state === "paused" && PAUSE_NOTE, state === "expired" && EXPIRY_NOTE, STOPPED\.includes\(state\) && integration\.interruptRunning && INTERRUPTED_NOTE, appliedNote\(integration\), unconfirmedNote\(integration\)\]\.filter\(Boolean\);/);
   assert.match(script, /\.\.\.\(owner && locked \? \[el\("p", \{ class: "muted", text: LOCKED_NOTE \}\)\] : \[\]\),\n\s*\.\.\.notes\.map\(\(note\) => el\("p", \{ class: "muted", text: note \}\)\),/);
+  // How a revocation went on the hosts (the `revocation` on a stopped integration's view), one named function per sentence:
+  // a revoking integration says how many hosts applied it; a revoked one whose final report said deadline_passed says how
+  // many didn't confirm. No host names; any other outcome, or nothing to say, is no note.
+  const count = script.match(/^const hostCount = .*;$/m)?.[0] || "";
+  const applied = script.match(/^const appliedNote = .*;$/m)?.[0] || "";
+  const unconfirmed = script.match(/^const unconfirmedNote = .*;$/m)?.[0] || "";
+  assert.ok(applied.startsWith("const appliedNote = (integration) =>") && unconfirmed.startsWith("const unconfirmedNote = (integration) =>"), "one small named function for each sentence");
+  const appliedNote = new Function(count + "\n" + applied + "\nreturn appliedNote;")();
+  const unconfirmedNote = new Function(count + "\n" + unconfirmed + "\nreturn unconfirmedNote;")();
+  const revocation = (state, fields) => ({ state, revocation: { appliedHosts: 0, outcome: null, unconfirmedHosts: null, ...fields } });
+  assert.equal(appliedNote(revocation("revoking", { appliedHosts: 1 })), "Applied on 1 host");
+  assert.equal(appliedNote(revocation("revoking", { appliedHosts: 2 })), "Applied on 2 hosts");
+  assert.equal(appliedNote(revocation("revoking", { appliedHosts: 64 })), "Applied on 64 hosts");
+  assert.equal(appliedNote(revocation("revoking", { appliedHosts: 0 })), "", "no host has applied it yet: no note");
+  assert.equal(appliedNote({ state: "revoking" }), "", "no revocation object (the setting off, or a view from before): no note");
+  assert.equal(appliedNote({ state: "revoking", revocation: null }), "");
+  assert.equal(appliedNote(revocation("revoked", { appliedHosts: 3, outcome: "all_applied" })), "", "only a revoking row says it");
+  assert.equal(appliedNote(revocation("paused", { appliedHosts: 3 })), "");
+  assert.equal(unconfirmedNote(revocation("revoked", { appliedHosts: 1, outcome: "deadline_passed", unconfirmedHosts: 1 })), "Revoked (1 host didn't confirm; any unstarted work there has passed its deadline)");
+  assert.equal(unconfirmedNote(revocation("revoked", { appliedHosts: 1, outcome: "deadline_passed", unconfirmedHosts: 3 })), "Revoked (3 hosts didn't confirm; any unstarted work there has passed its deadline)");
+  assert.equal(unconfirmedNote(revocation("revoked", { outcome: "deadline_passed", unconfirmedHosts: 0 })), "", "every host confirmed since: no note");
+  assert.equal(unconfirmedNote(revocation("revoked", { outcome: "deadline_passed", unconfirmedHosts: null })), "");
+  assert.equal(unconfirmedNote(revocation("revoked", { appliedHosts: 2, outcome: "all_applied" })), "");
+  assert.equal(unconfirmedNote(revocation("revoked", { outcome: null })), "", "no final report yet");
+  assert.equal(unconfirmedNote({ state: "revoked" }), "");
+  assert.equal(unconfirmedNote({ state: "revoked", revocation: null }), "");
+  assert.equal(unconfirmedNote(revocation("revoking", { outcome: "deadline_passed", unconfirmedHosts: 2 })), "", "only a revoked row says it");
+  assert.equal((script.match(/confirmed\(\w+, output, \[/g) || []).length, 5, "the notes add no confirmation");
   // The indirect revocations say running tasks continue, only with the setting on; off, the text is today's.
   const helper = script.match(/^const indirect = .*;$/m)?.[0] || "";
   assert.equal(helper, "const indirect = (text) => me?.delegatedHostWork ? text + \" \" + INDIRECT_NOTE : text;");
@@ -219,7 +247,7 @@ test("with the setting on the page offers the revoke choice, Interrupt running t
   // The host-senders line shows only for a signed-in account, with the setting on.
   assert.match(script, /document\.querySelector\("#host-senders-note"\)\.hidden = !\(shown && me\.delegatedHostWork\);/);
   // Everything new is behind the setting: each use of the new copy is on a line that tests it.
-  for (const name of ["INTERRUPT_CHOICE", "EXPIRY_NOTE", "PAUSE_NOTE", "INDIRECT_NOTE", "REMOVED_NOTE", "INTERRUPTED_NOTE"]) {
+  for (const name of ["INTERRUPT_CHOICE", "EXPIRY_NOTE", "PAUSE_NOTE", "INDIRECT_NOTE", "REMOVED_NOTE", "INTERRUPTED_NOTE", "appliedNote", "unconfirmedNote"]) {
     const uses = script.split("\n").filter((line) => new RegExp("\\b" + name + "\\b").test(line) && !line.startsWith("const " + name + " ="));
     assert.ok(uses.length, name + " is used");
     for (const line of uses) assert.match(line, /\bhostWork\b|me\?\.delegatedHostWork/, name + ": " + line.trim());
