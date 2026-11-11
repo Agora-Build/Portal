@@ -546,8 +546,10 @@ The tables:
 | `stations` | Auth's Station ID, origin, owner (none for a built-in Station), report client ID, `active` or `removed`, `built_in`, `access` (`members` or `any_account`), `integrations_enabled`, `name` |
 | `station_members` | accounts a Station is shared with, with who added or removed them and when |
 | `station_challenges` | issued proof values, valid 10 minutes, single use |
-| `integrations` | Auth's `i-` client ID, owner, Station, scopes, state, `resume_state`, `r9_svc`, quota, expiry, `last_error`, `paused_by` (who paused it, as Auth says: `owner`, `station` or `admin`), `owner_disabled_at` (while Agora.Build has the owner's account disabled), `revoked_at` (when it was revoked; empty for one revoked before migration 004), `interrupt_running` (whether its revocation interrupts the tasks running on the owner's hosts; see below) |
+| `integrations` | Auth's `i-` client ID, owner, Station, scopes, state, `resume_state`, `r9_svc`, quota, expiry, `last_error`, `paused_by` (who paused it, as Auth says: `owner`, `station` or `admin`), `owner_disabled_at` (while Agora.Build has the owner's account disabled), `revoked_at` (when it was revoked; empty for one revoked before migration 004), `interrupt_running` (whether its revocation interrupts the tasks running on the owner's hosts; see below), `revocation_outcome` and `revocation_pending_hosts` (how its revocation ended, from the Station's final report: `all_applied` or `deadline_passed`, and the host ids that didn't confirm; empty until then and without the setting; migration 005) |
 | `integration_events` | every change, kept forever; also the Stations' change feed |
+| `station_reports` | a Station's reports that carry a `reportId` (migration 005, with `DELEGATED_HOST_WORK=1` only): the id, the integration, the body and the answer it got, kept forever so a retry gets the same answer; the key is the Station and the id |
+| `revocation_hosts` | the hosts that applied an integration's revocation (migration 005, with `DELEGATED_HOST_WORK=1` only): the host id, the record's id and the report's id, one row per host |
 | `auth_change_feed` | one row: where the Portal is in Auth's change feed (Auth's cursor) |
 
 Rows are never deleted: Stations get `removed_at`, members get `removed_at`,
@@ -577,14 +579,20 @@ Migration `004_delegated_host_work.sql` adds `integrations.revoked_at` and `inte
 is recorded for every revocation, whatever the setting (one from Auth's feed takes Auth's time); `interrupt_running` is set
 only with `DELEGATED_HOST_WORK=1`, below.
 
+Migration `005_station_reports.sql` adds the tables `station_reports` and `revocation_hosts` and the columns
+`integrations.revocation_outcome` and `integrations.revocation_pending_hosts`, for the Station's revocation reports of
+D29's Phase B (below). It runs when the server starts, whatever the setting. The Portal writes to them only with
+`DELEGATED_HOST_WORK=1`, so with it off they stay empty. Like the other rows, they are never deleted.
+
 **With `DELEGATED_HOST_WORK=1` (off by default):** the Portal offers delegated host work, Phase A of
 [D29](integrations.md#311-delegated-host-work-d29): a revocation says whether to interrupt the tasks running on the
 owner's hosts, those tasks can be interrupted later within 24 hours, and the built-in Station hears when an admin
-disables or enables an account. The Portal reads the one variable when it starts; only `1` turns it on, and any other
-value or none is off. Off is today's behaviour exactly: the routes, bodies, views and feed entries below do not exist and
-the account page shows nothing new. On, `GET /api/me` also answers `"delegatedHostWork": true`, for the browser session
-only (the page reads it); the token route `GET /api/v1/me` is unchanged. Turn it on in the order, and with the
-precondition, in "Turning On Delegated Host Work".
+disables or enables an account. Phase B adds the Station's two revocation reports and, on a stopped integration, how many
+hosts applied the revocation ("Routes", "For Station Builders"). The Portal reads the one variable when it starts; only `1`
+turns it on, and any other value or none is off. Off is today's behaviour exactly: the routes, bodies, views and feed
+entries below do not exist and the account page shows nothing new. On, `GET /api/me` also answers
+`"delegatedHostWork": true`, for the browser session only (the page reads it); the token route `GET /api/v1/me` is
+unchanged. Turn it on in the order, and with the precondition, in "Turning On Delegated Host Work".
 
 ### The Built-in Station
 
@@ -610,6 +618,12 @@ precondition, in "Turning On Delegated Host Work".
   account's integration on the built-in Station is 404 for everyone but its owner, and Auth refuses the Portal's
   management calls that act across accounts. Their changes reach the Portal through Auth's change feed (see "Admin
   Changes From Auth").
+- **With `DELEGATED_HOST_WORK=1` (off by default):** the mailbox notice. Where Astation shows the built-in Station's trust
+  notice, it adds: "On the built-in Station, Agora.Build's server stores the sealed messages your hosts send each other for
+  up to 24 hours. It can't read or change them. It can see which of your hosts exchange messages, and when, but not what
+  they say." It describes the built-in Station's host-to-host mailbox ([D29](integrations.md#311-delegated-host-work-d29),
+  Atem's design II.4.3), which arrives with Astation's build, so until then it describes behaviour nothing has yet. The
+  Portal stores no mailbox message and shows this text nowhere itself. It is about the built-in Station only.
 - **Reports and feed** use the same routes as any Station. Its report token's `sub` is its own `s-` client ID (it has
   no owner): the Portal accepts such a token only when `client_id` equals `sub`, `sub` is `s-` and 26 lower-case
   Crockford base32 characters, and the scope includes `station.report`. It reaches only the two report routes (403
@@ -833,6 +847,11 @@ whenever the Portal's is. Repeat step 2's cursor reset after every change of the
 Auth's stays on: while the Portal's is off and Auth's is on, the Portal skips the account entries, and the built-in
 Station's view of disabled accounts goes stale.
 
+Phase B's revocation reports ("For Station Builders") need nothing beyond the Portal's own setting: it takes them whenever
+it is on, whatever Auth's and the admin site's are. Turn it on before a Station sends them. With the setting off the
+Portal refuses a body with a `reportId` as 400 `report`, which a Station treats as final: it alerts and never sends that
+report again.
+
 Known Phase A limits:
 
 - The cursor-0 `disabledAccounts` (see "For Station Builders") lists only accounts whose disabling Auth recorded as an
@@ -849,7 +868,9 @@ Known Phase A limits:
 If the setting is turned off again, what was recorded while it was on stays, and is served as recorded: the Station feed
 keeps its entries, but `interruptRunning` is no longer carried, neither on changes nor on `integration` objects, and
 `disabledAccounts` is not served. Account events and the `integration_interrupt_requested` kind are still served, since
-the feed reports what was recorded, as Auth's does. Readers skip kinds they don't know.
+the feed reports what was recorded, as Auth's does. Readers skip kinds they don't know. The hosts, final outcomes and
+report ids recorded stay in the database, but no view shows `revocation` any more, and a body with a `reportId` is 400
+`report` again, a retry of a report already recorded included: the setting is read before the id is looked up.
 
 ### Routes
 
@@ -885,6 +906,7 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
 | `POST /api/integrations/<id>/revoke` `{ interruptRunning }` | browser | revoke, saying whether to also interrupt the tasks running on the owner's hosts now (true or false); the body is required |
 | `POST /api/integrations/<id>/interrupt` | browser | interrupt those tasks later, within 24 hours of the revocation; by the integration's owner or the owner of its custom Station |
 | `POST /api/v1/integrations/<id>/revoke` `{ interruptRunning }` | token, `integrations:approve` | Astation revokes the token's account's own integration, with the same body |
+| `POST /api/v1/stations/reports` `{ integrationId, state: "revocation_applied", reportId, host, recordId }` or `{ integrationId, state: "revoked", reportId, outcome, pendingHosts }` | token, `station.report` | the Station's two revocation reports: one for each host that applied a revocation, and the final one (the forms below); with a `reportId` only |
 
 - The choice is kept on the integration and in the revoke event. It goes to Auth only when it is `true`: an unticked
   revoke sends Auth what it sent before the setting, and Auth, with its own setting on, records a missing choice as
@@ -922,6 +944,55 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
 - A revoking or revoked integration's view (the lists, and the answers above) also has `revokedAt` (its time, or null) and
   `interruptRunning`, and `stationRemoved: true` when its Station has been removed (the account page then offers no
   Interrupt running tasks).
+- **The Station's two revocation reports** (D29 Phase B). With the setting on, `POST /api/v1/stations/reports` also takes
+  these, each with a `reportId`; when to send them is in "For Station Builders":
+  - `{ "integrationId", "state": "revocation_applied", "reportId", "host", "recordId" }`: the host `host` has applied the
+    revocation, as the record `recordId` says;
+  - `{ "integrationId", "state": "revoked", "reportId", "outcome", "pendingHosts" }`: the final report. `outcome` is
+    `all_applied` with `pendingHosts` `[]`, or `deadline_passed` with the hosts that didn't confirm.
+
+  A `revoked` report with no `reportId` is today's report, unchanged. One with a `reportId` must carry `outcome` and
+  `pendingHosts`. `reason` is not allowed with the new fields. With the setting off every new field is an unknown field
+  (400 `report`, with today's message). With it on, `state` also accepts `revocation_applied` (and its 400 message lists
+  it). The report is validated in this order (400, with the code): its shape, `state`, `reportId`, then the kind's fields.
+
+  | Code | Refused when | Message |
+  | --- | --- | --- |
+  | `report` | a field outside `integrationId`, `state`, `reason`, `reportId`, `host`, `recordId`, `outcome` and `pendingHosts`; the new fields with no `reportId`; a `reason` with a `reportId`; the fields of both forms together; a `reportId` with any state but `revocation_applied` and `revoked` | "Send a report as { integrationId, state, reason }, { integrationId, state: "revocation_applied", reportId, host, recordId } or { integrationId, state: "revoked", reportId, outcome, pendingHosts }." |
+  | `report_id` | `reportId` missing (with `revocation_applied`), or not 1 to 128 characters of `[A-Za-z0-9._:-]` | "Send the reportId as 1 to 128 characters of letters, digits, '.', '_', ':' or '-'." |
+  | `host` | `host`, or an entry of `pendingHosts`, missing or not a host id: 1 to 128 characters of `[A-Za-z0-9._:-]`, the grammar of the device list's host ids | "Name the host by its id: 1 to 128 characters of letters, digits, '.', '_', ':' or '-'." |
+  | `record_id` | `recordId` missing or not a lowercase UUID v4 | "Send the recordId as the record's lowercase UUID." |
+  | `outcome` | `outcome` or `pendingHosts` missing, or neither `all_applied` with `[]` nor `deadline_passed` with 1 to 100 distinct hosts | "Send all_applied with no pendingHosts, or deadline_passed with the hosts that didn't confirm." |
+
+  `pendingHosts` holds at most 100 hosts, since a device list holds at most 64; 100 hosts of 128 characters still fit in the
+  16 KB body. The entries are checked against the host grammar (`host`) before the combination (`outcome`). The Portal
+  checks only the characters and length of `reportId`; it is opaque to it.
+- **What each report does.** The answer to every accepted report is the integration as its Station sees it, as for today's
+  reports, without `role`, `pausedBy`, `revokedAt`, `interruptRunning`, `stationRemoved` or `revocation`. A refusal because of
+  the integration's state is 409 `invalid_state`.
+  - `revocation_applied` needs the integration to be `revoking` or `revoked` ("This integration isn't revoked."). Each host
+    is counted once: the first report for a host records it with its `recordId` and `reportId`; a later report for it,
+    under another `reportId`, is 200, counts nothing again and is kept under its own id. One that comes after a
+    `deadline_passed` final records the host too, so that host no longer counts as unconfirmed; the integration stays
+    revoked. It records no event and pushes nothing to the Station.
+  - The final `revoked` moves a `revoking` integration to `revoked`, as today's report does (it also clears `lastError`),
+    records `outcome` and `pendingHosts`, and records an `integration_reported` event (actor `station`; its details name
+    the outcome and how many hosts the report listed, never a host). On a `revoked` integration with no final outcome yet
+    (a legacy `revoked` came first) it records the outcome and no event. Once a final outcome is recorded under another
+    `reportId` it is refused: "This integration's revocation already has its final report." On a live, paused, waiting or
+    expired integration it is refused as today's `revoked` report is.
+  - An integration of another Station, or an unknown one, is 404, as for any report. A refused report records no id.
+  - The `reportId` is looked up before the integration, so an id already used for another integration is 409
+    `report_id_reused`, not 404.
+- **The counts the views show.** With the setting on, a revoking or revoked integration's view has, wherever it has
+  `revokedAt`, `revocation: { appliedHosts, outcome, unconfirmedHosts }`.
+  - `appliedHosts` is the number of hosts recorded;
+  - `outcome` is the final outcome, or `null` until there is one;
+  - `unconfirmedHosts` is, with `deadline_passed`, the number of `pendingHosts` not recorded since, else `null`.
+
+  A revoking integration nobody has reported on shows `{ appliedHosts: 0, outcome: null, unconfirmedHosts: null }`. Host
+  names are never shown, in a view, the history or the Station's feed. The Station's feed and a report's answer carry no
+  `revocation`.
 
 Apps and Stations that send an access token use `/api/v1/` only: a bearer
 token on the unversioned `/api/...` path gets 404 naming the `/api/v1` path.
@@ -962,9 +1033,10 @@ account from using a large share of it. If Auth answers 429, it shows as 503
 Common error codes: `not_found` (404), `forbidden` (403), `invalid_state` and
 `expired` (409, the action does not fit the current state), `revoked` (409),
 `origin_taken` and `duplicate_key` (409, from Auth), `challenge` (400, expired or
-used), `proof` (422), `station` (403, the report client is not a registered Station), `exchange` (403, Auth refused the read token), `unavailable` (503, Auth unreachable), `built_in` (409, the built-in Station can't be removed, shared or left), `not_supported` (409, integrations are off on the built-in Station), `plan_limit` (403, the plan's limit on the built-in Station), `admin_paused` (409, Agora.Build paused the integration; only Agora.Build resumes it), `owner_disabled` (409, Agora.Build disabled the owner's account; the integration resumes when it is enabled again); with `DELEGATED_HOST_WORK=1`, `interrupt_running` (400, a revoke without a true or false `interruptRunning`), `too_late` (409, more than 24 hours since the revocation) and `station_removed` (409, the integration's Station has been removed); too many challenges or requests are 429. Field mistakes are
+used), `proof` (422), `station` (403, the report client is not a registered Station), `exchange` (403, Auth refused the read token), `unavailable` (503, Auth unreachable), `built_in` (409, the built-in Station can't be removed, shared or left), `not_supported` (409, integrations are off on the built-in Station), `plan_limit` (403, the plan's limit on the built-in Station), `admin_paused` (409, Agora.Build paused the integration; only Agora.Build resumes it), `owner_disabled` (409, Agora.Build disabled the owner's account; the integration resumes when it is enabled again); with `DELEGATED_HOST_WORK=1`, `interrupt_running` (400, a revoke without a true or false `interruptRunning`), `too_late` (409, more than 24 hours since the revocation), `station_removed` (409, the integration's Station has been removed) and `report_id_reused` (409, a Station's `reportId` already used for another report); too many challenges or requests are 429. Field mistakes are
 400 with `name`, `scopes`, `quota`, `expiry`, `jwk`, `private_key`, `account`,
-`report_key`, `r9_svc`, `reason`, `state`, `report` or `cursor`.
+`report_key`, `r9_svc`, `reason`, `state`, `report` or `cursor`; with `DELEGATED_HOST_WORK=1` also `report_id`, `host`,
+`record_id` and `outcome` (a Station's revocation reports, in "Routes").
 
 ### Lifecycle
 
@@ -977,6 +1049,11 @@ used), `proof` (422), `station` (403, the report client is not a registered Stat
 | `paused` | stopped by the owner, the Station's owner or Agora.Build; remembers where it was | resume returns it there; after Agora.Build's pause only Agora.Build resumes it (409 `admin_paused`) |
 | `revoking` | revoked at Auth; the Station has not confirmed | the Station reports `revoked` |
 | `revoked` | final | nothing |
+
+**With `DELEGATED_HOST_WORK=1` (off by default):** a `revoking` integration stays `revoking` while its hosts report
+`revocation_applied`. The Station's final `revoked` report, one with a `reportId`, moves it to `revoked` and records how it
+ended; a legacy `revoked` report still moves it at once, and a final may follow it. The Portal runs no 24-hour clock of its
+own: only a Station's report ends `revoking`, so an integration whose Station never sends a final stays `revoking`.
 
 The Portal never sets `ready` itself. Pause is allowed from `awaiting_approval`, `provisioning`,
 `waiting_for_host` and `ready` (not when expired); a report received while paused updates the state to return to.
@@ -1035,6 +1112,70 @@ the change feed, the Station is not told who paused it).
 
 Repeating the current state changes nothing and succeeds. Any other report is
 409 `invalid_state`. An integration of another Station is 404, as if unknown.
+
+**With `DELEGATED_HOST_WORK=1` (off by default):** the Station also reports how a revocation went, host by host
+([D29](integrations.md#311-delegated-host-work-d29), Phase B), so that the Portal can show how many hosts applied it. The
+two forms, their validation and the error codes are under "Routes"; this is when to send them and what to do with each
+answer, as agreed with Atem ([Atem PR #148](https://github.com/Agora-Build/Atem/pull/148), the acknowledgment ledger).
+With the setting off a body with a `reportId` is 400 `report`.
+
+- **When to send each.**
+  - `revocation_applied`: once for each covered host and revoked integration, when that host first has the revocation in
+    force, naming the record whose result said so. The Portal takes it only for an integration it holds as `revoking` or
+    `revoked`.
+  - The final `revoked`: once for each revocation. `all_applied` with `pendingHosts` `[]` once every covered host has the
+    revocation in force; else `deadline_passed` with the hosts that didn't confirm (never none), 24 hours after the
+    revocation's start (the clock, below).
+- **`reportId` is opaque to the Portal.** It checks only that it is 1 to 128 characters of `[A-Za-z0-9._:-]` and never
+  recomputes it. Atem's reference derivation is in its bindings' "For Station builders"
+  ([Atem PR #148](https://github.com/Agora-Build/Atem/pull/148), `designs/protocol/atem-client-bindings.md` §9, not yet
+  merged): `<kind>:` and a SHA-256 over the report's identity, never over time, order or a counter. Whatever a Station
+  uses must give a retry the same id.
+- **Idempotency.** Report ids are per Station and kept forever, with the body and the answer they got.
+  - The same `reportId` with the same body gets the recorded answer (200) and changes nothing. The body is compared by
+    its fields, whatever their order, with `pendingHosts` in the order sent, so a retry sends the same list in the same
+    order (Atem sends it sorted).
+  - The same `reportId` with another body is 409 `report_id_reused`: "This reportId was already used for another report."
+    The first report stands.
+  - The id is looked up before the integration, so an id used for one integration and sent again for another is 409
+    `report_id_reused`.
+  - A report the Portal refuses records no id.
+- **Order.** Send one report at a time for an integration, in the order they were made: the next only once the last is
+  settled (done, final or dropped). Then a final never reaches the Portal ahead of the per-host reports made before it. The
+  Portal doesn't check the order.
+- **A late per-host report is welcome.** Keep sending `revocation_applied` for a host that applies the revocation after a
+  `deadline_passed` final. The Portal records the host and the "n hosts didn't confirm" count falls; the integration stays
+  revoked. `revoked` is never sent again: a second final under another id is 409 `invalid_state`. A host counts once: a
+  second report for a host already recorded is 200 and counts nothing again.
+- **Finals that come at once.** The Station's own `revoke` is the record it signs with the integration's service key when
+  the Portal revokes the integration.
+  - An own revoke whose grant covered no host is final at once: `revoked` with `all_applied` and `pendingHosts` `[]`, and
+    no per-host report. Nothing could apply it.
+  - An own revoke recorded after its own deadline is final at once: `all_applied` when every covered host already has the
+    revocation in force (through a native revoke), else `deadline_passed`.
+- **The 24-hour clock** starts at `min(revoked_at_ms, issued_at + 1 h)`: `revoked_at_ms` is when the Portal revoked the
+  integration and `issued_at` is the own revoke's. Keep the start, so that a restart doesn't move the deadline. The Portal
+  runs no clock of its own and takes the report when it comes.
+- **The answers.** The Portal itself answers 200, 400, 401, 403, 404, 409, 413, 415, 429 and 503 here; the other rows are
+  for a proxy in between, or a mistake.
+
+  | Answer | Class | What the Station does |
+  | --- | --- | --- |
+  | 200, the recorded 200 of a repeated `reportId` included | done | the report is settled |
+  | a network error or timeout, any 5xx (503 and unknown ones too), 408 | retry | send the same report again later, with backoff: the same `reportId` and body |
+  | 429 | retry | the same, after its `Retry-After`. The Portal limits a Station to 600 reports a minute and its own 429 carries no `Retry-After` today, so back off when there is none |
+  | 401 | retry | refresh the `station.report` token, then send the same report |
+  | 409 `report_id_reused`, 400, 404, 409 `invalid_state`, 413, 415, any other 4xx | final | never send it again; raise an operator alert |
+  | 1xx, 3xx, any 2xx but 200 | final | the same. Never follow a 3xx: it would carry the `station.report` bearer wherever it points |
+  | 403 | stop | stop reporting under this report client ID (below) |
+
+  A network error or timeout has no status: it is a retry, so never pass a stand-in such as `0` as one.
+- **The 403 stop.** A 403 refuses the report client (the Station's `station.report` client at Auth), not one report.
+  - Stop reporting under that report client ID: hold every pending report (none sent, none dropped), go on counting and
+    making reports, and raise one operator alert.
+  - When the Station reports again, resume under the same ID: every held report goes, in order. Under a new ID (another
+    Station at Auth, say a removed one registered again, with new integrations), drop what was pending; every later
+    revocation reports as usual under the new ID.
 
 **The change feed.** `GET /api/v1/stations/changes?cursor=<n>` returns
 `{ changes, cursor }` and, only for `cursor=0`, `integrations`, a snapshot of
