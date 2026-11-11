@@ -49,9 +49,9 @@ integration's service identity.
   admin site is D27 (§3.3.5).
 - **Launch, message and notify** (D28): Auth accepts the three scopes and the Portal offers them. The Station turns
   them into Atem's new signed operations only in builds with a feature that is off everywhere (§3.1.3).
-- **Delegated host work** (D29, agreed by Atem, Astation and Auth/Portal on 2026-11-08, not built): Atem owns the tasks
-  it accepts, so they survive their sender going offline or its integration expiring, while revocation stays signed,
-  durable and race-safe; host-to-host senders use the same lifecycle (§3.11).
+- **Delegated host work** (D29, agreed by Atem, Astation and Auth/Portal on 2026-11-08; Phase A built in Auth and the
+  Portal, off by default): Atem owns the tasks it accepts, so they survive their sender going offline or its integration
+  expiring, while revocation stays signed, durable and race-safe; host-to-host senders use the same lifecycle (§3.11).
 - **Later:** the mobile app (§3.3.3), Discord (§3.8), the assistant (§3.9), Station AI (§3.10), account deletion and
   export (§3.6), and production.
 
@@ -91,9 +91,10 @@ Notes:
   the Cargo feature `host-work-api`, which is off on every Station. Astation's consent review, signing gate and native
   launch are merged; its message inbox is not built.
 - **Delegated host work:** the design was agreed by Atem, Astation and Auth/Portal on 2026-11-08. Phase A is built in
-  Auth and the Portal, off by default (`DELEGATED_HOST_WORK`, and Auth's `AUTH_DELEGATED_HOST_WORK`); Phases B and C are
-  not started. Atem has started its shared core, and nothing new is activated until the agreed schemas, compatible
-  verifiers and end-to-end tests are in place.
+  Auth and the Portal, off by default (the Portal's `DELEGATED_HOST_WORK` and Auth's `AUTH_DELEGATED_HOST_WORK`; the
+  admin site has a `DELEGATED_HOST_WORK` of its own, to be turned on after both); Phases B and C are not started (§3.11
+  says what the phases are). Atem has started its shared core, and nothing new is activated until the agreed schemas,
+  compatible verifiers and end-to-end tests are in place.
 - **Hosted agent execution:** the dev Station image is built with the Cargo feature `hosted-agent-api`; default and
   production builds keep it closed.
 - **Production:** no production Auth, Portal or built-in Station is set up. The admin site's code accepts only its dev
@@ -989,6 +990,12 @@ the Station (and its operator) can use it, and that prompts with retrieved conte
 Status: [Partly built] — Phase A built in the Portal and Auth, off by default (DELEGATED_HOST_WORK); Phase B and C not
 started. Agreed by Atem, Astation and Auth/Portal on 2026-11-08; Atem's build has started.
 
+**Phases.** Phase A is the first slice of Auth/Portal's part (below): `interruptRunning` on revocations, the later
+interrupt, the native revoke, the account-level feed entries and the page copy. It is defined by the Phase A plans for
+Auth, the Portal and the admin site (`plans/2026-11-11-d29-phase-a-*.md`, kept with the working notes outside this
+repository), and sits at step 6 of the design's order of work (V.2 in the design below). Phases B and C are the later
+slices of that list and of V.2; no document defines them further yet.
+
 **The decision.** Atem owns accepted tasks of delegated senders: integrations a Station's control feed covers, native members, and host senders with project grants. Natural expiry and renewal don't touch accepted tasks, and each task's deadline (at most 24 h) bounds it, running turns included. A revocation cancels unstarted tasks and interrupts running ones only when the owner chooses it. An integration's pause holds its unstarted tasks; host senders have no pause, only revoke and readmit. Stops reach hosts as signed control records (from the Station for integrations, from native managers for host senders) or as device-list entries, and a host reconciles its feeds and mailbox before it starts queued remote work. R9 authorization stays with native managers, outside Agora.Build's kill switch. Agora.Build's service availability is separate: disabling an Agora.Build account suspends the built-in Station's relay and mailbox service for that account's hosts, and revokes nothing.
 
 **The design** is *Delegated host work and host-to-host senders: one design*, in the Atem repository:
@@ -1075,7 +1082,7 @@ Status: [Partly built] — each row has its own tag.
 | D26 | A separate admin site (the private `Agora-Build/Portal-Admin`; `admin.agora.build`, dev `admin.dev.agora.build`) holds Agora.Build's admin powers. Admins sign in with a passkey at Auth, never by silent SSO reuse. Auth enforces every admin permission server-side, with a step-up ID token on each cross-account call. Pause and revoke take effect at once, including the Station's open sessions. Every action has a required reason and an audited actor. Account disabling, enabling and passkey resets are admin-site actions, not CLI commands. The Portal has no admin views. Dev only until passkeys are verified and the owner approves production (§3.3.4) | [Built] | Auth, Portal, admin site |
 | D27 | All system, account and user management goes through the admin site; no `npm` or script tools: a Portal admin API for plan roles and credit grants, called with a 60-second `portal.admin` token exchanged from the admin's step-up proof; Stoa admins taken from Auth's configured admins; signing keys listed and emergency-revoked on the admin site; `import-json` removed (§3.3.5) | [Not built] | Auth, Portal, admin site |
 | D28 | Three integration scopes for Atem's new signed operations: `agent.launch` → `launch`, `agent.message` → `message` (never makes an agent act), `agent.notify` → `notify` (needs `agent.message` and `agent.prompt`, which Auth enforces). `agent.view` stays required; existing integrations gain nothing; the Portal shows all three checkboxes. Signing gate: the Station maps the scopes only in builds with `host-work-api` (Atem supports them from v0.8.2), and Astation signs the new operations only for hosts and checkers that support them. An Astation inbox with "Start work on this" is follow-up (§3.1.3) | [Partly built] — the Station's mapping is off (`host-work-api`), the joint check on a real host has not run, and the inbox is not built | Auth, Portal, Station, Astation, Atem |
-| D29 | Atem owns accepted tasks of delegated senders: integrations a Station's control feed covers, native members, and host senders with project grants. Natural expiry and renewal don't touch accepted tasks, and each task's deadline (at most 24 h) bounds it, running turns included. A revocation cancels unstarted tasks and interrupts running ones only when the owner chooses it. An integration's pause holds its unstarted tasks; host senders have no pause, only revoke and readmit. Stops reach hosts as signed control records (from the Station for integrations, from native managers for host senders) or as device-list entries, and a host reconciles its feeds and mailbox before it starts queued remote work. R9 authorization stays with native managers, outside Agora.Build's kill switch. Agora.Build's service availability is separate: disabling an Agora.Build account suspends the built-in Station's relay and mailbox service for that account's hosts, and revokes nothing. (§3.11) | [Not built] — agreed by Atem, Astation and Auth/Portal on 2026-11-08 | Atem, Astation, Auth, Portal, admin site |
+| D29 | Atem owns accepted tasks of delegated senders: integrations a Station's control feed covers, native members, and host senders with project grants. Natural expiry and renewal don't touch accepted tasks, and each task's deadline (at most 24 h) bounds it, running turns included. A revocation cancels unstarted tasks and interrupts running ones only when the owner chooses it. An integration's pause holds its unstarted tasks; host senders have no pause, only revoke and readmit. Stops reach hosts as signed control records (from the Station for integrations, from native managers for host senders) or as device-list entries, and a host reconciles its feeds and mailbox before it starts queued remote work. R9 authorization stays with native managers, outside Agora.Build's kill switch. Agora.Build's service availability is separate: disabling an Agora.Build account suspends the built-in Station's relay and mailbox service for that account's hosts, and revokes nothing. (§3.11) | [Partly built] — agreed by Atem, Astation and Auth/Portal on 2026-11-08; Phase A is built in Auth and the Portal, off by default (§2, §3.11); Phases B and C are not started | Atem, Astation, Auth, Portal, admin site |
 
 No decision has been replaced by a later one. D21 was revised in place, and D24's rule that admins hold the
 Station-owner rights on the built-in Station now works through the admin site (D26).
