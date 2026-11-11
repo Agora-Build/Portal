@@ -57,6 +57,12 @@ const stateLabel = (state) => STATE_LABELS[state] || String(state || "Unknown").
 const words = (value) => String(value || "").replace(/_/g, " ");
 // Running tasks can still be interrupted: not asked for yet, and within 24 hours of the revocation. A revokedAt of null (never dated) is too late, as at the server.
 const interruptible = (integration) => !integration.interruptRunning && Boolean(integration.revokedAt) && Date.now() - Date.parse(integration.revokedAt) <= DAY;
+// How a revocation went on the hosts, from the view's `revocation` ({ appliedHosts, outcome, unconfirmedHosts }, which
+// the server sends only with the setting on); a count, never host names. A revoking integration says how many hosts have
+// applied it; a revoked one whose final report said deadline_passed says how many didn't confirm. Otherwise no note.
+const hostCount = (count) => count + (count === 1 ? " host" : " hosts");
+const appliedNote = (integration) => integration.state === "revoking" && integration.revocation?.appliedHosts >= 1 ? "Applied on " + hostCount(integration.revocation.appliedHosts) : "";
+const unconfirmedNote = (integration) => integration.state === "revoked" && integration.revocation?.outcome === "deadline_passed" && integration.revocation.unconfirmedHosts >= 1 ? "Revoked (" + hostCount(integration.revocation.unconfirmedHosts) + " didn't confirm; any unstarted work there has passed its deadline)" : "";
 // A removal that revokes integrations says, with the setting on, that tasks already running on the hosts continue; unless
 // the Station is removed, the owner of each revoked integration can still interrupt them.
 const indirect = (text) => me?.delegatedHostWork ? text + " " + INDIRECT_NOTE : text;
@@ -493,7 +499,7 @@ function integrationRow(integration) {
     );
   }
   // With the setting on, what the state means for work already on the hosts.
-  const notes = !hostWork ? [] : [state === "paused" && PAUSE_NOTE, state === "expired" && EXPIRY_NOTE, STOPPED.includes(state) && integration.interruptRunning && INTERRUPTED_NOTE].filter(Boolean);
+  const notes = !hostWork ? [] : [state === "paused" && PAUSE_NOTE, state === "expired" && EXPIRY_NOTE, STOPPED.includes(state) && integration.interruptRunning && INTERRUPTED_NOTE, appliedNote(integration), unconfirmedNote(integration)].filter(Boolean);
   const badge = el("span", { class: "state-badge state-badge--" + String(state).replace(/[^a-z_]/g, "").replace(/_/g, "-"), text: locked ? PAUSED_BY_AGORA : stateLabel(state) });
   const fact = (term, value) => value ? [el("dt", { text: term }), el("dd", { text: value })] : [];
   return el("article", { class: "account-card integration-item", "data-row": integration.id }, [
