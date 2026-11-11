@@ -93,7 +93,7 @@ test("confirmations ask before the action runs, so the opener stays enabled and 
   const script = await read("integrations.js");
   // A button disabled while its <dialog> is open can't take focus back when the dialog closes (Escape or Keep it).
   assert.doesNotMatch(script, /act\([^\n]*\n?\s*if \(!await confirmAction/);
-  assert.equal((script.match(/confirmed\(\w+, output, \[/g) || []).length, 4, "Remove member, Remove Station, Leave and Revoke confirm first");
+  assert.equal((script.match(/confirmed\(\w+, output, \[/g) || []).length, 5, "Remove member, Remove Station, Leave, Revoke and Interrupt running tasks confirm first");
   // After the rows re-render, focus that was on the action's button moves to the same control of the new row.
   assert.match(script, /data-row/);
   assert.match(script, /function restoreFocus\(button, row\)/);
@@ -138,5 +138,75 @@ test("an integration Agora.Build paused shows Paused by Agora.Build, offers no R
   // A resume refused because Agora.Build paused it meanwhile says so and shows the list as it is now.
   assert.match(script, /if \(error\.code !== "admin_paused" && error\.code !== "owner_disabled"\) throw error;/);
   assert.match(script, /entry\.actor === "agora_build" \? "Agora\.Build" : entry\.actor/);
-  assert.equal((script.match(/confirmed\(\w+, output, \[/g) || []).length, 4, "no new confirmation");
+  assert.equal((script.match(/confirmed\(\w+, output, \[/g) || []).length, 5, "the only new confirmation is Interrupt running tasks (D29)");
+});
+
+test("with the setting on the page offers the revoke choice, Interrupt running tasks and the notes; with it off none of it shows (D29)", async () => {
+  const html = await read("account.html");
+  const script = await read("integrations.js");
+  const exact = (name, text) => "const " + name + " = " + JSON.stringify(text) + ";";
+  // The exact copy of the design (I.9).
+  assert.ok(script.includes(exact("INTERRUPT_CHOICE", "Also interrupt the tasks running on your hosts now?")));
+  assert.ok(script.includes(exact("EXPIRY_NOTE", "Expiry stops new work and queries. Work already accepted on your hosts runs until its deadline, at most 24 hours. Revoke to cancel work that hasn't started.")));
+  assert.ok(script.includes(exact("PAUSE_NOTE", "Paused: new work is refused, and accepted work that hasn't started waits. Work running now continues.")));
+  assert.ok(script.includes(exact("INDIRECT_NOTE", "Tasks already running on hosts continue; you can interrupt them from each revoked integration within 24 hours.")));
+  assert.ok(script.includes(exact("INTERRUPTED_NOTE", "Running tasks were interrupted.")));
+  // The checkbox sits in the confirmation before its form, hidden and unticked; the host-senders line follows the description.
+  const checkbox = "<label id=\"integration-confirm-option\" class=\"checkbox-label\" hidden><input id=\"integration-confirm-check\" type=\"checkbox\"><span id=\"integration-confirm-option-text\"></span></label>";
+  const dialog = html.match(/<dialog id="integration-confirm"[\s\S]*?<\/dialog>/)?.[0] || "";
+  assert.ok(dialog.includes(checkbox), "the checkbox markup");
+  assert.ok(dialog.indexOf(checkbox) < dialog.indexOf("<form method=\"dialog\""), "the checkbox comes before the form");
+  const note = "<p id=\"host-senders-note\" class=\"form-note\" hidden>Host-to-host senders are managed in Astation.</p>";
+  const section = html.match(/<section id="integrations"[\s\S]*?<\/section>/)?.[0] || "";
+  assert.ok(section.includes(note), "the host-senders line is in the Integrations section, hidden");
+  assert.ok(section.indexOf("class=\"section-description\"") < section.indexOf(note) && section.indexOf(note) < section.indexOf("id=\"integrations-stale\""), "after the description");
+  // confirmAction(title, text, action, option): with an option it shows the checkbox unticked with that text; without, it hides it.
+  assert.match(script, /function confirmAction\(title, text, action, option\) \{/);
+  assert.match(script, /document\.querySelector\("#integration-confirm-option"\)\.hidden = !option;/);
+  assert.match(script, /document\.querySelector\("#integration-confirm-check"\)\.checked = false;/);
+  assert.match(script, /document\.querySelector\("#integration-confirm-option-text"\)\.textContent = option \|\| "";/);
+  // The revoke asks the choice and sends the answer; the setting off sends no body, as today.
+  assert.match(script, /const hostWork = Boolean\(me\?\.delegatedHostWork\);/);
+  assert.match(script, /const change = async \(action, body\) => \{ await request\(path \+ action, \{ method: "POST", body \}\); await loadIntegrations\(\); \};/);
+  assert.match(script, /"Revoke integration", \.\.\.\(hostWork \? \[INTERRUPT_CHOICE\] : \[\]\)\], \(\) => change\("revoke", hostWork \? \{ interruptRunning: document\.querySelector\("#integration-confirm-check"\)\.checked \} : undefined\)\)\);/);
+  // Interrupt running tasks: on a stopped integration still within its 24 hours, behind its own confirmation.
+  assert.match(script, /if \(hostWork && STOPPED\.includes\(state\) && interruptible\(integration\)\) \{/);
+  assert.match(script, /el\("button", \{ class: "inline-link", type: "button", text: "Interrupt running tasks", "aria-haspopup": "dialog" \}\)/);
+  assert.match(script, /confirmed\(interrupt, output, \["Interrupt running tasks\?", "Tasks from " \+ integration\.name \+ " that are still running on the hosts are interrupted now\. This can't be undone\.", "Interrupt running tasks"\], \(\) => change\("interrupt"\)\)/);
+  // The 24-hour check is one named function, as the server's: a revokedAt of null (never dated) is too late.
+  const day = script.match(/^const DAY = .*;$/m)?.[0] || "";
+  const check = script.match(/^const interruptible = .*;$/m)?.[0] || "";
+  assert.equal(day, "const DAY = 24 * 60 * 60 * 1000;");
+  assert.equal(check, "const interruptible = (integration) => !integration.interruptRunning && Boolean(integration.revokedAt) && Date.now() - Date.parse(integration.revokedAt) <= DAY;");
+  const now = Date.parse("2026-11-11T12:00:00.000Z");
+  const interruptible = new Function("Date", day + "\n" + check + "\nreturn interruptible;")({ now: () => now, parse: Date.parse });
+  const ago = (hours) => new Date(now - hours * 3600000).toISOString();
+  assert.equal(interruptible({ interruptRunning: false, revokedAt: ago(1) }), true);
+  assert.equal(interruptible({ interruptRunning: false, revokedAt: ago(24) }), true, "exactly 24 hours is still allowed, as at the server");
+  assert.equal(interruptible({ interruptRunning: false, revokedAt: ago(24.01) }), false);
+  assert.equal(interruptible({ interruptRunning: false, revokedAt: null }), false, "never dated: too late");
+  assert.equal(interruptible({ interruptRunning: false, revokedAt: "not a date" }), false);
+  assert.equal(interruptible({ interruptRunning: true, revokedAt: ago(1) }), false, "already asked for");
+  // The notes: pause and expiry, and that running tasks were interrupted, as muted notes after the Agora.Build lock note.
+  assert.match(script, /const notes = !hostWork \? \[\] : \[state === "paused" && PAUSE_NOTE, state === "expired" && EXPIRY_NOTE, STOPPED\.includes\(state\) && integration\.interruptRunning && INTERRUPTED_NOTE\]\.filter\(Boolean\);/);
+  assert.match(script, /\.\.\.\(owner && locked \? \[el\("p", \{ class: "muted", text: LOCKED_NOTE \}\)\] : \[\]\),\n\s*\.\.\.notes\.map\(\(note\) => el\("p", \{ class: "muted", text: note \}\)\),/);
+  // The indirect revocations say running tasks continue, only with the setting on; off, the text is today's.
+  const helper = script.match(/^const indirect = .*;$/m)?.[0] || "";
+  assert.equal(helper, "const indirect = (text) => me?.delegatedHostWork ? text + \" \" + INDIRECT_NOTE : text;");
+  const indirect = (account) => new Function("me", "INDIRECT_NOTE", helper + "\nreturn indirect;")(account, "NOTE");
+  assert.equal(indirect(null)("Text."), "Text.");
+  assert.equal(indirect({ account: {} })("Text."), "Text.");
+  assert.equal(indirect({ delegatedHostWork: true })("Text."), "Text. NOTE");
+  assert.match(script, /\["Remove this member\?", indirect\(member\.account \+ " loses this Station, and their integrations on it are revoked\."\), "Remove member"\]/);
+  assert.match(script, /\["Remove " \+ station\.origin \+ "\?", indirect\("Every integration on this Station is revoked and its members lose access\. This can't be undone\."\), "Remove Station"\]/);
+  assert.match(script, /\["Leave " \+ station\.origin \+ "\?", indirect\("You lose this Station, and your integrations on it are revoked\."\), "Leave Station"\]/);
+  // The host-senders line shows only for a signed-in account, with the setting on.
+  assert.match(script, /document\.querySelector\("#host-senders-note"\)\.hidden = !\(shown && me\.delegatedHostWork\);/);
+  // Everything new is behind the setting: each use of the new copy is on a line that tests it.
+  for (const name of ["INTERRUPT_CHOICE", "EXPIRY_NOTE", "PAUSE_NOTE", "INDIRECT_NOTE", "INTERRUPTED_NOTE"]) {
+    const uses = script.split("\n").filter((line) => new RegExp("\\b" + name + "\\b").test(line) && !line.startsWith("const " + name + " ="));
+    assert.ok(uses.length, name + " is used");
+    for (const line of uses) assert.match(line, /\bhostWork\b|me\?\.delegatedHostWork/, name + ": " + line.trim());
+  }
+  assert.doesNotMatch(script, /console\.|innerHTML/);
 });
