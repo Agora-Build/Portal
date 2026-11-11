@@ -923,12 +923,13 @@ export function createIntegrationService({
 
     // Interrupt running tasks (D29): within 24 hours of the revocation, the owner or the custom Station's owner adds the
     // interrupt they didn't ask for at first. The Portal's own record (Auth is not asked), pushed to the Station; once
-    // made it can't be undone, and asking again, even after the 24 hours, answers the same and changes nothing. Never
-    // for an integration whose Station has been removed: it reads its feed no more, so the record would reach no host.
-    // The setting on only.
+    // made it can't be undone, and asking again, even after the 24 hours or the Station's removal, answers the same and
+    // changes nothing. A request that would change something is refused for an integration whose Station has been
+    // removed: it reads its feed no more, so the record would reach no host. The setting on only.
     async interrupt(accountId, id) {
       if (!delegatedHostWork) throw notFound();
       const { row, role } = await visible(accountId, id);
+      if (row.interruptRunning) return viewOf(row, role);
       if ((await repository.station(row.stationId))?.status === "removed") throw failure(409, "This integration's Station has been removed, so its running tasks can't be interrupted here.", "station_removed");
       // True when there is something to record. A row that was never dated (revoked before revokedAt) is too late.
       const check = (current) => {

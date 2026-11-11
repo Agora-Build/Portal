@@ -906,7 +906,8 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
   `true`.
 - An integration whose Station has been removed can't be interrupted: 409 `station_removed` ("This integration's Station
   has been removed, so its running tasks can't be interrupted here."). A removed Station never reads its feed again, so
-  the request would reach no host. Atem's design (I.8) describes a native path for removed Stations: the Station issues
+  the request would reach no host. One that was already interrupted still answers 200 and changes nothing, so a retried
+  request is harmless; only a request that would change something is refused, and the 24-hour check follows. Atem's design (I.8) describes a native path for removed Stations: the Station issues
   and serves its revocation records before the removal completes, or, if it can't, the Portal marks the integrations
   "pending host revocation" and Astation offers the owner native `revoke` records. That path is not built in Phase A:
   removing a Station records its integrations' revocations as indirect ones, with no interrupt, and the account page's

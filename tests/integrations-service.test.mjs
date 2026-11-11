@@ -1092,6 +1092,10 @@ test("a removed Station's integrations can't be interrupted (409 station_removed
   const mine = await revokedWithout(s);
   const theirs = await revokedWithout(s, MEMBER);
   const { id: live } = await s.create();
+  // Interrupted before the removal: asking again, even after it, is the same harmless answer as anywhere else.
+  const done = await revokedWithout(s);
+  s.clock.now += 1000;
+  await s.service.interrupt(OWNER, done);
   // Another Station, still there, with a revoked integration of the same owner.
   const other = await s.register(OWNER, "https://two.example");
   const { id: elsewhere } = await s.service.createIntegration(OWNER, { stationId: other.id, name: "Elsewhere", scopes: [], publicJwk: publicJwk() });
@@ -1110,7 +1114,14 @@ test("a removed Station's integrations can't be interrupted (409 station_removed
   await assert.rejects(s.service.interrupt(STRANGER, mine), refused(404, "not_found"), "a stranger is still told nothing");
   assert.deepEqual([(await s.repository.integration(mine)).interruptRunning, (await s.repository.integration(live)).interruptRunning], [false, false]);
   assert.deepEqual([(await s.events()).length, s.notified.length, s.manage.calls.length], [events, notified, calls], "nothing was written, pushed or asked of Auth");
-  assert.equal((await s.events("integration_interrupt_requested")).length, 0);
+  assert.equal((await s.events("integration_interrupt_requested")).length, 1, "only the one before the removal");
+
+  // One that was already interrupted answers 200 and changes nothing, after the removal too: only a request that would
+  // change something is refused.
+  const events2 = (await s.events()).length;
+  const again = await s.service.interrupt(OWNER, done);
+  assert.deepEqual([again.interruptRunning, again.stationRemoved], [true, true]);
+  assert.deepEqual([(await s.events()).length, s.notified.length, s.manage.calls.length], [events2, notified, calls], "a repeat writes and pushes nothing");
 
   // The views of stopped integrations on a removed Station carry the flag; others, and the Station that is there, don't.
   const views = [await flag(OWNER, mine), await flag(MEMBER, theirs), await flag(OWNER, live)];
