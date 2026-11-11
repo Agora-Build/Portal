@@ -27,6 +27,17 @@ const NO_DETAILS = "This Station does not offer details yet.";
 // An integration Agora.Build stopped (an admin's pause, or its owner's account disabled): only Agora.Build lifts it.
 const PAUSED_BY_AGORA = "Paused by Agora.Build";
 const LOCKED_NOTE = "Agora.Build paused this integration. Only Agora.Build can resume it; you can still revoke it.";
+// Delegated host work (D29), shown only while the Portal has the setting on (/api/me says delegatedHostWork): what a
+// revocation, a pause or an expiry means for work already on the hosts, and the choice to interrupt it.
+const INTERRUPT_CHOICE = "Also interrupt the tasks running on your hosts now?";
+const EXPIRY_NOTE = "Expiry stops new work and queries. Work already accepted on your hosts runs until its deadline, at most 24 hours. Revoke to cancel work that hasn't started.";
+const PAUSE_NOTE = "Paused: new work is refused, and accepted work that hasn't started waits. Work running now continues.";
+const INDIRECT_NOTE = "Tasks already running on hosts continue. Within 24 hours, the owner of each revoked integration can still interrupt them.";
+// A removed Station never reads its feed again, so removing it offers no interrupt: only that running tasks continue.
+const REMOVED_NOTE = "Tasks already running on hosts continue.";
+// What the Portal knows is that an interrupt was requested, not what the hosts then did.
+const INTERRUPTED_NOTE = "Running tasks: an interrupt was requested.";
+const DAY = 24 * 60 * 60 * 1000;
 let me = null;
 let stations = [];
 let challenge = null;
@@ -44,15 +55,26 @@ const date = (value) => value ? new Date(value).toLocaleDateString() : "";
 const time = (value) => value ? new Date(value).toLocaleString() : "";
 const stateLabel = (state) => STATE_LABELS[state] || String(state || "Unknown").replace(/_/g, " ");
 const words = (value) => String(value || "").replace(/_/g, " ");
+// Running tasks can still be interrupted: not asked for yet, and within 24 hours of the revocation. A revokedAt of null (never dated) is too late, as at the server.
+const interruptible = (integration) => !integration.interruptRunning && Boolean(integration.revokedAt) && Date.now() - Date.parse(integration.revokedAt) <= DAY;
+// A removal that revokes integrations says, with the setting on, that tasks already running on the hosts continue; unless
+// the Station is removed, the owner of each revoked integration can still interrupt them.
+const indirect = (text) => me?.delegatedHostWork ? text + " " + INDIRECT_NOTE : text;
+const removing = (text) => me?.delegatedHostWork ? text + " " + REMOVED_NOTE : text;
 async function copy(text, label) {
   try { await navigator.clipboard.writeText(text); notify(label + " copied."); }
   catch { notify("Copying isn't available here. Select the text instead."); }
 }
-// A native confirmation; resolves true only when the account chooses the confirm button.
-function confirmAction(title, text, action) {
+// A native confirmation; resolves true only when the account chooses the confirm button. With an `option` it also
+// offers that choice as a checkbox, unticked (read as #integration-confirm-check once the dialog has closed); without
+// one the checkbox is hidden.
+function confirmAction(title, text, action, option) {
   document.querySelector("#integration-confirm-title").textContent = title;
   document.querySelector("#integration-confirm-text").textContent = text;
   document.querySelector("#integration-confirm-ok").textContent = action;
+  document.querySelector("#integration-confirm-option").hidden = !option;
+  document.querySelector("#integration-confirm-check").checked = false;
+  document.querySelector("#integration-confirm-option-text").textContent = option || "";
   confirmDialog.returnValue = "";
   confirmDialog.showModal();
   // A close event from the previous dialog (Escape fires it a moment later) can arrive after this one opened; only a
@@ -177,7 +199,7 @@ function membersPanel(station) {
       const { members } = await request("/api/stations/" + segment(station.id) + "/members");
       list.replaceChildren(...members.map((member) => {
         const remove = el("button", { class: "inline-link", type: "button", text: "Remove", "aria-label": "Remove " + member.account });
-        remove.addEventListener("click", () => confirmed(remove, output, ["Remove this member?", member.account + " loses this Station, and their integrations on it are revoked.", "Remove member"], async () => {
+        remove.addEventListener("click", () => confirmed(remove, output, ["Remove this member?", indirect(member.account + " loses this Station, and their integrations on it are revoked."), "Remove member"], async () => {
           await request("/api/stations/" + segment(station.id) + "/members/" + segment(member.account), { method: "DELETE" });
           notify("Member removed.");
           await Promise.all([load(), loadIntegrations()]);
@@ -227,7 +249,7 @@ function stationRow(station) {
   actions.append(details);
   if (owner) {
     const remove = el("button", { class: "inline-link", type: "button", text: "Remove Station", "aria-haspopup": "dialog" });
-    remove.addEventListener("click", () => confirmed(remove, output, ["Remove " + station.origin + "?", "Every integration on this Station is revoked and its members lose access. This can't be undone.", "Remove Station"], async () => {
+    remove.addEventListener("click", () => confirmed(remove, output, ["Remove " + station.origin + "?", removing("Every integration on this Station is revoked and its members lose access. This can't be undone."), "Remove Station"], async () => {
       await request("/api/stations/" + segment(station.id), { method: "DELETE" });
       notify("Station removed.");
       await loadAll();
@@ -235,7 +257,7 @@ function stationRow(station) {
     actions.append(remove);
   } else {
     const leave = el("button", { class: "inline-link", type: "button", text: "Leave", "aria-haspopup": "dialog" });
-    leave.addEventListener("click", () => confirmed(leave, output, ["Leave " + station.origin + "?", "You lose this Station, and your integrations on it are revoked.", "Leave Station"], async () => {
+    leave.addEventListener("click", () => confirmed(leave, output, ["Leave " + station.origin + "?", indirect("You lose this Station, and your integrations on it are revoked."), "Leave Station"], async () => {
       await request("/api/stations/" + segment(station.id) + "/members/" + segment(me.account.id), { method: "DELETE" });
       notify("You left the Station.");
       await loadAll();
@@ -421,12 +443,13 @@ function rotatePanel(integration) {
 function integrationRow(integration) {
   const owner = integration.role === "owner";
   const state = integration.state;
+  const hostWork = Boolean(me?.delegatedHostWork);
   // Paused by Agora.Build: shown as such, with no Resume (Auth answers 409 admin_paused to anyone but an admin).
   const locked = state === "paused" && integration.pausedBy === "admin";
   const path = "/api/integrations/" + segment(integration.id) + "/";
   const output = el("p", { class: "form-note", role: "status" });
   const actions = el("div", { class: "agora-project-actions" });
-  const change = async (action) => { await request(path + action, { method: "POST" }); await loadIntegrations(); };
+  const change = async (action, body) => { await request(path + action, { method: "POST", body }); await loadIntegrations(); };
   if (LIVE.includes(state)) {
     const pause = el("button", { class: "inline-link", type: "button", text: "Pause" });
     pause.addEventListener("click", () => act(pause, output, () => change("pause")));
@@ -447,12 +470,20 @@ function integrationRow(integration) {
   }
   if (!STOPPED.includes(state)) {
     const revoke = el("button", { class: "inline-link", type: "button", text: "Revoke", "aria-haspopup": "dialog" });
-    revoke.addEventListener("click", () => confirmed(revoke, output, ["Revoke " + integration.name + "?", "The app loses access through this integration for good. This can't be undone.", "Revoke integration"], () => change("revoke")));
+    revoke.addEventListener("click", () => confirmed(revoke, output, ["Revoke " + integration.name + "?", "The app loses access through this integration for good. This can't be undone.", "Revoke integration", ...(hostWork ? [INTERRUPT_CHOICE] : [])], () => change("revoke", hostWork ? { interruptRunning: document.querySelector("#integration-confirm-check").checked } : undefined)));
     actions.append(revoke);
   }
   const history = el("button", { class: "inline-link", type: "button", text: "History", "aria-haspopup": "dialog" });
   history.addEventListener("click", () => openHistory(integration));
   actions.append(history);
+  // Within 24 hours of a revocation that left running tasks alone, either role may still interrupt them, unless the Station
+  // has been removed (the server refuses it then). After History, so focus after a revoke (the row is re-rendered without
+  // Revoke) goes back to History, as before.
+  if (hostWork && STOPPED.includes(state) && interruptible(integration) && !integration.stationRemoved) {
+    const interrupt = el("button", { class: "inline-link", type: "button", text: "Interrupt running tasks", "aria-haspopup": "dialog" });
+    interrupt.addEventListener("click", () => confirmed(interrupt, output, ["Interrupt running tasks?", "Tasks from " + integration.name + " that are still running on the hosts are interrupted now. This can't be undone.", "Interrupt running tasks"], () => change("interrupt")));
+    actions.append(interrupt);
+  }
   const panels = [];
   if (owner && !STOPPED.includes(state)) {
     panels.push(
@@ -461,12 +492,15 @@ function integrationRow(integration) {
       rotatePanel(integration)
     );
   }
+  // With the setting on, what the state means for work already on the hosts.
+  const notes = !hostWork ? [] : [state === "paused" && PAUSE_NOTE, state === "expired" && EXPIRY_NOTE, STOPPED.includes(state) && integration.interruptRunning && INTERRUPTED_NOTE].filter(Boolean);
   const badge = el("span", { class: "state-badge state-badge--" + String(state).replace(/[^a-z_]/g, "").replace(/_/g, "-"), text: locked ? PAUSED_BY_AGORA : stateLabel(state) });
   const fact = (term, value) => value ? [el("dt", { text: term }), el("dd", { text: value })] : [];
   return el("article", { class: "account-card integration-item", "data-row": integration.id }, [
     el("div", { class: "integration-heading" }, [el("h3", { text: integration.name }), badge]),
     ...(owner ? [] : [el("p", { class: "muted", text: "Another account's integration on your Station. You can pause or revoke it." })]),
     ...(owner && locked ? [el("p", { class: "muted", text: LOCKED_NOTE })] : []),
+    ...notes.map((note) => el("p", { class: "muted", text: note })),
     el("dl", { class: "integration-facts" }, [
       ...fact("Station", integration.stationOrigin || ""),
       ...fact("Scopes", (integration.scopes || []).join(", ")),
@@ -507,6 +541,7 @@ async function refresh() {
   const shown = Boolean(me?.account && me.integrationsAvailable);
   stationsSection.hidden = !shown;
   integrationsSection.hidden = !shown;
+  document.querySelector("#host-senders-note").hidden = !(shown && me.delegatedHostWork);
   if (!shown) {
     stations = [];
     closeStationForm();

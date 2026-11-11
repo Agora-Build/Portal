@@ -71,6 +71,8 @@ export const API_V1 = "/api/v1/";
 const bearerRoutes = new Set(["GET /api/me", "GET /api/credits/balance", "GET /api/credits/statement", "POST /api/marketplaces/chat", "POST /api/marketplaces/tts", "GET /api/connections", "GET /api/connections/agora/projects", "POST /api/connections/agora/certificate", "POST /api/connections/agora/token", "DELETE /api/connections/agora", "POST /api/platform/credits/reserve", "POST /api/platform/credits/settle", "GET /api/integrations", "POST /api/stations/reports", "GET /api/stations/changes"]);
 const bearerPatterns = [/^POST \/api\/integrations\/[A-Za-z0-9_-]{1,64}\/approval$/];
 const isBearerRoute = (route) => bearerRoutes.has(route) || bearerPatterns.some((pattern) => pattern.test(route));
+// Token routes that exist only with DELEGATED_HOST_WORK=1 (D29): Astation's revoke.
+const delegatedBearerPatterns = [/^POST \/api\/integrations\/[A-Za-z0-9_-]{1,64}\/revoke$/];
 // A Station's own report token (sub = its s- report client; a built-in Station has no owner) is not an account: it
 // reaches these two routes only, and no Portal account is made for it.
 const stationReportRoutes = new Set(["POST /api/stations/reports", "GET /api/stations/changes"]);
@@ -116,6 +118,9 @@ export function createAppServer(directory = root, options = {}) {
   // Behind a proxy that appends X-Forwarded-For (TRUST_PROXY=1), the client is the last hop, the one that proxy added;
   // anything before it is client-supplied. Otherwise it is the socket address. Every IP-keyed limit uses this.
   const trustProxy = (options.trustProxy ?? process.env.TRUST_PROXY) === "1";
+  // Delegated host work (D29), off by default: the same variable the integration service reads (integrationsFromEnv).
+  const delegatedHostWork = (options.delegatedHostWork ?? process.env.DELEGATED_HOST_WORK) === "1";
+  const bearerRoute = (route) => isBearerRoute(route) || (delegatedHostWork && delegatedBearerPatterns.some((pattern) => pattern.test(route)));
   const clientAddress = (request) => (trustProxy && String(request.headers["x-forwarded-for"] || "").split(",").map((hop) => hop.trim()).filter(Boolean).at(-1)) || request.socket.remoteAddress;
   // Platform billing clients and their server-side prices; null turns platform billing off.
   const billingClients = "billingClients" in options ? (options.billingClients && parseBillingClients(options.billingClients)) : loadBillingClients(process.env.PORTAL_BILLING_FILE, log);
@@ -174,7 +179,7 @@ export function createAppServer(directory = root, options = {}) {
       // /api/v1/<route> is the versioned app API: only the bearer routes exist there, served by the /api/<route> handlers.
       const versioned = requestUrl.pathname.startsWith(API_V1);
       const path = versioned ? "/api/" + requestUrl.pathname.slice(API_V1.length) : requestUrl.pathname;
-      if (versioned && !isBearerRoute(request.method + " " + path)) throw new AppError(404, "This API was not found. See https://github.com/Agora-Build/Portal/blob/main/docs/platform.md for the /api/v1 routes.");
+      if (versioned && !bearerRoute(request.method + " " + path)) throw new AppError(404, "This API was not found. See https://github.com/Agora-Build/Portal/blob/main/docs/platform.md for the /api/v1 routes.");
       if (path === CHANGES_NUDGE_PATH) {
         // Auth's nudge after an integration change the Portal did not make (an Agora.Build admin's, or Auth's own;
         // spec §3.3.4). It is answered before any cookie or session lookup, so an unauthenticated POST costs no store
@@ -321,11 +326,11 @@ export function createAppServer(directory = root, options = {}) {
         const token = caller ? "" : browserToken;
         const route = request.method + " " + path;
         if (caller?.station && !stationReportRoutes.has(route)) throw reportTokenOnly();
-        if (caller && !publicRoutes.has(route) && !isBearerRoute(route)) throw browserRoute(route, path) ? browserOnly() : new AppError(404, "This page or service was not found.");
-        if (caller && !versioned && isBearerRoute(route)) throw new AppError(404, "Access tokens use the versioned API: " + API_V1 + path.slice("/api/".length) + ".");
+        if (caller && !publicRoutes.has(route) && !bearerRoute(route)) throw browserRoute(route, path) ? browserOnly() : new AppError(404, "This page or service was not found.");
+        if (caller && !versioned && bearerRoute(route)) throw new AppError(404, "Access tokens use the versioned API: " + API_V1 + path.slice("/api/".length) + ".");
         // Only after the route gate, so a token that reaches a 404, browser-only or public route creates nothing; a
         // Station's own report token never makes an account.
-        if (caller && !caller.station && isBearerRoute(route)) caller.account = await store.ensureAccount(caller.sub);
+        if (caller && !caller.station && bearerRoute(route)) caller.account = await store.ensureAccount(caller.sub);
         const scoped = (scope) => { if (!caller.scopes.includes(scope)) throw insufficientScope(scope); return caller.sub; };
         const member = async () => {
           const person = await store.me(token);
@@ -347,7 +352,7 @@ export function createAppServer(directory = root, options = {}) {
         else if (path === "/api/me" && request.method === "GET") {
           // The email is shown only to the browser session; bearer callers get the account without it.
           if (caller) { const { email, ...account } = caller.account; json(response, 200, { profile: await store.accountProfile(caller.sub), account }); }
-          else json(response, 200, { ...await store.session(token), integrationsAvailable: Boolean(integrations) });
+          else json(response, 200, { ...await store.session(token), integrationsAvailable: Boolean(integrations), ...(delegatedHostWork ? { delegatedHostWork: true } : {}) });
         }
         else if (path === "/api/auth/config" && request.method === "GET") json(response, 200, { issuer: idp?.config.issuer || null, accountUrl: idp?.config.accountUrl || null });
         else if (path === "/api/billing/catalog" && request.method === "GET") json(response, 200, await billing.catalog());
@@ -453,7 +458,7 @@ export function createAppServer(directory = root, options = {}) {
           json(response, 200, { result: await scan(person) });
         } else if (path === "/api/rooms" || path.startsWith("/api/rooms/")) throw new AppError(410, "Meeting rooms are now Stoa spaces. Start one from the Stoa.");
         else if (integrationPath(path)) {
-          const handled = await handleIntegrations({ path, method: request.method, url: requestUrl, read: () => body(request), service: integrations && await integrations.ready(), caller, scoped, invalidToken, portalUser, idToken: () => store.sessionIdToken(token), limit, planOf });
+          const handled = await handleIntegrations({ path, method: request.method, url: requestUrl, read: () => body(request), service: integrations && await integrations.ready(), caller, scoped, invalidToken, portalUser, idToken: () => store.sessionIdToken(token), limit, planOf, delegatedHostWork });
           if (!handled) throw new AppError(404, "This page or service was not found.");
           json(response, handled.status, handled.body);
         } else {

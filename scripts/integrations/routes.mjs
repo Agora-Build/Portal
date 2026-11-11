@@ -12,6 +12,8 @@ import { createIntegrationService } from "./service.mjs";
 const ID = "[A-Za-z0-9_-]{1,64}";
 const STATION = new RegExp("^/api/stations/(" + ID + ")(?:/(members|read-token)(?:/([^/]+))?)?$");
 const INTEGRATION = new RegExp("^/api/integrations/(" + ID + ")/(keys|pause|resume|revoke|renew|settings|events|approval)$");
+// Interrupt running tasks (D29): added by the browser session after a revocation; the setting on only.
+const INTERRUPT = new RegExp("^/api/integrations/(" + ID + ")/interrupt$");
 const PARTITION_INTERVAL = 3600000;
 // After a built-in Station sync: the next one an hour later, or a minute later when it failed (Auth unreachable).
 const BUILT_IN_SYNC_AFTER = { ok: 3600000, failed: 60000 };
@@ -32,14 +34,14 @@ export const readyIntegrations = (service, nudge = () => {}) => ({ service, read
 // The service over `db`. ready() migrates and creates the event partitions before the first request, once; a failure
 // answers 503 and the next request tries again. The partitions are then kept up hourly. `stationFetch` (proof of
 // control), `pushFetch` (change nudges), `builtInSyncAfter` and `authChanges` (the timing of the reader of Auth's
-// change feed) are only given by tests; production uses the defaults.
-export function createIntegrationStack({ db, manage, idp, log, stationFetch = createStationFetch(), pushFetch, builtInSyncAfter = BUILT_IN_SYNC_AFTER, authChanges = AUTH_CHANGES }) {
+// change feed) are only given by tests; production uses the defaults. `delegatedHostWork` is DELEGATED_HOST_WORK=1 (D29).
+export function createIntegrationStack({ db, manage, idp, log, stationFetch = createStationFetch(), pushFetch, builtInSyncAfter = BUILT_IN_SYNC_AFTER, authChanges = AUTH_CHANGES, delegatedHostWork = false }) {
   const exchange = (idToken, origin) => idp ? idp.exchangeForStation(idToken, origin) : Promise.reject(new TokenError(503, "unavailable"));
   const repository = createRepository(db);
   // Auth's change feed (spec §3.3.4, D26): read once the stack is ready, then after every nudge from Auth, every 30
   // seconds, and when Auth answers 409 admin_paused to a resume (it changed something the Portal has not read yet).
   let feed = null;
-  const service = createIntegrationService({ repository, db, manage, stationFetch, pushFetch, exchange, log, authChanged: () => feed?.request() });
+  const service = createIntegrationService({ repository, db, manage, stationFetch, pushFetch, exchange, log, authChanged: () => feed?.request(), delegatedHostWork });
   feed = createAuthChanges({ repository, manage, apply: (change) => service.applyAuthChange(change), log, settings: authChanges });
   let pending = null;
   let prepared = false;
@@ -106,13 +108,14 @@ export function integrationsFromEnv(env, { idp, log, stationFetch, pushFetch, au
     log("Stations and integrations are unavailable: " + (error instanceof TypeError ? error.message : "their settings are invalid") + ".");
     return null;
   }
-  return createIntegrationStack({ db: createDatabase(env.DATABASE_URL, { log }), manage, idp, log, stationFetch, pushFetch, authChanges });
+  return createIntegrationStack({ db: createDatabase(env.DATABASE_URL, { log }), manage, idp, log, stationFetch, pushFetch, authChanges, delegatedHostWork: env.DELEGATED_HOST_WORK === "1" });
 }
 
 // Maps HTTP requests to the integration service. Returns null when the request is not an integration route. `caller`
 // is the verified bearer (only ever on the v1 routes; serve.mjs refuses it elsewhere), `scoped(scope)` checks its scope
-// and returns its account, and `idToken()` reads the browser session's ID token.
-export async function handleIntegrations({ path, method, url, read, service, caller, scoped, invalidToken, portalUser, idToken, limit, planOf = async () => "basic" }) {
+// and returns its account, and `idToken()` reads the browser session's ID token. `delegatedHostWork` (D29) is read by
+// serve.mjs as the service reads it: off by default, and off is today's routes and bodies.
+export async function handleIntegrations({ path, method, url, read, service, caller, scoped, invalidToken, portalUser, idToken, limit, planOf = async () => "basic", delegatedHostWork = false }) {
   if (!integrationPath(path)) return null;
   if (!service) throw new AppError(503, "Stations and integrations need the Portal database.");
   const ok = (body) => ({ status: 200, body });
@@ -142,6 +145,12 @@ export async function handleIntegrations({ path, method, url, read, service, cal
     if (!caller) throw invalidToken("Approving an integration needs an auth.agora.build access token.");
     const accountId = changing(scoped("integrations:approve"));
     return ok(await service.approve(accountId, integration[1], { r9Svc: (await read()).r9Svc }));
+  }
+  // Astation revokes for the owner, saying whether to interrupt the tasks running on their hosts (D29). The browser's
+  // revoke, below, is the same path without a token.
+  if (delegatedHostWork && integration?.[2] === "revoke" && method === "POST" && caller) {
+    const accountId = changing(scoped("integrations:approve"));
+    return ok(await service.revokeNative(accountId, integration[1], { interruptRunning: (await read()).interruptRunning, clientId: caller.clientId }));
   }
 
   // Everything below is for the browser session only.
@@ -176,11 +185,15 @@ export async function handleIntegrations({ path, method, url, read, service, cal
     }
     return null;
   }
+  const interrupt = delegatedHostWork && method === "POST" ? INTERRUPT.exec(path) : null;
+  if (interrupt) return ok(await service.interrupt(changing(await portalUser()), interrupt[1]));
   if (!integration) return null;
   const [, id, action] = integration;
   if (action === "events") return method === "GET" ? ok(await service.history(await portalUser(), id)) : null;
   if (method !== "POST") return null;
   const accountId = changing(await portalUser());
+  // With the setting on the browser's revoke says whether to interrupt running tasks; without it, it reads no body.
+  if (action === "revoke" && delegatedHostWork) return ok(await service.revoke(accountId, id, { interruptRunning: (await read()).interruptRunning }));
   if (action === "pause" || action === "resume" || action === "revoke") return ok(await service[action](accountId, id));
   if (action === "keys") return { status: 201, body: await service.rotateKey(accountId, id, { publicJwk: (await read()).publicJwk }) };
   if (action === "renew") return ok(await service.renew(accountId, id, { expiresInDays: (await read()).expiresInDays }, { plan: await planOf(accountId) }));

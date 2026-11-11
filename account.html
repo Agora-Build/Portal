@@ -36,7 +36,7 @@
           <div class="dialog-actions"><button id="station-submit" class="button" type="submit">Get the check value</button><button id="station-cancel" class="inline-link" type="button">Cancel</button></div>
         </form>
         <div id="station-list" class="station-list"></div></section>
-      <section id="integrations" class="membership-section" aria-labelledby="integrations-title" hidden><div class="section-heading"><div><p class="kicker">07 / INTEGRATIONS</p><h2 id="integrations-title">Apps that act for you.</h2></div><button id="integration-add" class="button button-secondary" type="button" aria-controls="integration-form" aria-expanded="false">Create integration</button></div><p class="section-description">An integration lets one of your apps reach your agents through one Station, with the scopes you choose, until it expires. Approve each new integration in Astation.</p><p id="integrations-stale" class="form-note integration-stale" role="status"></p>
+      <section id="integrations" class="membership-section" aria-labelledby="integrations-title" hidden><div class="section-heading"><div><p class="kicker">07 / INTEGRATIONS</p><h2 id="integrations-title">Apps that act for you.</h2></div><button id="integration-add" class="button button-secondary" type="button" aria-controls="integration-form" aria-expanded="false">Create integration</button></div><p class="section-description">An integration lets one of your apps reach your agents through one Station, with the scopes you choose, until it expires. Approve each new integration in Astation.</p><p id="host-senders-note" class="form-note" hidden>Host-to-host senders are managed in Astation.</p><p id="integrations-stale" class="form-note integration-stale" role="status"></p>
         <form id="integration-form" class="account-card stack-form integration-form" aria-labelledby="integration-form-title" novalidate hidden>
           <h3 id="integration-form-title">Create an integration</h3>
           <div class="form-row"><label>Name<input name="name" required maxlength="80" autocomplete="off" placeholder="My release bot"></label><label>Station<select name="stationId" required></select></label></div>
@@ -98,6 +98,7 @@
     <div class="dialog-head"><span class="kicker">PLEASE CONFIRM</span><button class="close-button" type="button" data-close aria-label="Close confirmation">&times;</button></div>
     <h2 id="integration-confirm-title"></h2>
     <p id="integration-confirm-text" class="dialog-intro"></p>
+    <label id="integration-confirm-option" class="checkbox-label" hidden><input id="integration-confirm-check" type="checkbox"><span id="integration-confirm-option-text"></span></label>
     <form method="dialog" class="dialog-actions"><button id="integration-confirm-ok" class="button" value="confirm">Confirm</button><button class="inline-link" value="cancel">Keep it</button></form>
   </dialog>
   <dialog id="integration-history" aria-labelledby="integration-history-title">

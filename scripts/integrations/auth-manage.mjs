@@ -64,8 +64,10 @@ export function createManageClient({ issuer: issuerSetting, clientId, clientSecr
       call("POST", "/integrations", { body: { owner, stationId, name, scopes, publicJwk, r9Svc, quotaPerSecond, expiresAt, actor } }),
     async integrations(account) { return list(await call("GET", "/integrations", { query: { account } }), "integrations"); },
     addKey: (id, publicJwk, actor) => call("POST", "/integrations/" + segment(id) + "/keys", { body: { publicJwk, actor } }),
-    changeIntegration: (id, { status, r9Svc, quotaPerSecond, expiresAt } = {}, actor) =>
-      call("PATCH", "/integrations/" + segment(id), { body: { status, r9Svc, quotaPerSecond, expiresAt, actor } }),
+    // interruptRunning (D29) goes with a revocation only, and the service sends it only when true (an Auth with the setting
+    // off refuses the field); JSON.stringify leaves it out when it is not given.
+    changeIntegration: (id, { status, r9Svc, quotaPerSecond, expiresAt, interruptRunning } = {}, actor) =>
+      call("PATCH", "/integrations/" + segment(id), { body: { status, r9Svc, quotaPerSecond, expiresAt, interruptRunning, actor } }),
     // Auth's change feed (D26, the Portal's alone): the changes to integration access after `after` (an opaque cursor
     // Auth handed out), oldest first, and the cursor to pass next (null before the feed's first change).
     async integrationChanges({ after, limit } = {}) {

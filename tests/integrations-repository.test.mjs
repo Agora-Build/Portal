@@ -319,3 +319,104 @@ test("an account's owner-disabled integrations that are not revoked are listed w
   await repo.updateIntegration("i-3", { ownerDisabledAt: NOW });
   assert.deepEqual(await repo.ownerDisabledIntegrations("ab1"), [{ id: "i-2", ownerDisabledAt: new Date(NOW).toISOString() }], "not another account's, nor a revoked one");
 });
+
+test("integrations carry when they were revoked and whether that revocation asked to interrupt running tasks", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  await station(repo, "st1");
+  await repo.insertIntegration(sample("i-1"));
+  const fresh = await repo.integration("i-1");
+  assert.deepEqual([fresh.revokedAt, fresh.interruptRunning], [null, false], "unset: no revocation time, no interrupt choice");
+  const at = "2026-11-10T10:00:00.000Z";
+  await db.transaction((client) => repo.updateIntegration("i-1", { state: "revoking", revokedAt: at, interruptRunning: true }, client));
+  const revoking = await repo.integration("i-1");
+  assert.deepEqual([revoking.revokedAt, revoking.interruptRunning], [at, true], "an ISO string");
+  assert.deepEqual((await repo.integrationsFor("ab1")).map((row) => [row.revokedAt, row.interruptRunning]), [[at, true]]);
+  await repo.updateIntegration("i-1", { revokedAt: new Date(at) });
+  assert.equal((await repo.integration("i-1")).revokedAt, at, "a Date");
+  await repo.updateIntegration("i-1", { revokedAt: NOW });
+  assert.equal((await repo.integration("i-1")).revokedAt, new Date(NOW).toISOString(), "a number");
+  await repo.updateIntegration("i-1", { revokedAt: null, interruptRunning: false });
+  const cleared = await repo.integration("i-1");
+  assert.deepEqual([cleared.revokedAt, cleared.interruptRunning], [null, false], "null clears the time");
+  await assert.rejects(repo.updateIntegration("i-1", { revokedAt: undefined }), TypeError);
+  await assert.rejects(repo.updateIntegration("i-1", { state: "revoked", revokedAt: undefined }), TypeError);
+  assert.equal((await repo.integration("i-1")).state, "revoking", "a refused update changes nothing");
+});
+
+test("the Station's feed reads each event with the account it was recorded for", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  await station(repo, "st1");
+  await db.transaction((client) => repo.appendEvent({ stationId: "st1", integrationId: "i-1", accountId: "ab7", actor: "system", kind: "created" }, client));
+  assert.deepEqual((await repo.changesSince("st1", 0)).map((event) => event.accountId), ["ab7"]);
+});
+
+test("an account-level entry of Auth's change feed is found by its Station, account, cursor and time", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  await station(repo, "st1");
+  await station(repo, "st2", "ab2");
+  const at = "2026-11-10T10:00:00.000Z";
+  assert.equal(await repo.accountChangeApplied("st1", "YzEy", at, "ab1"), false);
+  await db.transaction((client) => repo.appendEvent({ stationId: "st1", accountId: "ab1", actor: "system", kind: "account_disabled", details: { authCursor: "YzEy", authAt: at } }, client));
+  assert.equal(await repo.accountChangeApplied("st1", "YzEy", at, "ab1"), true);
+  assert.equal(await repo.accountChangeApplied("st1", "YzEy", at, "ab2"), false, "another account's");
+  assert.equal(await repo.accountChangeApplied("st1", "YzEy", "2026-11-10T11:00:00.000Z", "ab1"), false, "the same cursor at another time is another change (Auth's database was restored)");
+  assert.equal(await repo.accountChangeApplied("st1", "YzEz", at, "ab1"), false);
+  assert.equal(await repo.accountChangeApplied("st2", "YzEy", at, "ab1"), false, "another Station's");
+  await db.transaction((client) => repo.appendEvent({ stationId: "st2", accountId: "ab1", actor: "system", kind: "account_enabled", details: { authCursor: "YzEz", authAt: at } }, client));
+  assert.equal(await repo.accountChangeApplied("st2", "YzEz", at, "ab1"), true, "an enable counts too");
+  await db.transaction((client) => repo.appendEvent({ stationId: "st1", integrationId: "i-1", accountId: "ab1", actor: "system", kind: "integration_paused", details: { authCursor: "YzE0", authAt: at } }, client));
+  assert.equal(await repo.accountChangeApplied("st1", "YzE0", at, "ab1"), false, "an integration's own entry is not an account-level one (authChangeApplied finds it)");
+  await db.transaction(async (client) => assert.equal(await repo.accountChangeApplied("st1", "YzEy", at, "ab1", client), true, "inside a transaction"));
+});
+
+test("the accounts whose latest account-level event on a Station is a disable are listed, for the cursor-0 snapshot", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  await station(repo, "st1");
+  await station(repo, "st2", "ab2");
+  const append = (stationId, accountId, kind, integrationId = null) => db.transaction((client) => repo.appendEvent({ stationId, integrationId, accountId, actor: "system", kind }, client));
+  assert.deepEqual(await repo.disabledAccounts("st1"), []);
+  await append("st1", "ab2", "account_disabled");
+  await append("st1", "ab2", "account_enabled");
+  await append("st1", "ab2", "account_disabled");
+  await append("st1", "ab3", "account_disabled");
+  await append("st1", "ab3", "account_enabled");
+  await append("st1", "ab1", "account_disabled");
+  await append("st1", "ab4", "account_enabled");
+  await append("st2", "ab5", "account_disabled");
+  await append("st2", "ab1", "account_disabled");
+  await append("st2", "ab1", "account_enabled");
+  await append("st1", "ab6", "integration_paused", "i-1");
+  assert.deepEqual(await repo.disabledAccounts("st1"), ["ab1", "ab2"], "disable, enable, disable again lists; enable last does not; an enable alone, another Station's events and an integration's own do not");
+  assert.deepEqual(await repo.disabledAccounts("st2"), ["ab5"]);
+  await append("st1", "ab1", "account_enabled");
+  assert.deepEqual(await repo.disabledAccounts("st1"), ["ab2"]);
+  await db.transaction(async (client) => assert.deepEqual(await repo.disabledAccounts("st1", client), ["ab2"], "inside a transaction"));
+});
+
+// The two account-level reads are the only ones by Station and account, and the first runs inside the global event lock:
+// migration 004's partial index (station, account, id) serves them, so neither scans every event of the Station. The
+// repository's own SQL is explained, through a client that runs EXPLAIN on what it is given, with sequential scans off.
+test("accountChangeApplied and disabledAccounts are served by the Station and account index", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  const plans = [];
+  const client = await db.pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL enable_seqscan = off");
+    const explaining = { query: async (text, values) => { plans.push((await client.query("EXPLAIN " + text, values)).rows.map((row) => row["QUERY PLAN"]).join("\n")); return { rows: [], rowCount: 0 }; } };
+    await repo.accountChangeApplied("st1", "YzEy", "2026-11-10T10:00:00.000Z", "ab1", explaining);
+    await repo.disabledAccounts("st1", explaining);
+    await client.query("ROLLBACK");
+  } finally {
+    client.release();
+  }
+  assert.equal(plans.length, 2);
+  for (const plan of plans) assert.match(plan, /Index Scan using \S*station_id_account_id_id_idx on /, plan);
+  // The first read names the account too, so the index is used on its first two columns, not the Station alone.
+  assert.match(plans[0], /Index Cond: \(\(station_id = 'st1'::text\) AND \(account_id = 'ab1'::text\)\)/, plans[0]);
+});
