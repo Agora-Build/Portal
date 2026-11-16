@@ -452,6 +452,39 @@ test("with the setting on, Astation revokes at POST /api/v1/integrations/<id>/re
   assert.equal((await call(app.base, "/api/v1/integrations/" + integration.id + "/pause", { bearer: approver, method: "POST" })).status, 404);
 });
 
+// Issue 38: Astation's mirror of a manager's "revoke and interrupt" converges after someone else's revoke without it.
+test("with the setting on, Astation's revoke with true on an integration someone else already revoked answers 200 with interruptRunning true, once", async (t) => {
+  const integrations = await stack(t, { delegatedHostWork: true });
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const stationOwner = await signIn(app);
+  const { station } = await registerStation(app, integrations, stationOwner.cookie);
+  const member = await signIn(app);
+  assert.equal((await call(app.base, "/api/stations/" + station.id + "/members/" + member.sub, { cookie: stationOwner.cookie, method: "PUT" })).status, 200);
+  const integration = await createIntegration(app, member.cookie, station.id);
+  // The Station's owner revokes it first, without the interrupt (the browser's route).
+  const first = await call(app.base, "/api/integrations/" + integration.id + "/revoke", { cookie: stationOwner.cookie, method: "POST", data: { interruptRunning: false } });
+  assert.deepEqual([first.status, (await first.json()).interruptRunning], [200, false]);
+  const approver = await app.fake.issueAccessToken({ sub: member.sub, client_id: "astation", scope: "integrations:approve" });
+  const native = (data) => call(app.base, "/api/v1/integrations/" + integration.id + "/revoke", { bearer: approver, method: "POST", data });
+  const calls = integrations.manage.calls.length;
+  const mirrored = await native({ interruptRunning: true });
+  assert.equal(mirrored.status, 200);
+  const view = await mirrored.json();
+  assert.deepEqual([view.id, view.state, view.role, view.interruptRunning], [integration.id, "revoked", "owner", true]);
+  const written = () => integrations.db.pool.query("SELECT actor, reason, details FROM integration_events WHERE integration_id = $1 AND kind = 'integration_interrupt_requested'", [integration.id]).then((result) => result.rows);
+  const [event, ...more] = await written();
+  assert.deepEqual([more.length, event.actor, event.reason, event.details], [0, member.sub, "owner", { interruptRunning: true, clientId: "astation" }]);
+  assert.equal(integrations.manage.calls.length, calls, "Auth is not asked");
+  // The retry converges to the same, with nothing more written; a false after it changes nothing.
+  for (const data of [{ interruptRunning: true }, { interruptRunning: false }]) {
+    const retried = await native(data);
+    assert.deepEqual([retried.status, (await retried.json()).interruptRunning], [200, true], JSON.stringify(data));
+  }
+  assert.equal((await written()).length, 1);
+  assert.equal((await (await call(app.base, "/api/integrations", { cookie: member.cookie })).json()).integrations.find((entry) => entry.id === integration.id).interruptRunning, true);
+});
+
 // Auth's setting is turned on first (docs/platform.md); if the order is broken, only a ticked revoke is refused, by Auth.
 test("with the Portal's setting on and Auth's off, the browser's and Astation's unticked revokes work and a ticked one is Auth's 400", async (t) => {
   const integrations = await stack(t, { delegatedHostWork: true, authDelegated: false });
