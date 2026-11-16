@@ -764,7 +764,11 @@ export function createIntegrationService({
   // (D29): that is checked first, so a malformed call is refused the same for everyone. The row and the event keep the
   // choice either way, but Auth is sent it only when it is true: an unticked revoke is then exactly today's call, and
   // survives an Auth whose own setting is still off (which refuses the field), while Auth records a missing one as
-  // false. `details` is added to the event's; `mineOnly` refuses the Station's owner (404), as approval does.
+  // false. `details` is added to the event's; `mineOnly` refuses the Station's owner (404), as approval does. A revoke
+  // of an integration that is already stopped changes nothing, except that a true (the setting on) adds the interrupt
+  // as Interrupt does (addInterrupt: Auth is not asked), so a mirror of "revoke and interrupt" converges after another
+  // revocation came first: before this call reached Auth, or while it was there (the commit finds the row stopped).
+  // A false never undoes a true.
   async function stop(accountId, id, event, { interruptRunning, details, mineOnly = false } = {}) {
     const choice = delegatedHostWork && event === "revoke";
     if (choice && typeof interruptRunning !== "boolean") throw interruptRunningRequired();
@@ -772,7 +776,7 @@ export function createIntegrationService({
     if (mineOnly && role !== "owner") throw notFound();
     // Shown as paused (its owner's account disabled): a pause is refused as for any paused integration, before Auth.
     step(shownPaused(row) ? { ...row, state: "paused", resumeState: row.state } : row, event, now());
-    if (event === "revoke" && STOPPED.includes(row.state)) return viewOf(row, role);
+    if (event === "revoke" && STOPPED.includes(row.state)) return choice && interruptRunning ? addInterrupt(accountId, row, role, details) : viewOf(row, role);
     const answer = await byActor(accountId, () => manage.changeIntegration(id, { status: event === "pause" ? "paused" : "revoked", ...(choice && interruptRunning ? { interruptRunning: true } : {}) }, accountId));
     const kind = event === "pause" ? "integration_paused" : "integration_revoked";
     const pausedBy = event !== "pause" ? null : PAUSED_BY.includes(answer?.pausedBy) ? answer.pausedBy : role === "owner" ? "owner" : "station";
@@ -782,6 +786,30 @@ export function createIntegrationService({
       if (event === "revoke") Object.assign(fields, { revokedAt: now() }, choice ? { interruptRunning } : {});
       return { fields, event: { actor: accountId, kind, reason: role, details: { ...seen(), ...(choice ? { interruptRunning } : {}), ...details } } };
     });
+    // Another revocation committed first, while this call was at Auth: the choice is still added.
+    if (choice && interruptRunning && STOPPED.includes(updated.state) && !updated.interruptRunning) return addInterrupt(accountId, updated, role, details);
+    return viewOf(updated, role);
+  }
+
+  // Interrupt running tasks (D29), for Interrupt itself and for a revoke that asks for it of an integration that is
+  // already stopped (stop): within 24 hours of the revocation, whoever made it, the interrupt that wasn't asked for at
+  // first is added. The Portal's own record (Auth is not asked), pushed to the Station; once made it can't be undone,
+  // and asking again, even after the 24 hours or the Station's removal, answers the same and changes nothing. A request
+  // that would change something is refused for an integration whose Station has been removed: it reads its feed no more,
+  // so the record would reach no host. `row` is the integration as the caller saw it and `role` theirs; `details` is
+  // added to the event's (the native route's clientId).
+  async function addInterrupt(accountId, row, role, details = {}) {
+    if (row.interruptRunning) return viewOf(row, role);
+    if ((await repository.station(row.stationId))?.status === "removed") throw failure(409, "This integration's Station has been removed, so its running tasks can't be interrupted here.", "station_removed");
+    // True when there is something to record. A row that was never dated (revoked before revokedAt) is too late.
+    const check = (current) => {
+      if (!STOPPED.includes(current.state)) throw failure(409, "Only a revoked integration's running tasks can be interrupted.", "invalid_state");
+      if (current.interruptRunning) return false;
+      if (!current.revokedAt || now() - Date.parse(current.revokedAt) > DAY) throw failure(409, "Running tasks can be interrupted only within 24 hours of the revocation.", "too_late");
+      return true;
+    };
+    if (!check(row)) return viewOf(row, role);
+    const updated = await commit(row.id, (current) => check(current) ? { fields: { interruptRunning: true }, event: { actor: accountId, kind: "integration_interrupt_requested", reason: role, details: { interruptRunning: true, ...details } } } : null);
     return viewOf(updated, role);
   }
 
@@ -1043,25 +1071,11 @@ export function createIntegrationService({
     },
 
     // Interrupt running tasks (D29): within 24 hours of the revocation, the owner or the custom Station's owner adds the
-    // interrupt they didn't ask for at first. The Portal's own record (Auth is not asked), pushed to the Station; once
-    // made it can't be undone, and asking again, even after the 24 hours or the Station's removal, answers the same and
-    // changes nothing. A request that would change something is refused for an integration whose Station has been
-    // removed: it reads its feed no more, so the record would reach no host. The setting on only.
+    // interrupt they didn't ask for at first (addInterrupt, which a revoke that asks for it uses too). The setting on only.
     async interrupt(accountId, id) {
       if (!delegatedHostWork) throw notFound();
       const { row, role } = await visible(accountId, id);
-      if (row.interruptRunning) return viewOf(row, role);
-      if ((await repository.station(row.stationId))?.status === "removed") throw failure(409, "This integration's Station has been removed, so its running tasks can't be interrupted here.", "station_removed");
-      // True when there is something to record. A row that was never dated (revoked before revokedAt) is too late.
-      const check = (current) => {
-        if (!STOPPED.includes(current.state)) throw failure(409, "Only a revoked integration's running tasks can be interrupted.", "invalid_state");
-        if (current.interruptRunning) return false;
-        if (!current.revokedAt || now() - Date.parse(current.revokedAt) > DAY) throw failure(409, "Running tasks can be interrupted only within 24 hours of the revocation.", "too_late");
-        return true;
-      };
-      if (!check(row)) return viewOf(row, role);
-      const updated = await commit(id, (current) => check(current) ? { fields: { interruptRunning: true }, event: { actor: accountId, kind: "integration_interrupt_requested", reason: role, details: { interruptRunning: true } } } : null);
-      return viewOf(updated, role);
+      return addInterrupt(accountId, row, role);
     },
 
     // The owner only, never while Agora.Build has the owner's account disabled, and never out of an Agora.Build admin's

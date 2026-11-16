@@ -812,7 +812,7 @@ test("with the setting on, a revoke without a boolean interruptRunning is 400, b
   assert.equal(s.record(id).interruptRunning, undefined);
 });
 
-test("with the setting on, a repeated revoke changes nothing: Auth is not asked and the first choice stays", async (t) => {
+test("with the setting on, a repeated revoke with false changes nothing, and with true adds the interrupt once, asking Auth nothing", async (t) => {
   const s = await setup(t, { delegatedHostWork: true });
   if (!s) return;
   const { id } = await s.create();
@@ -820,14 +820,27 @@ test("with the setting on, a repeated revoke changes nothing: Auth is not asked 
   await s.service.revoke(OWNER, id, { interruptRunning: false });
   const first = await s.repository.integration(id);
   const calls = s.manage.calls.length;
+  const sent = s.manage.sent.length;
   const events = (await s.events()).length;
   const notified = s.notified.length;
   s.clock.now += DAY / 2;
-  const again = await s.service.revoke(OWNER, id, { interruptRunning: true });
+  const again = await s.service.revoke(OWNER, id, { interruptRunning: false });
   assert.deepEqual([again.state, again.interruptRunning, again.revokedAt], ["revoking", false, first.revokedAt]);
   assert.deepEqual(await s.repository.integration(id), first, "the row is as it was");
-  assert.equal(s.record(id).interruptRunning, false);
   assert.deepEqual([s.manage.calls.length, (await s.events()).length, s.notified.length], [calls, events, notified]);
+  // A true adds the interrupt, as Interrupt does: the revocation's own date stays, and Auth is not asked.
+  const interrupted = await s.service.revoke(OWNER, id, { interruptRunning: true });
+  assert.deepEqual([interrupted.state, interrupted.interruptRunning, interrupted.revokedAt], ["revoking", true, first.revokedAt]);
+  const row = await s.repository.integration(id);
+  assert.deepEqual([row.state, row.interruptRunning, row.revokedAt], ["revoking", true, first.revokedAt]);
+  assert.equal(s.record(id).interruptRunning, false, "Auth keeps the revocation's own choice");
+  assert.deepEqual([s.manage.calls.length, s.manage.sent.length, (await s.events()).length, s.notified.length], [calls, sent, events + 1, notified + 1]);
+  const [event] = await s.events("integration_interrupt_requested");
+  assert.deepEqual([event.actor, event.reason, event.state, event.details], [OWNER, "owner", "revoking", { interruptRunning: true }]);
+  // Asked again, or with false, nothing more happens.
+  for (const interruptRunning of [true, false]) assert.equal((await s.service.revoke(OWNER, id, { interruptRunning })).interruptRunning, true);
+  assert.deepEqual(await s.repository.integration(id), row);
+  assert.deepEqual([s.manage.calls.length, (await s.events()).length, s.notified.length], [calls, events + 1, notified + 1]);
 });
 
 // The rollout order is Auth's setting first (docs/platform.md); if it is broken, Auth is the one that refuses a ticked
@@ -929,6 +942,210 @@ test("revokeNative: the owner's own integrations only, recorded with the app as 
   assert.deepEqual([repeated.interruptRunning, (await s.events()).length], [true, events + 1]);
 });
 
+// Issue 38: a revoke that asks to interrupt, of an integration someone else revoked without it, adds the interrupt as
+// Interrupt does (the same rules), so Astation's mirror of "revoke and interrupt" converges.
+// An approved integration of MEMBER's on OWNER's custom Station: OWNER, the Station's owner, may revoke it too.
+async function memberApproved(s) {
+  await s.service.share(OWNER, s.station.id, MEMBER);
+  const { id } = await s.create(MEMBER);
+  await s.service.approve(MEMBER, id, { r9Svc: R9 });
+  return id;
+}
+
+const NATIVE = { interruptRunning: true, clientId: "astation" };
+
+test("issue 38: Astation's revoke and interrupt converges after another actor's revoke without it, and a retry changes nothing", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const id = await memberApproved(s);
+  assert.equal((await s.service.revoke(OWNER, id, { interruptRunning: false })).interruptRunning, false, "the Station's owner revoked it first");
+  const first = await s.repository.integration(id);
+  s.clock.now += 3600000;
+  const calls = s.manage.calls.length;
+  const sent = s.manage.sent.length;
+  const events = (await s.events()).length;
+  const notified = s.notified.length;
+  // No new authority: the native route stays the owner's alone, so neither the Station's owner nor a stranger adds it.
+  for (const accountId of [OWNER, STRANGER]) await assert.rejects(s.service.revokeNative(accountId, id, NATIVE), refused(404, "not_found"), accountId);
+  assert.equal((await s.repository.integration(id)).interruptRunning, false);
+  const view = await s.service.revokeNative(MEMBER, id, NATIVE);
+  assert.deepEqual([view.role, view.state, view.interruptRunning, view.revokedAt], ["owner", "revoking", true, first.revokedAt], "the first revocation's date stays");
+  const row = await s.repository.integration(id);
+  assert.deepEqual([row.state, row.interruptRunning, row.revokedAt], ["revoking", true, first.revokedAt]);
+  const written = await s.events("integration_interrupt_requested");
+  assert.equal(written.length, 1);
+  assert.deepEqual([written[0].actor, written[0].account_id, written[0].reason, written[0].state, written[0].details], [MEMBER, MEMBER, "owner", "revoking", { interruptRunning: true, clientId: "astation" }]);
+  assert.deepEqual([(await s.events()).length, s.notified.length], [events + 1, notified + 1], "one event, one push");
+  assert.equal(s.notified.at(-1), s.station.id);
+  assert.deepEqual([s.manage.calls.length, s.manage.sent.length], [calls, sent], "Auth is not called again");
+  // A retry after a lost reply or a restart, even much later: the same answer and nothing more.
+  s.clock.now += 3 * DAY;
+  const retried = await s.service.revokeNative(MEMBER, id, NATIVE);
+  assert.deepEqual([retried.interruptRunning, retried.revokedAt], [true, first.revokedAt]);
+  assert.deepEqual(await s.repository.integration(id), row, "the row is as it was");
+  assert.deepEqual([(await s.events()).length, s.notified.length, s.manage.calls.length, s.manage.sent.length], [events + 1, notified + 1, calls, sent]);
+});
+
+test("issue 38: the race window: another actor's revoke commits while this one's call is at Auth, and the choice is still recorded once", async (t) => {
+  for (const route of ["native", "browser"]) {
+    const s = await setup(t, { delegatedHostWork: true });
+    if (!s) return;
+    const id = await memberApproved(s);
+    // While the owner's call is at Auth, the Station's owner's revoke, without the interrupt, runs and commits first.
+    const change = s.manage.changeIntegration;
+    let racing = false;
+    s.manage.changeIntegration = async (...args) => {
+      if (!racing) {
+        racing = true;
+        await s.service.revoke(OWNER, id, { interruptRunning: false });
+      }
+      return change.apply(s.manage, args);
+    };
+    const notified = s.notified.length;
+    const view = await (route === "native" ? s.service.revokeNative(MEMBER, id, NATIVE) : s.service.revoke(MEMBER, id, { interruptRunning: true }));
+    assert.equal(racing, true, route + ": the other revoke ran");
+    assert.deepEqual([view.state, view.interruptRunning], ["revoking", true], route);
+    const row = await s.repository.integration(id);
+    assert.deepEqual([row.state, row.interruptRunning], ["revoking", true], route);
+    const revoked = await s.events("integration_revoked");
+    assert.deepEqual(revoked.map((event) => [event.actor, event.reason, event.details.interruptRunning]), [[OWNER, "station_owner", false]], route + ": the other's revocation is the only one");
+    const written = await s.events("integration_interrupt_requested");
+    assert.deepEqual(written.map((event) => [event.actor, event.reason, event.state, event.details]), [[MEMBER, "owner", "revoking", route === "native" ? { interruptRunning: true, clientId: "astation" } : { interruptRunning: true }]], route);
+    assert.equal(s.notified.length, notified + 2, route + ": the Station was told of the revocation and of the interrupt");
+  }
+});
+
+test("issue 38: a later false never undoes a recorded true, by either route", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const id = await memberApproved(s);
+  await s.service.revoke(OWNER, id, { interruptRunning: false });
+  await s.service.revokeNative(MEMBER, id, NATIVE);
+  const row = await s.repository.integration(id);
+  const events = (await s.events()).length;
+  const notified = s.notified.length;
+  const calls = s.manage.calls.length;
+  s.clock.now += DAY / 2;
+  assert.equal((await s.service.revoke(MEMBER, id, { interruptRunning: false })).interruptRunning, true);
+  assert.equal((await s.service.revoke(OWNER, id, { interruptRunning: false })).interruptRunning, true, "the Station's owner's too");
+  assert.equal((await s.service.revokeNative(MEMBER, id, { interruptRunning: false, clientId: "astation" })).interruptRunning, true);
+  assert.deepEqual(await s.repository.integration(id), row);
+  assert.deepEqual([(await s.events()).length, s.notified.length, s.manage.calls.length], [events, notified, calls]);
+  // Nor does one that revokes with the interrupt in the first place.
+  const { id: own } = await s.create();
+  await s.repository.updateIntegration(own, { state: "ready" });
+  await s.service.revoke(OWNER, own, { interruptRunning: true });
+  assert.equal((await s.service.revoke(OWNER, own, { interruptRunning: false })).interruptRunning, true);
+  assert.equal((await s.service.revokeNative(OWNER, own, { interruptRunning: false, clientId: "astation" })).interruptRunning, true);
+  assert.equal((await s.repository.integration(own)).interruptRunning, true);
+});
+
+test("issue 38: the 24 hours count from the first revocation: exactly 24 hours is allowed, 24 hours and 1 ms is 409 too_late, and an interrupted one answers 200 after", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const onTime = await memberApproved(s);
+  const late = (await s.create(MEMBER)).id;
+  const undated = (await s.create(MEMBER)).id;
+  const waiting = (await s.create(MEMBER)).id;
+  for (const id of [onTime, late, waiting]) await s.service.revoke(OWNER, id, { interruptRunning: false });
+  await s.repository.updateIntegration(undated, { state: "revoked" });
+  assert.equal((await s.repository.integration(undated)).revokedAt, null);
+  const { revokedAt } = await s.repository.integration(onTime);
+  assert.equal((await s.repository.integration(waiting)).state, "revoked", "revoked before approval");
+  s.clock.now = Date.parse(revokedAt) + DAY;
+  const view = await s.service.revokeNative(MEMBER, onTime, NATIVE);
+  assert.deepEqual([view.interruptRunning, view.revokedAt], [true, revokedAt]);
+  assert.equal((await s.service.revoke(MEMBER, waiting, { interruptRunning: true })).interruptRunning, true, "by the browser route, on a revoked one, too");
+  assert.equal((await s.events("integration_interrupt_requested")).length, 2);
+  // 24 hours and 1 ms: final, nothing written, pushed or asked of Auth.
+  s.clock.now += 1;
+  const events = (await s.events()).length;
+  const notified = s.notified.length;
+  const calls = s.manage.calls.length;
+  const message = (error) => refused(409, "too_late")(error) && error.message === INTERRUPT_LATE;
+  for (const id of [late, undated]) {
+    await assert.rejects(s.service.revokeNative(MEMBER, id, NATIVE), message, id);
+    await assert.rejects(s.service.revoke(MEMBER, id, { interruptRunning: true }), message, id);
+    await assert.rejects(s.service.revoke(OWNER, id, { interruptRunning: true }), message, "the Station's owner too: " + id);
+  }
+  assert.deepEqual([(await s.repository.integration(late)).interruptRunning, (await s.repository.integration(undated)).interruptRunning], [false, false]);
+  assert.deepEqual([(await s.events()).length, s.notified.length, s.manage.calls.length], [events, notified, calls]);
+  // A false is still a 200 that changes nothing, and one already interrupted answers 200 whatever the time.
+  assert.equal((await s.service.revokeNative(MEMBER, late, { interruptRunning: false, clientId: "astation" })).interruptRunning, false);
+  s.clock.now += 5 * DAY;
+  for (const id of [onTime, waiting]) {
+    assert.equal((await s.service.revokeNative(MEMBER, id, NATIVE)).interruptRunning, true, id);
+    assert.equal((await s.service.revoke(MEMBER, id, { interruptRunning: true })).interruptRunning, true, id);
+  }
+  assert.deepEqual([(await s.events()).length, s.notified.length, s.manage.calls.length], [events, notified, calls]);
+});
+
+test("issue 38: a removed Station's stopped integration answers 409 station_removed to a true that would change something, and 200 to one that would not", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const plain = await memberApproved(s);
+  const done = (await s.create(MEMBER)).id;
+  await s.service.revoke(OWNER, plain, { interruptRunning: false });
+  await s.service.revoke(MEMBER, done, { interruptRunning: true });
+  await s.service.removeStation(OWNER, s.station.id);
+  const events = (await s.events()).length;
+  const notified = s.notified.length;
+  const calls = s.manage.calls.length;
+  const message = (error) => refused(409, "station_removed")(error) && error.message === INTERRUPT_REMOVED;
+  await assert.rejects(s.service.revokeNative(MEMBER, plain, NATIVE), message);
+  await assert.rejects(s.service.revoke(MEMBER, plain, { interruptRunning: true }), message);
+  await assert.rejects(s.service.revoke(OWNER, plain, { interruptRunning: true }), message, "the Station's owner too");
+  assert.equal((await s.repository.integration(plain)).interruptRunning, false);
+  assert.equal((await s.service.revokeNative(MEMBER, plain, { interruptRunning: false, clientId: "astation" })).interruptRunning, false, "a false is a 200");
+  assert.equal((await s.service.revokeNative(MEMBER, done, NATIVE)).interruptRunning, true, "one already interrupted is a 200");
+  assert.deepEqual([(await s.events()).length, s.notified.length, s.manage.calls.length], [events, notified, calls], "nothing was written, pushed or asked of Auth");
+});
+
+test("issue 38: concurrent revokes that ask to interrupt an already stopped integration add it once: one event, one push, all answer true", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const { id } = await s.create();
+  await s.repository.updateIntegration(id, { state: "ready" });
+  await s.service.revoke(OWNER, id, { interruptRunning: false });
+  s.clock.now += 3600000;
+  const calls = s.manage.calls.length;
+  const events = (await s.events()).length;
+  const notified = s.notified.length;
+  // All three read the row before any of them commits: only the re-check under the lock keeps it to one record.
+  const results = await Promise.allSettled([
+    s.service.revokeNative(OWNER, id, NATIVE),
+    s.service.revokeNative(OWNER, id, NATIVE),
+    s.service.revoke(OWNER, id, { interruptRunning: true })
+  ]);
+  assert.deepEqual(results.map((result) => result.status), ["fulfilled", "fulfilled", "fulfilled"], JSON.stringify(results.map((result) => result.reason?.message)));
+  assert.deepEqual(results.map((result) => result.value.interruptRunning), [true, true, true]);
+  assert.equal((await s.repository.integration(id)).interruptRunning, true);
+  assert.equal((await s.events("integration_interrupt_requested")).length, 1, "one event");
+  assert.deepEqual([(await s.events()).length, s.notified.length, s.manage.calls.length], [events + 1, notified + 1, calls], "one event, one push, no Auth call");
+});
+
+test("issue 38: the browser's revoke converges the same way, as the owner's and as the Station owner's, with no clientId", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const byOwner = await memberApproved(s);
+  const byStationOwner = (await s.create(MEMBER)).id;
+  await s.service.approve(MEMBER, byStationOwner, { r9Svc: R9 });
+  // Each is revoked first by the other account, without the interrupt.
+  await s.service.revoke(OWNER, byOwner, { interruptRunning: false });
+  await s.service.revoke(MEMBER, byStationOwner, { interruptRunning: false });
+  const calls = s.manage.calls.length;
+  const notified = s.notified.length;
+  s.clock.now += 1000;
+  assert.deepEqual([(await s.service.revoke(MEMBER, byOwner, { interruptRunning: true })).role, (await s.service.revoke(OWNER, byStationOwner, { interruptRunning: true })).role], ["owner", "station_owner"]);
+  assert.deepEqual([(await s.repository.integration(byOwner)).interruptRunning, (await s.repository.integration(byStationOwner)).interruptRunning], [true, true]);
+  const written = await s.events("integration_interrupt_requested");
+  assert.deepEqual(written.map((event) => [event.integration_id, event.actor, event.reason, event.details]), [[byOwner, MEMBER, "owner", { interruptRunning: true }], [byStationOwner, OWNER, "station_owner", { interruptRunning: true }]]);
+  assert.deepEqual([s.notified.length, s.manage.calls.length], [notified + 2, calls]);
+  // A stranger is told nothing, as for any revoke.
+  await assert.rejects(s.service.revoke(STRANGER, byOwner, { interruptRunning: true }), refused(404, "not_found"));
+  await assert.rejects(s.service.revoke(STRANGER, "i-unknown", { interruptRunning: true }), refused(404, "not_found"));
+});
+
 test("with the setting off, revoke takes no options and changes nothing visible; revokeNative finds nothing", async (t) => {
   const s = await setup(t);
   if (!s) return;
@@ -955,6 +1172,10 @@ test("with the setting off, revoke takes no options and changes nothing visible;
   await s.service.unshare(OWNER, s.station.id, MEMBER);
   assert.deepEqual([(await s.events("integration_revoked")).at(-1).details, (await s.repository.integration(theirs.id)).revokedAt], [{}, iso(s.clock.now)]);
   await assert.rejects(s.service.revokeNative(OWNER, id, { interruptRunning: true, clientId: "astation" }), refused(404, "not_found"));
+  // A choice given again on a stopped integration is ignored too: nothing is written.
+  const events = (await s.events()).length;
+  assert.equal((await s.service.revoke(OWNER, other.id, { interruptRunning: true })).state, "revoking");
+  assert.deepEqual([(await s.repository.integration(other.id)).interruptRunning, (await s.events()).length, (await s.events("integration_interrupt_requested")).length], [false, events, 0]);
 });
 
 test("revokedAt is set whenever a revocation moves a live integration to revoking or revoked, from Auth's feed or its listing too, and never again", async (t) => {
