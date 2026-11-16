@@ -934,10 +934,9 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
   may not see the integration gets 404. Asking again once it is interrupted, even after the 24 hours, answers the same
   and changes nothing. Auth is not asked: the Portal records it (`integration_interrupt_requested`, with `owner` or
   `station_owner` as the reason, and, when Astation's native revoke added it, the app's `clientId` in its details) and
-  pushes the Station. It shares the limit of 30 changes a minute given below. An
-  owner's interrupt is recorded only in the Portal, so an admin may interrupt again on the admin site, and the Station
-  may get a second `integration_interrupt_requested`. That is harmless, because the choice only goes from `false` to
-  `true`.
+  pushes the Station. It shares the limit of 30 changes a minute given below. An owner's interrupt is recorded only in
+  the Portal, so an admin may interrupt again on the admin site, and the Station may get a second
+  `integration_interrupt_requested`. That is harmless, because the choice only goes from `false` to `true`.
 - An integration whose Station has been removed can't be interrupted: 409 `station_removed` ("This integration's Station
   has been removed, so its running tasks can't be interrupted here."). A removed Station never reads its feed again, so
   the request would reach no host. One that was already interrupted still answers 200 and changes nothing, so a retried
@@ -949,23 +948,27 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
 - The native revoke is for the integration's owner only: any other account, the custom Station's owner included, gets 404.
   Errors, answer and limit are the browser's; the event records the app's client ID. A token on the unversioned path gets
   the usual `/api/v1` 404, and a token without `integrations:approve` 403 `insufficient_scope`.
-- **A revoke of an integration that is already revoking or revoked**, from either route, is a 200 and revokes nothing
-  again (Auth is not asked), but its choice is not lost, so Astation's mirror of a manager's "revoke and interrupt"
-  converges even when another actor's revoke without the interrupt reached the Portal first:
+- **A revoke of an integration that is already revoking or revoked**, from either route, answers as below and revokes
+  nothing again, but its choice is not lost, so Astation's mirror of a manager's "revoke and interrupt" converges even
+  when another actor's revoke without the interrupt reached the Portal first. A 409 `too_late` or `station_removed` from
+  such a revoke still means the integration is revoked:
   - with `interruptRunning: true`, it adds the interrupt as `interrupt` does, once, with the same rules: the answer's
     `interruptRunning` is `true`, `integration_interrupt_requested` is recorded (for the native route with the app's
-    `clientId` in its details) and the Station is pushed. It is refused as `interrupt` is, with nothing changed: 409
-    `too_late` after the 24 hours, 409 `station_removed` for a removed Station's integration. This also holds when the
-    other revocation commits while this call is at Auth, after Auth has accepted it;
+    `clientId` in its details), the Station is pushed, and Auth is not asked for it. It is refused as `interrupt` is,
+    and the Portal's record stays as it was: 409 `too_late` after the 24 hours, 409 `station_removed` for a removed
+    Station's integration. This also holds when the other revocation commits while this call is at Auth, after Auth
+    accepted it; there Auth may already hold this call's own `interrupt_running: true` when the Portal answers 409
+    `station_removed`, which is harmless, because a removed Station reads no feed;
   - with `interruptRunning: false`, it changes nothing and never undoes a `true`;
   - the answer's `interruptRunning` says what is recorded, so a retry after a lost reply or a restart answers the same
-    and writes nothing more. No new authority: the native route stays the integration owner's alone, and the browser's
-    stays the owner's and the custom Station's owner's, the accounts that may call `interrupt`.
-  - **The 24 hours** count from the first revocation (`revokedAt`), whoever made it, as `interrupt`'s do, and exactly 24
-    hours is allowed. For a mirror that arrives late, 409 `too_late` is final: the mirror can treat it as settled. By then
-    every task of the integration has passed its deadline (Atem's design, I.4.4), and the native signed stop carries its
-    own choice to the hosts. 409 `station_removed` is final too: a removed Station reads its feed no
-    more, so the record could reach no host.
+    and writes nothing more;
+  - no new authority: the native route stays the integration owner's alone, and the browser's stays the owner's and the
+    custom Station's owner's, the accounts that may call `interrupt`;
+  - **the 24 hours** count from the first revocation (`revokedAt`), whoever made it, as `interrupt`'s do, and exactly 24
+    hours is allowed. For a mirror that arrives late, 409 `too_late` is final: the mirror can treat it as settled. By
+    then every task of the integration has passed its deadline (Atem's design, I.4.4), and the native signed stop
+    carries its own choice to the hosts. 409 `station_removed` is final too: a removed Station reads its feed no more,
+    so the record could reach no host.
 - A revoking or revoked integration's view (the lists, and the answers above) also has `revokedAt` (its time, or null) and
   `interruptRunning`, and `stationRemoved: true` when its Station has been removed (the account page then offers no
   Interrupt running tasks).

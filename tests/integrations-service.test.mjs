@@ -1101,6 +1101,29 @@ test("issue 38: a removed Station's stopped integration answers 409 station_remo
   assert.deepEqual([(await s.events()).length, s.notified.length, s.manage.calls.length], [events, notified, calls], "nothing was written, pushed or asked of Auth");
 });
 
+test("issue 38: concurrent revokes that ask to interrupt an already stopped integration add it once: one event, one push, all answer true", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const { id } = await s.create();
+  await s.repository.updateIntegration(id, { state: "ready" });
+  await s.service.revoke(OWNER, id, { interruptRunning: false });
+  s.clock.now += 3600000;
+  const calls = s.manage.calls.length;
+  const events = (await s.events()).length;
+  const notified = s.notified.length;
+  // All three read the row before any of them commits: only the re-check under the lock keeps it to one record.
+  const results = await Promise.allSettled([
+    s.service.revokeNative(OWNER, id, NATIVE),
+    s.service.revokeNative(OWNER, id, NATIVE),
+    s.service.revoke(OWNER, id, { interruptRunning: true })
+  ]);
+  assert.deepEqual(results.map((result) => result.status), ["fulfilled", "fulfilled", "fulfilled"], JSON.stringify(results.map((result) => result.reason?.message)));
+  assert.deepEqual(results.map((result) => result.value.interruptRunning), [true, true, true]);
+  assert.equal((await s.repository.integration(id)).interruptRunning, true);
+  assert.equal((await s.events("integration_interrupt_requested")).length, 1, "one event");
+  assert.deepEqual([(await s.events()).length, s.notified.length, s.manage.calls.length], [events + 1, notified + 1, calls], "one event, one push, no Auth call");
+});
+
 test("issue 38: the browser's revoke converges the same way, as the owner's and as the Station owner's, with no clientId", async (t) => {
   const s = await setup(t, { delegatedHostWork: true });
   if (!s) return;
