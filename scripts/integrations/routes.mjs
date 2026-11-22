@@ -42,7 +42,15 @@ export function createIntegrationStack({ db, manage, idp, log, stationFetch = cr
   // seconds, and when Auth answers 409 admin_paused to a resume (it changed something the Portal has not read yet).
   let feed = null;
   const service = createIntegrationService({ repository, db, manage, stationFetch, pushFetch, exchange, log, authChanged: () => feed?.request(), delegatedHostWork });
-  feed = createAuthChanges({ repository, manage, apply: (change) => service.applyAuthChange(change), log, settings: authChanges });
+  // The reader tells the service when it starts the feed over and when it has caught up, and hands it the read pass
+  // (its epoch) with each change and at the end: account availability is rebuilt from the feed's first entry, and a read
+  // that began before another replica started over is fenced (D29, the setting on; with it off the hooks do nothing). It
+  // also asks the service what to do with a cursor an older Portal image moved: start over (on) or wait (off).
+  feed = createAuthChanges({
+    repository, manage, apply: (change, pass) => service.applyAuthChange(change, pass), log, settings: authChanges,
+    startingOver: () => service.accountsStartingOver(), caughtUp: (pass) => service.accountsCaughtUp(pass),
+    foreignCursor: () => service.accountsForeignCursor()
+  });
   let pending = null;
   let prepared = false;
   const partitions = setInterval(() => {
@@ -135,7 +143,8 @@ export async function handleIntegrations({ path, method, url, read, service, cal
   }
   if (path === "/api/stations/changes" && method === "GET") {
     const clientId = reporter(); limit("changes:" + clientId, 120, 60000);
-    return ok(await service.changes(clientId, url.searchParams.get("cursor") ?? "0"));
+    // ?checkpoint=1 (D29): the Station's state at one exact cursor. Ignored with the setting off.
+    return ok(await service.changes(clientId, url.searchParams.get("cursor") ?? "0", { checkpoint: delegatedHostWork && url.searchParams.get("checkpoint") === "1" }));
   }
   if (path === "/api/integrations" && method === "GET") {
     return ok(await service.integrations(listing("integrations", caller ? scoped("integrations:read") : await portalUser())));
@@ -151,6 +160,12 @@ export async function handleIntegrations({ path, method, url, read, service, cal
   if (delegatedHostWork && integration?.[2] === "revoke" && method === "POST" && caller) {
     const accountId = changing(scoped("integrations:approve"));
     return ok(await service.revokeNative(accountId, integration[1], { interruptRunning: (await read()).interruptRunning, clientId: caller.clientId }));
+  }
+
+  // Astation's Station directory (D29, issue 40): the Stations the account can use and those it lost in the last 30 days, in
+  // pages. The browser's list, below, is the same path without a token.
+  if (delegatedHostWork && path === "/api/stations" && method === "GET" && caller) {
+    return ok(await service.directory(listing("stations", scoped("integrations:read")), { cursor: url.searchParams.get("cursor"), limit: url.searchParams.get("limit") }));
   }
 
   // Everything below is for the browser session only.

@@ -32,8 +32,29 @@ const PENDING_HOSTS_MAX = 100;
 const ID_GRAMMAR = /^[A-Za-z0-9._:-]{1,128}$/;
 const RECORD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PRINTABLE_REASON = /^[^\p{Cc}]{1,200}$/u;
+// The built-in Station's two binding reports (D29, the setting on). Each has its own fields, and neither names an integration.
+const BINDING_REPORT_FIELDS = {
+  binding_changed: ["state", "reportId", "account", "accountId", "genesisHash", "bindingId", "version", "bindingState"],
+  binding_attempt: ["state", "reportId", "account", "accountId", "genesisHash", "reason", "attemptedAt"]
+};
+const GENESIS_HASH = /^[0-9a-f]{64}$/;
+const BINDING_STATES = ["bound", "unbound", "released"];
+const ATTEMPT_REASONS = ["bound_elsewhere", "owner_disabled"];
+// A refused binding attempt is shown on the page of the account it protects for 30 days, the 50 newest at most. A report
+// may be dated a little ahead of the Portal's clock (the Station's own runs ahead), an hour at most: a far-future time
+// would otherwise keep its notice first on the page for good.
+const ATTEMPTS_SHOWN_FOR = 30 * DAY;
+const NOTICES_SHOWN = 50;
+const ATTEMPT_CLOCK_SKEW = 3600000;
 const CURSOR = /^\d{1,15}$/;
 const FEED_LIMIT = 500;
+// The Station directory (D29, GET /api/v1/stations): pages of at most 100 Stations, and a Station lost within 30 days (the
+// Station records' own retention) is still listed, with the loss stated.
+const DIRECTORY_PAGE = 100;
+const DIRECTORY_LOST_FOR = 30 * DAY;
+const LIMIT_DIGITS = /^[0-9]{1,3}$/;
+const CURSOR_CHARACTERS = /^[A-Za-z0-9_-]{1,512}$/;
+const CURSOR_TIME = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
 const CHANGES_PATH = "/agora-build/v1/changes";
 
 const failure = (status, message, code, extra = {}) => new AppError(status, message, { code, ...extra });
@@ -47,9 +68,22 @@ const REPORT_FORM = "Send a report as { integrationId, state, reason }.";
 const DELEGATED_REPORT_FORMS = REPORT_FORM.slice(0, -1) + ', { integrationId, state: "revocation_applied", reportId, host, recordId } or { integrationId, state: "revoked", reportId, outcome, pendingHosts }.';
 const IDENTIFIER = "1 to 128 characters of letters, digits, '.', '_', ':' or '-'.";
 const reportIdInvalid = () => failure(400, "Send the reportId as " + IDENTIFIER, "report_id");
+const BINDING_REPORT_FORMS = 'Send a binding report as { state: "binding_changed", reportId, account, accountId, genesisHash, bindingId, version, bindingState } or { state: "binding_attempt", reportId, account, accountId, genesisHash, reason, attemptedAt }.';
+const bindingAccountInvalid = () => failure(400, "Name the account as ab and 26 letters or digits.", "account");
+const bindingAccountIdInvalid = () => failure(400, "Send the accountId as " + IDENTIFIER, "account_id");
+const genesisHashInvalid = () => failure(400, "Send the genesisHash as 64 lowercase hex characters.", "genesis_hash");
+const bindingIdInvalid = () => failure(400, "Send the bindingId as " + IDENTIFIER, "binding_id");
+const bindingVersionInvalid = () => failure(400, "Send the version as a positive whole number.", "version");
+const bindingStateInvalid = () => failure(400, "Send the bindingState as bound, unbound or released.", "binding_state");
+const attemptReasonInvalid = () => failure(400, "Send the reason as bound_elsewhere or owner_disabled.", "reason");
+const attemptedAtInvalid = () => failure(400, "Send attemptedAt as an ISO time.", "attempted_at");
+const builtInOnly = () => failure(403, "Only the built-in Station reports bindings.", "forbidden");
+const bindingNotNewer = () => failure(409, "This binding's version is not newer than the one recorded.", "binding_version");
 const hostInvalid = () => failure(400, "Name the host by its id: " + IDENTIFIER, "host");
 const recordIdInvalid = () => failure(400, "Send the recordId as the record's lowercase UUID.", "record_id");
 const outcomeInvalid = () => failure(400, "Send all_applied with no pendingHosts, or deadline_passed with the hosts that didn't confirm.", "outcome");
+const limitInvalid = () => failure(400, "Choose a limit of 1 to 100.", "limit");
+const cursorInvalid = () => failure(400, "Send the cursor this list gave you.", "cursor");
 const reportIdReused = () => failure(409, "This reportId was already used for another report.", "report_id_reused");
 const notRevokedYet = () => failure(409, "This integration isn't revoked.", "invalid_state");
 const finalReported = () => failure(409, "This integration's revocation already has its final report.", "invalid_state");
@@ -68,12 +102,26 @@ const ownerDisabled = () => failure(409, OWNER_DISABLED, "owner_disabled");
 // AUTH_CURSOR, shared with the repository).
 const AUTH_KINDS = ["paused", "resumed", "revoked", "owner_disabled", "owner_enabled"];
 const OWNER_KINDS = ["owner_disabled", "owner_enabled"];
-// With the setting on (D29) Auth's feed also has an admin's later interrupt of a revoked integration's running tasks and
-// an admin's disabling or enabling of an account: the account entries name no integration (clientId null) and are for
-// the built-in Stations only.
-const DELEGATED_AUTH_KINDS = [...AUTH_KINDS, "interrupt_requested", "account_disabled", "account_enabled"];
+// With the setting on (D29) Auth's feed also has an admin's later interrupt of a revoked integration's running tasks, an
+// admin's disabling or enabling of an account, and Auth's accounts baseline (written once Auth has corrected every
+// account that differed from its latest entry): the account-level entries name no integration (clientId null) and are
+// for the built-in Stations only. A baseline names no account either (owner null).
 const ACCOUNT_KINDS = ["account_disabled", "account_enabled"];
+const BASELINE_KIND = "accounts_baseline";
+const ACCOUNT_LEVEL_KINDS = [...ACCOUNT_KINDS, BASELINE_KIND];
+const DELEGATED_AUTH_KINDS = [...AUTH_KINDS, "interrupt_requested", ...ACCOUNT_LEVEL_KINDS];
+// A built-in Station's change saying the Portal's view of the accounts is no longer complete (D29): until the next
+// accounts_baseline change, an account missing from its disabled list is unknown. The Portal writes it; Auth never does.
+const INCOMPLETE_KIND = "accounts_incomplete";
+const STATION_ACCOUNT_KINDS = [...ACCOUNT_LEVEL_KINDS, INCOMPLETE_KIND];
 const AUTH_REASON_MAX = 500;
+// Logged while the Portal waits (D29): it skipped an account-level entry, and follows no more until the feed is read again
+// from its first entry. Once by each read pass that skips one, and otherwise at the end of a read at most once an hour.
+const WAITING_LINE = "Account availability waits for Auth's change feed to be read again from the start: reset the Portal's Auth cursor (docs/platform.md, \"Resetting The Portal's Auth Cursor\").";
+const WAITING_AGAIN_MS = 3600000;
+// "1 account", "2 accounts": the count in a counts-only line.
+const accountsCount = (count) => count + (count === 1 ? " account" : " accounts");
+const WAITING = Symbol("waiting");
 // How the Station's feed and an integration's history name a change an Agora.Build admin made (spec §3.3.4): the admin
 // and the reason they gave stay in the Portal's event (actor, reason) and in Auth's audit.
 const AGORA_BUILD = "agora_build";
@@ -119,6 +167,49 @@ function stationView(station, role) {
   };
   if (role === "owner") view.reportClientId = station.reportClientId;
   return view;
+}
+
+// The directory's limit: a whole number from 1 to 100, as a number or the digits of one (it arrives in a query); 100 when
+// it is not given.
+function directoryLimit(value) {
+  if (value === undefined || value === null) return DIRECTORY_PAGE;
+  const size = typeof value === "string" && LIMIT_DIGITS.test(value) ? Number(value) : value;
+  if (!Number.isInteger(size) || size < 1 || size > DIRECTORY_PAGE) throw limitInvalid();
+  return size;
+}
+
+// A directory cursor is base64url (unpadded) of JSON.stringify([builtIn, createdAt, id]) of the last Station on a page,
+// createdAt as the page showed it. Only exactly that is accepted: one spelling of the base64, the JSON as stringify writes
+// it, a boolean, a time as toISOString writes it (a four-digit year), and an identifier. Anything else is 400 cursor, so
+// a cursor is only ever one this list gave. It names a place in the order, not a Station: the Station need not be there
+// any more.
+function directoryCursor(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !CURSOR_CHARACTERS.test(value)) throw cursorInvalid();
+  const bytes = Buffer.from(value, "base64url");
+  if (bytes.toString("base64url") !== value) throw cursorInvalid();
+  const text = bytes.toString("utf8");
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { throw cursorInvalid(); }
+  if (!Array.isArray(parsed) || parsed.length !== 3 || JSON.stringify(parsed) !== text) throw cursorInvalid();
+  const [builtIn, createdAt, id] = parsed;
+  if (typeof builtIn !== "boolean" || typeof createdAt !== "string" || !CURSOR_TIME.test(createdAt) || typeof id !== "string" || !ID_GRAMMAR.test(id)) throw cursorInvalid();
+  const at = new Date(createdAt);
+  if (Number.isNaN(at.getTime()) || at.toISOString() !== createdAt) throw cursorInvalid();
+  return { builtIn, createdAt, id };
+}
+const directoryCursorFor = (entry) => Buffer.from(JSON.stringify([entry.builtIn, entry.createdAt, entry.id])).toString("base64url");
+
+// A Station as the directory shows it: routing and availability only, never its report client, its owner or its members.
+// integrationsEnabled says whether an integration can be created there now: not on a removed Station, and not by a member
+// whose membership ended.
+function directoryEntry(row) {
+  return {
+    id: row.id, origin: row.origin, name: row.name, builtIn: row.builtIn, access: row.access, role: row.role, status: row.status,
+    removedAt: row.removedAt, membership: row.membership, membershipEndedAt: row.membershipEndedAt,
+    integrationsEnabled: row.status === "active" && row.integrationsEnabled && (row.role !== "member" || row.membership === "current"),
+    createdAt: row.createdAt
+  };
 }
 
 function plainObject(value) {
@@ -182,13 +273,40 @@ function reportReason(value) {
   return value;
 }
 
+// A binding report (the setting on): the built-in Station's binding_changed or binding_attempt, validated in this order: its
+// shape (exactly its form's fields: no integrationId, and none of another report's), the reportId, then the fields as the
+// contract lists them. The reason is a code here, not the free text of today's report reason. `now` is the Portal's clock,
+// for the latest time an attempt may be dated.
+function bindingBody(body, now) {
+  if (Object.keys(body).some((key) => !BINDING_REPORT_FIELDS[body.state].includes(key))) throw failure(400, BINDING_REPORT_FORMS, "report");
+  const { state, reportId, account, accountId, genesisHash } = body;
+  if (typeof reportId !== "string" || !ID_GRAMMAR.test(reportId)) throw reportIdInvalid();
+  if (typeof account !== "string" || !ACCOUNT_ID.test(account)) throw bindingAccountInvalid();
+  if (typeof accountId !== "string" || !ID_GRAMMAR.test(accountId)) throw bindingAccountIdInvalid();
+  if (typeof genesisHash !== "string" || !GENESIS_HASH.test(genesisHash)) throw genesisHashInvalid();
+  if (state === "binding_changed") {
+    const { bindingId, version, bindingState } = body;
+    if (typeof bindingId !== "string" || !ID_GRAMMAR.test(bindingId)) throw bindingIdInvalid();
+    if (!Number.isSafeInteger(version) || version < 1) throw bindingVersionInvalid();
+    if (!BINDING_STATES.includes(bindingState)) throw bindingStateInvalid();
+    return { state, reportId, account, accountId, genesisHash, bindingId, version, bindingState };
+  }
+  const { reason, attemptedAt } = body;
+  if (!ATTEMPT_REASONS.includes(reason)) throw attemptReasonInvalid();
+  // As toISOString writes it, in the four-digit years the database holds without a doubt, and no more than an hour after
+  // the Portal's clock.
+  if (typeof attemptedAt !== "string" || !CURSOR_TIME.test(attemptedAt) || !authTime(attemptedAt) || Date.parse(attemptedAt) > now + ATTEMPT_CLOCK_SKEW) throw attemptedAtInvalid();
+  return { state, reportId, account, accountId, genesisHash, reason, attemptedAt };
+}
+
 // A report's body: only integrationId, state and reason; `error` needs a reason, any other report may carry one. With the
 // setting on (`delegated`, D29 Phase B) a report with a reportId is one of the two revocation reports, validated in this
 // order: its shape (which fields may come together, and with which state), the state, the reportId, then the kind's
 // fields. What comes back is the normalised report, which is also what is kept and compared when the same reportId
-// comes again.
-function reportBody(body, { delegated = false } = {}) {
+// comes again. The two binding reports (bindingBody) have their own form, and are told apart by their state first.
+function reportBody(body, { delegated = false, now = 0 } = {}) {
   const forms = () => failure(400, delegated ? DELEGATED_REPORT_FORMS : REPORT_FORM, "report");
+  if (delegated && plainObject(body) && typeof body.state === "string" && Object.hasOwn(BINDING_REPORT_FIELDS, body.state)) return bindingBody(body, now);
   if (!plainObject(body) || Object.keys(body).some((key) => !(delegated ? DELEGATED_REPORT_FIELDS : REPORT_FIELDS).includes(key))) throw forms();
   const { integrationId, state, reason, reportId } = body;
   const given = (names) => names.some((name) => body[name] !== undefined);
@@ -255,10 +373,11 @@ function authTime(value) {
 
 // Whether an entry of Auth's change feed is one this Portal follows: a kind it knows, a cursor and a time as Auth writes
 // them, and the subject the kind has. An integration's entry names its integration (clientId); an account entry (the
-// setting on, D29) names no integration (clientId null) and an account (owner).
+// setting on, D29) names no integration (clientId null) and an account (owner), and the accounts baseline names neither.
 function changeEntry(entry, delegated) {
   if (!plainObject(entry) || !(delegated ? DELEGATED_AUTH_KINDS : AUTH_KINDS).includes(entry.kind)) return false;
   if (typeof entry.cursor !== "string" || !AUTH_CURSOR.test(entry.cursor) || !authTime(entry.at)) return false;
+  if (entry.kind === BASELINE_KIND) return entry.clientId === null && entry.owner === null;
   if (ACCOUNT_KINDS.includes(entry.kind)) return entry.clientId === null && typeof entry.owner === "string" && ACCOUNT_ID.test(entry.owner);
   return typeof entry.clientId === "string";
 }
@@ -301,6 +420,35 @@ export function createIntegrationService({
   challengeValue = () => randomBytes(32).toString("base64url"), pushFetch = createStationFetch({ timeoutMs: 3000 }), notify, authChanged = () => {},
   delegatedHostWork = false
 }) {
+  // The Station's checkpoint (D29), all read in one repeatable read, read-only transaction, so it is one snapshot: the
+  // newest event id is the cursor, and everything else is the state those events (and no later one) left. A writer that
+  // appends under the event lock commits its event and its rows together, so a change is in the snapshot with its
+  // event or in neither, and every change committed later has a larger id (ids are taken in commit order, appendEvent).
+  // It takes no lock, so it never waits for a writer. Each integration is in the feed's shape (the effective state as of
+  // `at`) with its id, and a stopped one says when it was revoked. Only the built-in Station has the accounts (whether
+  // the Portal's view is complete, and the disabled ones) and the bindings it last reported.
+  async function checkpointOf(station) {
+    const snapshot = await db.transaction(async (client) => ({
+      cursor: await repository.latestCursor(station.id, client),
+      rows: await repository.integrationsOnStation(station.id, client),
+      ...(station.builtIn ? {
+        complete: await repository.baselineApplied(client),
+        disabled: await repository.disabledAccountList(client),
+        bindings: await repository.bindingsOn(station.id, client)
+      } : {})
+    }), { isolation: "repeatable read", readOnly: true });
+    const at = now();
+    const checkpoint = {
+      at: new Date(at).toISOString(),
+      integrations: snapshot.rows.map((row) => ({ id: row.id, ...feedIntegration(row, at, true), ...(STOPPED.includes(row.state) ? { revokedAt: row.revokedAt } : {}) }))
+    };
+    if (station.builtIn) {
+      checkpoint.accounts = { complete: snapshot.complete, disabled: snapshot.disabled };
+      checkpoint.bindings = snapshot.bindings.map((row) => ({ account: row.accountId, accountId: row.r9AccountId, genesisHash: row.genesisHash, bindingId: row.bindingId, version: row.version, bindingState: row.bindingState }));
+    }
+    return { changes: [], cursor: snapshot.cursor, checkpoint };
+  }
+
   // Every transaction here appends events, so each takes the event lock before any row lock (see lockEvents).
   const appending = (work) => db.transaction(async (client) => {
     await repository.lockEvents(client);
@@ -487,6 +635,20 @@ export function createIntegrationService({
     return station;
   }
 
+  // Reads Auth's list of the account's Stations and reconciles Portal's rows with it. False when Auth is unreachable (503):
+  // the Portal's own rows are then all there is to show, and the answer says so (stale). Any other refusal is an error.
+  async function reconcileWithAuth(accountId) {
+    let listed;
+    try {
+      listed = await manage.stations(accountId);
+    } catch (error) {
+      if (!(error instanceof ManageError) || fromManage(error).status !== 503) throw fromManage(error);
+      log("Station list served from Portal: Auth " + error.code + ".");
+    }
+    if (listed) await reconcile(accountId, listed);
+    return Boolean(listed);
+  }
+
   // Brings Portal's rows in line with Auth's list for this account; Auth is authoritative. Removals run first, so a
   // Station Auth has replaced at the same origin is retired before its successor is added.
   async function reconcile(accountId, listed) {
@@ -588,33 +750,146 @@ export function createIntegrationService({
     }
   }
 
-  // An entry of Auth's change feed about an account, not an integration (D29, the setting on): an admin disabled or
-  // enabled it. Each built-in Station records it, once, so its feed can tell the Station (a cursor-0 read lists the
-  // accounts disabled now); a custom Station never gets one, since an admin's action against a person isn't disclosed
-  // to a third-party operator (design III.5). Each Station is pushed as its own write commits, so one whose write fails
-  // (the reader then reads the entry again) doesn't hold back the others. Returns "applied" when any Station recorded
-  // it, else "skipped".
-  async function accountChange(entry, actor, reason) {
-    const stations = await repository.builtInStations();
-    if (!stations.length) {
-      log("Auth account change skipped: no built-in Station.");
+  // How the Portal follows Auth's accounts (D29, the setting on). It is in one of three modes, kept with its place in
+  // Auth's feed (repository.accountSync):
+  // * rebuilding: from the feed's first entry, into tables of its own (a first start, a reset, or Auth restored). The
+  //   live table and the built-in Stations are left alone; at the end of the feed the rebuild is adopted, and the
+  //   Stations hear only how it differs from the live table (accountsCaughtUp).
+  // * live: each entry as it comes, in Auth's order, to the live table and, a disable or enable, to every active built-in
+  //   Station.
+  // * waiting: an account-level entry was skipped (the setting off, or one it can't apply), so what it applied since could
+  //   not be trusted to be all of Auth's feed. Nothing more is applied until the feed is read again from the start.
+  // Every start-over raises an epoch. A read pass hands the service the epoch it began in, and an account-level entry or
+  // the end of a read from an earlier epoch is refused under the event lock before it does anything (stale_pass), so a
+  // pass in flight when another replica started over never applies anything to the new epoch's rebuild.
+  //
+  // The view is complete (account_baseline.complete, the checkpoint's accounts.complete) only while live, from a
+  // baseline applied in order on. Each time it stops being complete with the setting on, every active built-in Station
+  // gets one accounts_incomplete change; when it stopped with the setting off, the Stations are owed it, and get it the
+  // next time the Portal runs with the setting on.
+
+  // Read passes the waiting line was logged for, and when this process last logged it. A pass that skips an account-level
+  // entry says it once (sayWaiting); the end of a read that skipped none says it at most once an hour (stillWaiting), so a
+  // Portal that waits says so however quiet Auth's feed is.
+  const waitingSaid = new WeakSet();
+  let waitingLoggedAt = -Infinity;
+  function sayWaiting(pass) {
+    if (waitingSaid.has(pass)) return;
+    waitingSaid.add(pass);
+    waitingLoggedAt = now();
+    log(WAITING_LINE);
+  }
+  function stillWaiting(pass) {
+    if (waitingSaid.has(pass) || now() - waitingLoggedAt < WAITING_AGAIN_MS) return;
+    sayWaiting(pass);
+  }
+
+  // The fence: an account-level step of a read pass is done only in the epoch the pass began in. Called under the event
+  // lock, which a start-over takes too. A pass is a must here: one missing is a mistake, not a pass to let through.
+  function fenced(sync, pass) {
+    if (!plainObject(pass) || !Number.isSafeInteger(pass.epoch)) throw new TypeError("Account-level work needs the read pass it is part of: { epoch }.");
+    if (pass.epoch !== sync.epoch) throw Object.assign(new Error("This read pass began before the feed was started over."), { code: "stale_pass" });
+  }
+
+  // Appends one account-level event to each Station: a disable, an enable, the baseline or the incomplete signal.
+  async function tell(stations, { kind, accountId = null, actor = SYSTEM, reason = null, details }, client) {
+    for (const station of stations) {
+      await repository.appendEvent({ stationId: station.id, integrationId: null, accountId, actor, kind, state: null, reason, details }, client);
+    }
+  }
+
+  // The view stops being complete (a start-over, or a move to waiting, with the setting on): the mark is cleared and, if
+  // the Stations were told it was complete (it was, or they are owed the news), each active built-in Station gets one
+  // accounts_incomplete change. Returns null when nobody was told, and otherwise { mode, stations } for toldIncomplete
+  // once the transaction has committed.
+  async function becameIncomplete(sync, mode, client) {
+    const was = await repository.markBaselineIncomplete(client);
+    if (!was && !sync.incompleteOwed) return null;
+    if (sync.incompleteOwed) await repository.setAccountsIncompleteOwed(false, client);
+    const stations = await repository.builtInStations(client);
+    await tell(stations, { kind: INCOMPLETE_KIND, details: { admin: false, mode } }, client);
+    return { mode, stations };
+  }
+
+  // After the commit: the counts-only line, and the push to each Station told.
+  function toldIncomplete(told) {
+    if (!told) return;
+    log("Account availability incomplete: " + told.mode + ".");
+    for (const station of told.stations) changed(station.id);
+  }
+
+  // An account-level entry of Auth's change feed (D29, the setting on): an admin disabled or enabled an account, or Auth
+  // wrote its accounts baseline, applied in one transaction as the mode says. Live, the entry is marked applied (once,
+  // whatever is read again) and the account's availability written, or the baseline recorded; a disable or enable is
+  // recorded as an event on each active built-in Station, so a Station learns of each change (and a cursor-0 read lists
+  // the accounts disabled now); a baseline that completes the view gives each one accounts_baseline change. A custom
+  // Station never gets one, since an admin's action against a person isn't disclosed to a third-party operator (design
+  // III.5). The Stations are pushed after the commit, and a failure anywhere rolls all of it back, so the reader's next
+  // read applies the entry once. With no built-in Station the tables are still updated. Rebuilding, the entry goes to the
+  // rebuild's tables only and nobody is told. Waiting, it is skipped and not recorded. Order is the feed's: the reader
+  // applies entries in Auth's order under the event lock, and availability is whatever the entry applied last says,
+  // never judged by Auth's clock. Returns "applied", or "skipped" when it was applied before or the Portal waits.
+  async function accountChange(entry, actor, reason, pass) {
+    const baseline = entry.kind === BASELINE_KIND;
+    const applied = { cursor: entry.cursor, at: entry.at, account: entry.owner, kind: entry.kind };
+    const done = await appending(async (client) => {
+      const sync = await repository.accountSync(client);
+      fenced(sync, pass);
+      if (sync.mode === "waiting") return WAITING;
+      if (sync.mode === "rebuilding") {
+        if (!(await repository.applyRebuildEntry(applied, client))) return null;
+        if (baseline) await repository.setRebuildBaseline(entry.cursor, entry.at, client);
+        else await repository.setRebuildAvailability(entry.owner, entry.kind === "account_disabled", entry.cursor, entry.at, client);
+        return { stations: [] };
+      }
+      if (!(await repository.applyAccountEntry(applied, client))) return null;
+      const active = await repository.builtInStations(client);
+      if (baseline) {
+        // Live, everything before it was applied in order: from here the view is complete.
+        await repository.setBaseline(entry.cursor, entry.at, client);
+        if (!(await repository.markBaselineComplete(client))) return { stations: [] };
+        await tell(active, { kind: BASELINE_KIND, details: { authCursor: entry.cursor, authAt: entry.at, admin: false } }, client);
+        return { stations: active, completed: true };
+      }
+      await repository.setAvailability(entry.owner, entry.kind === "account_disabled", entry.cursor, entry.at, client);
+      await tell(active, { kind: entry.kind, accountId: entry.owner, actor, reason, details: { authCursor: entry.cursor, authAt: entry.at, admin: entry.admin === true } }, client);
+      return { stations: active, unheard: !active.length };
+    });
+    if (done === WAITING) {
+      sayWaiting(pass);
       return "skipped";
     }
-    let applied = false;
-    for (const station of stations) {
-      const written = await appending(async (client) => {
-        if (await repository.accountChangeApplied(station.id, entry.cursor, entry.at, entry.owner, client)) return false;
-        await repository.appendEvent({
-          stationId: station.id, integrationId: null, accountId: entry.owner, actor, kind: entry.kind, state: null, reason,
-          details: { authCursor: entry.cursor, authAt: entry.at, admin: entry.admin === true }
-        }, client);
-        return true;
-      });
-      if (!written) continue;
-      applied = true;
-      changed(station.id);
+    if (done === null) return "skipped";
+    if (done.unheard) log("Auth account change skipped: no built-in Station.");
+    if (done.completed) log("Account availability complete.");
+    for (const station of done.stations) changed(station.id);
+    return "applied";
+  }
+
+  // The Portal skipped an account-level entry: its setting is off, or (on) the entry is malformed or a person's own,
+  // which Auth never writes. It moves to waiting, in one transaction: nothing is forgotten, nothing else changes, and the
+  // view is no longer complete. With the setting on that is after the fence, and each active built-in Station is told
+  // now (becameIncomplete); with it off nothing is written to a Station, so they are owed the news instead.
+  async function accountsWait(pass) {
+    if (!delegatedHostWork) {
+      await appending((client) => waitUnheard(client));
+      return;
     }
-    return applied ? "applied" : "skipped";
+    const told = await appending(async (client) => {
+      const sync = await repository.accountSync(client);
+      fenced(sync, pass);
+      await repository.setAccountsMode("waiting", client);
+      return becameIncomplete(sync, "waiting", client);
+    });
+    toldIncomplete(told);
+    sayWaiting(pass);
+  }
+
+  // The setting-off move to waiting: the mark is cleared and, if the Stations were told the view was complete, they are
+  // owed the news, since nothing is written to a Station with the setting off.
+  async function waitUnheard(client) {
+    await repository.setAccountsMode("waiting", client);
+    if (await repository.markBaselineIncomplete(client)) await repository.setAccountsIncompleteOwed(true, client);
   }
 
   // Shown as paused while its own state is not: its owner's account is disabled.
@@ -694,18 +969,46 @@ export function createIntegrationService({
     return view;
   }
 
+  // A binding report (D29), in the transaction of identifiedReport, which has found no report under its id. A binding_attempt
+  // is kept as it is for the account it protects. A binding_changed is the Station's newest word on its R9 account at a
+  // genesis only if its version is higher than the recorded one; the same version with the identical binding (account,
+  // bindingId, bindingState) is the same news again and changes nothing, and any other not-newer one is refused, which
+  // rolls the transaction back (its id stays free). The answer is the recorded binding. Neither is an event or a push: the
+  // checkpoint reads the bindings, and the page reads the attempts.
+  async function recordBinding(station, report, client) {
+    if (report.state === "binding_attempt") {
+      await repository.saveBindingAttempt({ stationId: station.id, reportId: report.reportId, accountId: report.account, r9AccountId: report.accountId, genesisHash: report.genesisHash, reason: report.reason, attemptedAt: report.attemptedAt }, client);
+      return { recorded: true };
+    }
+    const recorded = await repository.binding(station.id, report.accountId, report.genesisHash, client);
+    if (!recorded || recorded.version < report.version) {
+      await repository.saveBinding({ stationId: station.id, r9AccountId: report.accountId, genesisHash: report.genesisHash, accountId: report.account, bindingId: report.bindingId, version: report.version, bindingState: report.bindingState, reportId: report.reportId }, client);
+    } else if (recorded.version !== report.version || recorded.accountId !== report.account || recorded.bindingId !== report.bindingId || recorded.bindingState !== report.bindingState) {
+      throw bindingNotNewer();
+    }
+    return { accountId: report.accountId, genesisHash: report.genesisHash, bindingId: report.bindingId, version: report.version, bindingState: report.bindingState };
+  }
+
   // A report with a reportId (the setting on, D29 Phase B): `revocation_applied` for one host, or the final `revoked` with
-  // how the revocation ended. Ids are per Station and kept forever with the report and its answer: the same id with the
-  // same body answers what was recorded and changes nothing, with another body it is refused. All of it runs in one
-  // transaction under the event lock, so a retry racing itself waits for the first and then finds its answer, and a
-  // refused report (the transaction rolls back) records nothing. Nobody is pushed: the Station made the change itself.
+  // how the revocation ended; and, from the built-in Station only (403 before anything is recorded), a binding report
+  // (recordBinding), which names no integration. Ids are per Station and kept forever with the report and its answer: the
+  // same id with the same body answers what was recorded and changes nothing, with another body it is refused. All of it
+  // runs in one transaction under the event lock, so a retry racing itself waits for the first and then finds its answer,
+  // and a refused report (the transaction rolls back) records nothing. Nobody is pushed: the Station made the change itself.
   function identifiedReport(station, report) {
     const { integrationId, reportId } = report;
+    const binding = Object.hasOwn(BINDING_REPORT_FIELDS, report.state);
+    if (binding && !station.builtIn) throw builtInOnly();
     return appending(async (client) => {
       const kept = await repository.stationReport(station.id, reportId, client);
       if (kept) {
         if (canonical(kept.body) !== canonical(report)) throw reportIdReused();
         return kept.answer;
+      }
+      if (binding) {
+        const answer = await recordBinding(station, report, client);
+        await repository.saveStationReport({ stationId: station.id, reportId, integrationId: null, body: report, answer }, client);
+        return answer;
       }
       const found = typeof integrationId === "string" && integrationId ? await repository.integration(integrationId, client) : null;
       if (!found || found.stationId !== station.id) throw notFound();
@@ -932,17 +1235,33 @@ export function createIntegrationService({
       return stationView(await repository.station(registered.id), "owner");
     },
 
+    // The browser's list. With the setting on it also carries the account's notices (D29): the binding attempts the
+    // built-in Station refused for it in the last 30 days, the 50 newest, newest first. Each names the R9 account, in its
+    // own id, and nothing of the other Agora.Build account the attempt came from or went to.
     async stations(accountId) {
-      let listed;
-      try {
-        listed = await manage.stations(accountId);
-      } catch (error) {
-        if (!(error instanceof ManageError) || fromManage(error).status !== 503) throw fromManage(error);
-        log("Station list served from Portal: Auth " + error.code + ".");
-      }
-      if (listed) await reconcile(accountId, listed);
+      const fresh = await reconcileWithAuth(accountId);
       const stations = (await repository.stationsFor(accountId)).map((station) => stationView(station, station.role));
-      return { stations, stale: !listed };
+      if (!delegatedHostWork) return { stations, stale: !fresh };
+      const attempts = await repository.bindingAttemptsFor(accountId, now() - ATTEMPTS_SHOWN_FOR, undefined, { limit: NOTICES_SHOWN });
+      const notices = attempts.map(({ r9AccountId, genesisHash, reason, attemptedAt }) => ({ kind: "binding_attempt", accountId: r9AccountId, genesisHash, reason, attemptedAt }));
+      return { stations, stale: !fresh, notices };
+    },
+
+    // The Station directory for Astation (D29, the setting on; GET /api/v1/stations): a page of the Stations the account
+    // can use now and those it lost in the last 30 days, built-in first, then by creation and id. The limit and the cursor
+    // are checked before Auth is asked. The list is reconciled with Auth as the browser's is; when Auth is unreachable
+    // (503) it is the Portal's last copy and `stale`. `complete` is true only on the last page of a list that is not stale:
+    // anything else must not be taken to mean a Station is gone.
+    async directory(accountId, { cursor, limit } = {}) {
+      if (!delegatedHostWork) throw notFound();
+      const size = directoryLimit(limit);
+      const after = directoryCursor(cursor);
+      const fresh = await reconcileWithAuth(accountId);
+      // One more than the page, to know whether there is a next page.
+      const rows = await repository.directoryFor(accountId, { lostSince: now() - DIRECTORY_LOST_FOR, after, limit: size });
+      const stations = rows.slice(0, size).map(directoryEntry);
+      const nextCursor = rows.length > size ? directoryCursorFor(stations.at(-1)) : null;
+      return { stations, nextCursor, stale: !fresh, complete: fresh && nextCursor === null };
     },
 
     async members(accountId, stationId) {
@@ -1155,10 +1474,11 @@ export function createIntegrationService({
 
     // An authenticated Station's report about one of its integrations. Only these reports move an integration into
     // waiting_for_host, ready or revoked (Portal never sets ready itself); `error` records lastError and keeps the state.
-    // With the setting on, a report with a reportId is one of the two revocation reports (identifiedReport).
+    // With the setting on, a report with a reportId is one of the two revocation reports or one of the two binding reports
+    // (identifiedReport).
     async report(clientId, body) {
       const station = await reportingStation(clientId);
-      const parsed = reportBody(body, { delegated: delegatedHostWork });
+      const parsed = reportBody(body, { delegated: delegatedHostWork, now: now() });
       if (parsed.reportId !== undefined) return identifiedReport(station, parsed);
       const { integrationId, state, reason } = parsed;
       const row = typeof integrationId === "string" && integrationId ? await repository.integration(integrationId) : null;
@@ -1187,9 +1507,15 @@ export function createIntegrationService({
 
     // This Station's changes after `cursor`, oldest first, each with its integration's current settings. From cursor 0
     // the answer also lists every integration on the Station, so a Station starting fresh has a snapshot.
-    async changes(clientId, cursorInput) {
+    //
+    // With the setting on and `checkpoint` (D29, ?checkpoint=1) the answer is the Station's state at one exact cursor
+    // instead, whatever cursor was sent (its shape is still checked, and "ahead" doesn't apply: the cursor is the Station's
+    // own newest event). Resuming at it with the feed delivers every later change and no earlier one. With the setting
+    // off the parameter is ignored: the answer is today's.
+    async changes(clientId, cursorInput, { checkpoint = false } = {}) {
       const station = await reportingStation(clientId);
       const cursor = feedCursor(cursorInput);
+      if (delegatedHostWork && checkpoint) return checkpointOf(station);
       // A cursor this Station's history never reached (the Portal's database was restored from an older backup) can't
       // be served from: the Station must start again from cursor 0, whose snapshot is the current state.
       if (cursor > 0 && cursor > await repository.latestCursor(station.id)) throw failure(409, "This cursor is ahead of the Portal's history. Read the feed again from cursor 0.", "cursor_ahead");
@@ -1199,8 +1525,9 @@ export function createIntegrationService({
       const current = new Map(rows.map((row) => [row.id, row]));
       const changes = events.map(({ id, at: when, integrationId, accountId, kind, state, reason, details }) => {
         // An admin's disabling or enabling of an account: the admin and their reason stay in the Portal's event. Served as
-        // recorded, as Auth does, even if the setting has been turned off since.
-        if (ACCOUNT_KINDS.includes(kind)) return { id, at: when, integrationId: null, kind, state: null, reason: AGORA_BUILD, account: accountId };
+        // recorded, as Auth does, even if the setting has been turned off since. The baseline and the incomplete signal
+        // name no account.
+        if (STATION_ACCOUNT_KINDS.includes(kind)) return { id, at: when, integrationId: null, kind, state: null, reason: AGORA_BUILD, account: ACCOUNT_KINDS.includes(kind) ? accountId : null };
         // Agora.Build's changes say only that: the admin and their reason stay in the Portal's event (spec §3.3.4).
         const masked = Object.hasOwn(OWNER_EVENTS, kind);
         const change = { id, at: when, integrationId, kind: masked ? OWNER_EVENTS[kind] : kind, state, reason: masked || details?.admin === true ? AGORA_BUILD : reason };
@@ -1214,8 +1541,8 @@ export function createIntegrationService({
       const answer = { changes, cursor: events.length ? events.at(-1).id : cursor };
       if (cursor === 0) {
         answer.integrations = rows.map((row) => ({ id: row.id, ...feedIntegration(row, at, delegatedHostWork) }));
-        // A built-in Station's snapshot includes every account disabled now (design III.5).
-        if (delegatedHostWork && station.builtIn) answer.disabledAccounts = await repository.disabledAccounts(station.id);
+        // A built-in Station's snapshot includes every account disabled now (design III.5), as the availability table has it.
+        if (delegatedHostWork && station.builtIn) answer.disabledAccounts = await repository.disabledAccountList();
       }
       return answer;
     },
@@ -1247,8 +1574,11 @@ export function createIntegrationService({
     // owner's next listing brings them in). Each entry is applied once: its cursor and time are kept in the event's
     // details. Returns "applied" or "skipped"; only a database failure throws, so the reader reads it again.
     //
-    // With the setting on (D29) an admin's interrupt_requested entry is followed the same way, and an account entry
-    // (account_disabled, account_enabled; no integration) is recorded once on each built-in Station (accountChange).
+    // With the setting on (D29) an admin's interrupt_requested entry is followed the same way, and an account-level entry
+    // (account_disabled, account_enabled or accounts_baseline; no integration) is applied once, as the Portal's mode says,
+    // in the read pass `pass` ({ epoch }, from the reader) and only in that pass's epoch (accountChange). With it off,
+    // such an entry is skipped like any other kind this Portal does not follow, and first moves the Portal to waiting
+    // (accountsWait), as does one that is malformed or a person's own with the setting on.
     //
     // The feed may be read after the Portal already followed a newer change (an owner's listing, the owner's own call,
     // or a revocation). Such an entry is still recorded, and a pause or revocation still applies: a pause that is out
@@ -1256,16 +1586,23 @@ export function createIntegrationService({
     // than the newest pause, resume or revocation the row has recorded (repository.latestStatus); otherwise the row
     // keeps its state and the event says so (details.superseded), so a resume read late never undoes a newer pause
     // (Ruling R-A). Auth's clock and the Portal's are compared here, so they are kept in sync.
-    async applyAuthChange(entry) {
+    async applyAuthChange(entry, pass) {
+      // An account-level entry this Portal skips (the setting is off, or the entry is malformed or a person's own) leaves
+      // it unable to follow Auth's accounts: whatever the entry's shape, a kind of this sort is one (D29, accountsWait).
+      const accountLevel = plainObject(entry) && ACCOUNT_LEVEL_KINDS.includes(entry.kind);
       if (!changeEntry(entry, delegatedHostWork)) {
+        if (accountLevel) await accountsWait(pass);
         log("Auth change skipped: not a change entry.");
         return "skipped";
       }
       const ours = !OWNER_KINDS.includes(entry.kind) && entry.admin !== true && entry.actorAccountId !== null;
-      if (ours) return "skipped";
+      if (ours) {
+        if (accountLevel) await accountsWait(pass);
+        return "skipped";
+      }
       const actor = typeof entry.actorAccountId === "string" && ACCOUNT_ID.test(entry.actorAccountId) ? entry.actorAccountId : SYSTEM;
       const reason = typeof entry.reason === "string" && entry.reason ? [...entry.reason].slice(0, AUTH_REASON_MAX).join("") : null;
-      if (ACCOUNT_KINDS.includes(entry.kind)) return accountChange(entry, actor, reason);
+      if (ACCOUNT_LEVEL_KINDS.includes(entry.kind)) return accountChange(entry, actor, reason, pass);
       if (!(await repository.integration(entry.clientId))) {
         log("Auth change skipped: the integration is unknown to Portal.");
         return "skipped";
@@ -1300,6 +1637,94 @@ export function createIntegrationService({
       if (applied.superseded) log("Auth change recorded without its state change: the Portal has a newer one.");
       changed(applied.stationId);
       return "applied";
+    },
+
+    // The reader of Auth's feed (auth-changes.mjs) starts it over from its first entry: a first start, a reset (an
+    // operator emptied the cursor), or Auth's cursor is behind the Portal's (Auth was restored). With the setting on (D29),
+    // in one transaction: the epoch is raised (fencing every read pass that began before), the Portal starts rebuilding
+    // its view of the accounts from the feed's first entry into tables of its own (the live table is left alone), the
+    // cursor is emptied with it, and the view is no longer complete; if the Stations were told it was (or are owed the
+    // news), each active built-in Station gets one accounts_incomplete change, pushed after the commit. Returns the new
+    // epoch; with the setting off it does nothing.
+    async accountsStartingOver() {
+      if (!delegatedHostWork) return undefined;
+      const { epoch, told } = await appending(async (client) => {
+        const sync = await repository.accountSync(client);
+        const raised = await repository.startAccountsOver(client);
+        return { epoch: raised, told: await becameIncomplete(sync, "rebuilding", client) };
+      });
+      toldIncomplete(told);
+      return epoch;
+    },
+
+    // The reader found Auth's cursor moved by a Portal image from before migration 006 (auth-changes.mjs, the guard): that
+    // image skips account-level entries unrecorded, so what this Portal holds may miss some. With the setting on (D29) the
+    // answer is true, and the reader starts over (accountsStartingOver). With it off, the Portal moves to waiting as a
+    // skipped entry makes it (waitUnheard), takes the cursor as it is, and answers false: the reader reads on from it, and
+    // logs nothing new.
+    async accountsForeignCursor() {
+      if (delegatedHostWork) return true;
+      await appending(async (client) => {
+        await waitUnheard(client);
+        await repository.acceptAuthChangeCursor(client);
+      });
+      return false;
+    },
+
+    // A read pass of Auth's feed reached its end (its last page wasn't full). With the setting on (D29) and the pass's
+    // epoch still current, in one transaction:
+    // * rebuilding, the Portal adopts the rebuild: for each account whose state differs from the live table (one in
+    //   either only included; an account with no row is enabled), each active built-in Station gets one account_disabled
+    //   or account_enabled change; the live table and applied entries become the rebuild's; if the rebuild applied a
+    //   baseline, it is recorded, the view is complete and each Station gets one accounts_baseline change (otherwise the
+    //   next baseline applied live completes it); and the Portal is live.
+    // * waiting, the Stations get the accounts_incomplete change they are owed, if they are, once, and the WAITING line is
+    //   logged unless this pass said it, at most once an hour (stillWaiting).
+    // * live, there is nothing to do.
+    // The Stations are pushed after the commit, and a failure rolls all of it back, so the next read does it. Several
+    // replicas may call it at once: the event lock serializes them, and only the first finds anything to do. Adopting a
+    // rebuild that changed an account or completed the view logs how many accounts changed, never which. Returns whether
+    // this call did something; a stale pass, or the setting off, does nothing.
+    async accountsCaughtUp(pass) {
+      if (!delegatedHostWork) return false;
+      const done = await appending(async (client) => {
+        const sync = await repository.accountSync(client);
+        try {
+          fenced(sync, pass);
+        } catch (error) {
+          if (error.code === "stale_pass") return null;
+          throw error;
+        }
+        if (sync.mode === "waiting") return { waiting: true, told: sync.incompleteOwed ? await becameIncomplete(sync, "waiting", client) : null };
+        if (sync.mode !== "rebuilding") return null;
+        const differences = await repository.availabilityDifferences(client);
+        await repository.adoptRebuild(client);
+        const active = await repository.builtInStations(client);
+        for (const { account, disabled, cursor, at } of differences) {
+          await tell(active, {
+            kind: disabled ? "account_disabled" : "account_enabled", accountId: account,
+            details: { ...(cursor === null ? {} : { authCursor: cursor, authAt: at }), admin: false, rebuilt: true }
+          }, client);
+        }
+        let completed = false;
+        if (sync.rebuildBaseline) {
+          await repository.setBaseline(sync.rebuildBaseline.cursor, sync.rebuildBaseline.at, client);
+          completed = (await repository.markBaselineComplete(client)) !== null;
+          if (completed) await tell(active, { kind: BASELINE_KIND, details: { authCursor: sync.rebuildBaseline.cursor, authAt: sync.rebuildBaseline.at, admin: false } }, client);
+        }
+        await repository.setAccountsMode("live", client);
+        return { stations: differences.length || completed ? active : [], changed: differences.length, completed };
+      });
+      if (done === null) return false;
+      if (done.waiting) {
+        toldIncomplete(done.told);
+        stillWaiting(pass);
+        return done.told !== null;
+      }
+      // Only news is said: a rebuild that changed no account and completed nothing (an empty feed's, every read) is not.
+      if (done.changed || done.completed) log("Account availability rebuilt: " + accountsCount(done.changed) + " changed" + (done.completed ? "; complete." : "."));
+      for (const station of done.stations) changed(station.id);
+      return true;
     },
 
     notify: (stationId) => changed(stationId),

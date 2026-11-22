@@ -74,17 +74,18 @@ async function start(t, options = {}) {
 }
 
 // A real service on the test database; null (and the test skipped) without PORTAL_TEST_DATABASE_URL.
-async function stack(t, { delegatedHostWork = false, authDelegated = delegatedHostWork } = {}) {
+// `now` is the service's clock (and Auth's), for the tests that move it.
+async function stack(t, { delegatedHostWork = false, authDelegated = delegatedHostWork, now } = {}) {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
-  const manage = fakeManage({ delegated: authDelegated });
+  const manage = fakeManage({ delegated: authDelegated, ...(now ? { now } : {}) });
   const served = { status: 200, body: "" };
   const stationFetch = { async get() { return { ...served }; } };
   const pushes = [];
   const pushFetch = { async post(url, body) { pushes.push({ url, body }); return { status: 202 }; } };
   const exchanges = [];
   const exchange = async (idToken, origin) => { exchanges.push({ idToken, origin }); return { accessToken: "station-read-token", expiresIn: 300 }; };
-  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, pushFetch, exchange, log: () => {}, delegatedHostWork });
+  const service = createIntegrationService({ repository: createRepository(db), db, manage, stationFetch, pushFetch, exchange, log: () => {}, delegatedHostWork, ...(now ? { now } : {}) });
   t.after(() => service._pushesIdle());
   return { db, manage, served, service, exchanges, pushes };
 }
@@ -716,6 +717,51 @@ test("Station reports and the change feed take only the Station's station.report
   assert.equal(unversionedFeed.status, 404);
 });
 
+// The exact-cursor checkpoint (D29): ?checkpoint=1 on the change feed, with the same token and limits, and only with the
+// setting on.
+test("with the setting on, ?checkpoint=1 answers the Station's checkpoint; with it off the parameter is ignored", async (t) => {
+  const on = await stack(t, { delegatedHostWork: true });
+  if (!on) return;
+  const app = await start(t, { integrations: on.service, delegatedHostWork: "1" });
+  const owner = await signIn(app);
+  const { station } = await registerStation(app, on, owner.cookie);
+  const integration = await createIntegration(app, owner.cookie, station.id);
+  await on.service.approve(owner.sub, integration.id, { r9Svc: R9 });
+  const token = await app.fake.issueAccessToken({ sub: owner.sub, client_id: station.reportClientId, scope: "station.report" });
+  const feed = await (await call(app.base, "/api/v1/stations/changes?cursor=0", { bearer: token })).json();
+
+  const asked = await call(app.base, "/api/v1/stations/changes?checkpoint=1", { bearer: token });
+  assert.equal(asked.status, 200);
+  const checkpoint = await asked.json();
+  assert.deepEqual(Object.keys(checkpoint), ["changes", "cursor", "checkpoint"]);
+  assert.deepEqual([checkpoint.changes, checkpoint.cursor], [[], feed.cursor]);
+  assert.deepEqual(Object.keys(checkpoint.checkpoint), ["at", "integrations"]);
+  assert.deepEqual(checkpoint.checkpoint.integrations.map((entry) => [entry.id, entry.ownerAccount, entry.state]), [[integration.id, owner.sub, "provisioning"]]);
+  // A cursor beside it is not checked against the history; anything but "1" is the ordinary feed.
+  assert.equal((await (await call(app.base, "/api/v1/stations/changes?checkpoint=1&cursor=" + (feed.cursor + 5), { bearer: token })).json()).cursor, feed.cursor);
+  for (const value of ["0", "true", "", "1 "]) {
+    const ordinary = await call(app.base, "/api/v1/stations/changes?checkpoint=" + encodeURIComponent(value) + "&cursor=" + feed.cursor, { bearer: token });
+    assert.deepEqual([ordinary.status, Object.hasOwn(await ordinary.json(), "checkpoint")], [200, false], JSON.stringify(value));
+  }
+  // The same token and scope as the feed.
+  assertScope(await call(app.base, "/api/v1/stations/changes?checkpoint=1", { bearer: await app.fake.issueAccessToken({ sub: owner.sub, client_id: station.reportClientId, scope: "credits" }) }), "station.report");
+  assert.equal((await call(app.base, "/api/v1/stations/changes?checkpoint=1", { cookie: owner.cookie })).status, 401, "a browser session cannot read it");
+
+  const integrations = await stack(t);
+  if (!integrations) return;
+  const off = await start(t, { integrations: integrations.service });
+  const person = await signIn(off);
+  const registered = await registerStation(off, integrations, person.cookie);
+  await createIntegration(off, person.cookie, registered.station.id);
+  const offToken = await off.fake.issueAccessToken({ sub: person.sub, client_id: registered.station.reportClientId, scope: "station.report" });
+  const today = await (await call(off.base, "/api/v1/stations/changes?cursor=0", { bearer: offToken })).json();
+  const ignored = await call(off.base, "/api/v1/stations/changes?checkpoint=1", { bearer: offToken });
+  assert.equal(ignored.status, 200);
+  assert.deepEqual(await ignored.json(), today, "today's cursor-0 answer, with no checkpoint key");
+  assert.equal(Object.hasOwn(today, "checkpoint"), false);
+  assert.equal(Array.isArray(today.integrations), true);
+});
+
 const STATION_CLIENT = "s-" + "0".repeat(24) + "bs";
 const REPORT_TOKEN_ONLY = "A Station's own report token can only send reports and read the change feed.";
 
@@ -771,6 +817,59 @@ test("with the setting on, a Station sends revocation_applied and the final revo
   assert.deepEqual([second.status, (await second.json()).code], [409, "invalid_state"]);
   const mine = (await (await call(app.base, "/api/integrations", { cookie: owner.cookie })).json()).integrations.find((entry) => entry.id === integration.id);
   assert.deepEqual(mine.revocation, { appliedHosts: 1, outcome: "deadline_passed", unconfirmedHosts: 100 });
+});
+
+test("with the setting on, the built-in Station sends binding reports at /api/v1/stations/reports and the account's list shows its refused attempts; a custom Station is 403 and with it off they are 400", async (t) => {
+  const integrations = await stack(t, { delegatedHostWork: true });
+  if (!integrations) return;
+  const built = integrations.manage.seedBuiltIn({ integrations: true });
+  await integrations.service.syncBuiltIn();
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const owner = await signIn(app);
+  const { station } = await registerStation(app, integrations, owner.cookie);
+  const genesisHash = "b".repeat(64);
+  const changed = { state: "binding_changed", reportId: "binding_changed:" + "a".repeat(64), account: owner.sub, accountId: "r9:account-1", genesisHash, bindingId: "bind-1", version: 2, bindingState: "bound" };
+  const attempted = { state: "binding_attempt", reportId: "binding_attempt:" + "a".repeat(64), account: owner.sub, accountId: "r9:account-1", genesisHash, reason: "bound_elsewhere", attemptedAt: new Date().toISOString() };
+  const builtToken = await app.fake.issueAccessToken({ sub: owner.sub, client_id: built.reportClientId, scope: "station.report" });
+  const report = (data, bearer = builtToken) => call(app.base, "/api/v1/stations/reports", { bearer, method: "POST", data });
+  const answered = async (response) => [response.status, await response.json()];
+
+  assert.deepEqual(await answered(await report(changed)), [200, { accountId: "r9:account-1", genesisHash, bindingId: "bind-1", version: 2, bindingState: "bound" }]);
+  assert.deepEqual(await answered(await report(changed)), [200, { accountId: "r9:account-1", genesisHash, bindingId: "bind-1", version: 2, bindingState: "bound" }], "the same id and body: the recorded answer");
+  assert.deepEqual(await answered(await report({ ...changed, reportId: "binding_changed:" + "b".repeat(64), version: 1 })), [409, { error: "This binding's version is not newer than the one recorded.", code: "binding_version" }]);
+  assert.deepEqual(await answered(await report({ ...changed, version: 3 })), [409, { error: "This reportId was already used for another report.", code: "report_id_reused" }]);
+  assert.deepEqual(await answered(await report({ ...changed, version: 0 })), [400, { error: "Send the version as a positive whole number.", code: "version" }]);
+  assert.deepEqual(await answered(await report({ ...changed, integrationId: "i-1" })), [400, { error: 'Send a binding report as { state: "binding_changed", reportId, account, accountId, genesisHash, bindingId, version, bindingState } or { state: "binding_attempt", reportId, account, accountId, genesisHash, reason, attemptedAt }.', code: "report" }]);
+  assert.deepEqual(await answered(await report(attempted)), [200, { recorded: true }]);
+  // The checkpoint, with the Station's own token, has the binding.
+  const checkpoint = await (await call(app.base, "/api/v1/stations/changes?checkpoint=1", { bearer: builtToken })).json();
+  assert.deepEqual(checkpoint.checkpoint.bindings, [{ account: owner.sub, accountId: "r9:account-1", genesisHash, bindingId: "bind-1", version: 2, bindingState: "bound" }]);
+
+  // The browser's list carries the attempt, to the account it was made for and no one else.
+  const mine = await (await call(app.base, "/api/stations", { cookie: owner.cookie })).json();
+  assert.deepEqual(mine.notices, [{ kind: "binding_attempt", accountId: "r9:account-1", genesisHash, reason: "bound_elsewhere", attemptedAt: attempted.attemptedAt }]);
+  const stranger = await signIn(app);
+  assert.deepEqual((await (await call(app.base, "/api/stations", { cookie: stranger.cookie })).json()).notices, []);
+
+  // A custom Station may not.
+  const customToken = await app.fake.issueAccessToken({ sub: owner.sub, client_id: station.reportClientId, scope: "station.report" });
+  assert.deepEqual(await answered(await report(changed, customToken)), [403, { error: "Only the built-in Station reports bindings.", code: "forbidden" }]);
+  assert.deepEqual(await answered(await report(attempted, customToken)), [403, { error: "Only the built-in Station reports bindings.", code: "forbidden" }]);
+  // Without the Station's scope it is no report at all.
+  const readToken = await app.fake.issueAccessToken({ sub: owner.sub, client_id: built.reportClientId, scope: "integrations:read" });
+  assertScope(await report(changed, readToken), "station.report");
+
+  // With the setting off: today's report body rules, and a list as it was.
+  const off = await stack(t);
+  const offBuilt = off.manage.seedBuiltIn({ integrations: true });
+  await off.service.syncBuiltIn();
+  const offApp = await start(t, { integrations: off.service });
+  const offOwner = await signIn(offApp);
+  const offToken = await offApp.fake.issueAccessToken({ sub: offOwner.sub, client_id: offBuilt.reportClientId, scope: "station.report" });
+  const rejected = await call(offApp.base, "/api/v1/stations/reports", { bearer: offToken, method: "POST", data: { ...changed, account: offOwner.sub } });
+  assert.deepEqual([rejected.status, (await rejected.json()).code], [400, "report"]);
+  const list = await (await call(offApp.base, "/api/stations", { cookie: offOwner.cookie })).json();
+  assert.equal("notices" in list, false);
 });
 
 test("a read token for a Station comes from exchanging the session's ID token", async (t) => {
@@ -931,6 +1030,36 @@ test("the stack reads Auth's change feed once it is ready and again on each nudg
   assert.ok(pushes.includes(built.origin + "/agora-build/v1/changes"), "the Station was pushed");
   await integrations.close();
 });
+
+// The stack wires the reader's hooks and its read pass to the service (D29): the first read starts the feed over and
+// rebuilds the accounts, every change in the pass's epoch, and when it reaches the end the rebuild is adopted: the view is
+// complete and each built-in Station is told the end state. With the setting off the same feed completes nothing.
+async function readAccountsThroughTheStack(t, delegatedHostWork) {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
+  const admin = accountId();
+  const owner = accountId();
+  const manage = fakeManage({ delegated: true });
+  const built = manage.seedBuiltIn({ integrations: true, admins: [admin] });
+  manage.accountChange(owner, true, { actor: admin, reason: "Abuse" });
+  manage.baselineChange();
+  const integrations = createIntegrationStack({ db: { ...db, close: async () => {} }, manage, idp: null, log: () => {}, delegatedHostWork, authChanges: { pollMs: 3600000, minGapMs: 5 } });
+  await integrations.ready();
+  await waitFor(async () => (await db.pool.query("SELECT cursor FROM auth_change_feed")).rows[0]?.cursor === manage.feed.at(-1).cursor, "the whole feed read");
+  const complete = async () => (await db.pool.query("SELECT complete FROM account_baseline")).rows.map((row) => row.complete);
+  if (delegatedHostWork) {
+    await waitFor(async () => (await complete()).includes(true), "the baseline completed");
+    const feed = await integrations.service.changes(built.reportClientId, "0");
+    assert.deepEqual(feed.changes.filter((change) => change.kind.startsWith("account")).map((change) => [change.kind, change.account]), [["account_disabled", owner], ["accounts_baseline", null]]);
+    assert.deepEqual(feed.disabledAccounts, [owner]);
+  } else {
+    assert.deepEqual(await complete(), [], "no mark with the setting off");
+    assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM integration_events WHERE kind IN ('account_disabled', 'accounts_baseline')")).rows[0].n, 0);
+  }
+  await integrations.close();
+}
+test("the stack's reader tells the service when it has caught up: with the setting on the baseline completes and reaches the built-in Station", (t) => readAccountsThroughTheStack(t, true));
+test("the stack's reader with the setting off completes nothing and records nothing of Auth's account entries", (t) => readAccountsThroughTheStack(t, false));
 
 test("a nudge before the stack is ready asks for nothing: no ready() retries and no log per nudge while the database is down", async () => {
   const calls = [];
@@ -1191,4 +1320,275 @@ test("the built-in Station answers 409 through the routes: built_in, origin_take
   const create = await call(app.base, "/api/integrations", { cookie: ada.cookie, method: "POST", data: { stationId: built.id, name: "My app", scopes: ["agent.view"], publicJwk: publicJwk() } });
   await code(create, 409, "not_supported");
   await integrations.service._pushesIdle();
+});
+
+// D29: the native Station directory, GET /api/v1/stations (issue 40): a bearer token with integrations:read, keyset pages
+// carrying stale and complete, and the Stations lost within 30 days. The setting on only.
+const DAY = 86400000;
+const LIST_KEYS = ["access", "builtIn", "createdAt", "id", "integrationsEnabled", "membership", "membershipEndedAt", "name", "origin", "removedAt", "role", "status"];
+const NO_LIMIT = { error: "Choose a limit of 1 to 100.", code: "limit" };
+const NO_CURSOR = { error: "Send the cursor this list gave you.", code: "cursor" };
+const directoryToken = (app, sub, scope = "integrations:read") => app.fake.issueAccessToken({ sub, client_id: "astation", scope });
+const directory = (app, bearer, query = "") => call(app.base, "/api/v1/stations" + query, { bearer });
+// The Stations get creation times a day apart, so the directory's order is the order given (a built-in Station aside).
+const dateStations = async (integrations, ...ids) => {
+  for (const [index, id] of ids.entries()) await integrations.db.pool.query("UPDATE stations SET created_at = $2 WHERE id = $1", [id, new Date(Date.parse("2026-01-01T00:00:00.000Z") + index * DAY)]);
+};
+const summary = (body) => body.stations.map((entry) => [entry.id, entry.role, entry.status, entry.membership]);
+
+test("with the setting on, GET /api/v1/stations lists what the account can use, and what it lost in the last 30 days, with the loss stated", async (t) => {
+  const clock = { now: Date.now() };
+  const integrations = await stack(t, { delegatedHostWork: true, now: () => clock.now });
+  if (!integrations) return;
+  const built = integrations.manage.seedBuiltIn({ integrations: true });
+  assert.equal(await integrations.service.syncBuiltIn(), true);
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const ada = await signIn(app);
+  const bo = await signIn(app);
+  const station = async (who, origin) => (await registerStation(app, integrations, who.cookie, origin)).station;
+  const owned = await station(ada, "https://owned.example");
+  const shared = await station(bo, "https://shared.example");
+  const left = await station(bo, "https://left.example");
+  const later = await station(ada, "https://later.example");
+  const early = await station(ada, "https://early.example");
+  const strangers = await station(bo, "https://strangers.example");
+  for (const { id } of [shared, left]) assert.equal((await call(app.base, "/api/stations/" + id + "/members/" + ada.sub, { cookie: bo.cookie, method: "PUT" })).status, 200);
+  await dateStations(integrations, owned.id, shared.id, left.id, later.id, early.id, strangers.id);
+  const bearer = await directoryToken(app, ada.sub);
+  const when = (ms) => new Date(ms).toISOString();
+
+  const lostAt = clock.now;
+  assert.equal((await call(app.base, "/api/stations/" + early.id, { cookie: ada.cookie, method: "DELETE" })).status, 200);
+  assert.equal((await call(app.base, "/api/stations/" + left.id + "/members/" + ada.sub, { cookie: bo.cookie, method: "DELETE" })).status, 200);
+
+  const first = await directory(app, bearer);
+  assert.equal(first.status, 200);
+  const body = await first.json();
+  assert.deepEqual(Object.keys(body).sort(), ["complete", "nextCursor", "stale", "stations"]);
+  assert.deepEqual([body.nextCursor, body.stale, body.complete], [null, false, true]);
+  assert.deepEqual(summary(body), [
+    [built.id, "built_in", "active", null], [owned.id, "owner", "active", null], [shared.id, "member", "active", "current"],
+    [left.id, "member", "active", "ended"], [later.id, "owner", "active", null], [early.id, "owner", "removed", null]
+  ], "the built-in Station first, then by creation; a Station of another account, and one it has no part in, are not there");
+  for (const entry of body.stations) assert.deepEqual(Object.keys(entry).sort(), LIST_KEYS);
+  const byId = Object.fromEntries(body.stations.map((entry) => [entry.id, entry]));
+  assert.deepEqual(byId[built.id], { id: built.id, origin: built.origin, name: "Agora Station", builtIn: true, access: "any_account", role: "built_in", status: "active", removedAt: null, membership: null, membershipEndedAt: null, integrationsEnabled: true, createdAt: byId[built.id].createdAt });
+  assert.equal(typeof byId[built.id].createdAt, "string");
+  assert.deepEqual(byId[owned.id], { id: owned.id, origin: "https://owned.example", name: null, builtIn: false, access: "members", role: "owner", status: "active", removedAt: null, membership: null, membershipEndedAt: null, integrationsEnabled: true, createdAt: when(Date.parse("2026-01-01T00:00:00.000Z")) });
+  assert.deepEqual([byId[shared.id].membership, byId[shared.id].membershipEndedAt, byId[shared.id].integrationsEnabled], ["current", null, true]);
+  assert.deepEqual([byId[left.id].status, byId[left.id].removedAt, byId[left.id].membershipEndedAt, byId[left.id].integrationsEnabled], ["active", null, when(lostAt), false], "an ended membership says when");
+  assert.deepEqual([byId[early.id].removedAt, byId[early.id].membership, byId[early.id].integrationsEnabled], [when(lostAt), null, false], "a removed Station says when");
+  const text = JSON.stringify(body);
+  for (const hidden of [owned.reportClientId, bo.sub, "reportClientId", "ownerAccount"]) assert.equal(text.includes(hidden), false, hidden);
+
+  // 20 days later: a Station removed now, and the earlier losses are still stated.
+  clock.now = lostAt + 20 * DAY;
+  assert.equal((await call(app.base, "/api/stations/" + later.id, { cookie: ada.cookie, method: "DELETE" })).status, 200);
+  const twenty = await (await directory(app, bearer)).json();
+  assert.deepEqual(summary(twenty), [
+    [built.id, "built_in", "active", null], [owned.id, "owner", "active", null], [shared.id, "member", "active", "current"],
+    [left.id, "member", "active", "ended"], [later.id, "owner", "removed", null], [early.id, "owner", "removed", null]
+  ]);
+  assert.equal(twenty.stations.find((entry) => entry.id === later.id).removedAt, when(lostAt + 20 * DAY));
+  // 31 days after the first losses: they may be omitted, and are; the later removal is 11 days old and stays.
+  clock.now = lostAt + 31 * DAY;
+  assert.deepEqual(summary(await (await directory(app, bearer)).json()), [
+    [built.id, "built_in", "active", null], [owned.id, "owner", "active", null], [shared.id, "member", "active", "current"], [later.id, "owner", "removed", null]
+  ]);
+  clock.now = lostAt + 51 * DAY;
+  const after = await (await directory(app, bearer)).json();
+  assert.deepEqual(summary(after), [[built.id, "built_in", "active", null], [owned.id, "owner", "active", null], [shared.id, "member", "active", "current"]]);
+  assert.deepEqual([after.stale, after.complete], [false, true]);
+  // A token's account never sees another's Stations, and has the built-in Station alone to begin with.
+  const newcomer = await (await directory(app, await directoryToken(app, accountId()))).json();
+  assert.deepEqual(summary(newcomer), [[built.id, "built_in", "active", null]]);
+});
+
+test("GET /api/v1/stations pages with limit and cursor: complete only on the last page", async (t) => {
+  const integrations = await stack(t, { delegatedHostWork: true });
+  if (!integrations) return;
+  const built = integrations.manage.seedBuiltIn({ integrations: true });
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const ada = await signIn(app);
+  const a = (await registerStation(app, integrations, ada.cookie, "https://a.example")).station;
+  const b = (await registerStation(app, integrations, ada.cookie, "https://b.example")).station;
+  const c = (await registerStation(app, integrations, ada.cookie, "https://c.example")).station;
+  await dateStations(integrations, a.id, b.id, c.id);
+  const bearer = await directoryToken(app, ada.sub);
+  const walk = async (limit) => {
+    const pages = [];
+    let cursor = null;
+    do {
+      const response = await directory(app, bearer, "?limit=" + limit + (cursor ? "&cursor=" + encodeURIComponent(cursor) : ""));
+      assert.equal(response.status, 200);
+      pages.push(await response.json());
+      cursor = pages.at(-1).nextCursor;
+      assert.ok(pages.length <= 10, "the pages end");
+    } while (cursor);
+    return pages;
+  };
+  const ids = [built.id, a.id, b.id, c.id];
+  const single = await walk(1);
+  assert.deepEqual(single.map((page) => page.stations.map((entry) => entry.id)), ids.map((id) => [id]));
+  assert.deepEqual(single.map((page) => page.complete), [false, false, false, true], "a page with another after it is incomplete");
+  assert.deepEqual(single.map((page) => page.nextCursor === null), [false, false, false, true]);
+  assert.deepEqual(single.map((page) => page.stale), [false, false, false, false]);
+  const decoded = JSON.parse(Buffer.from(single[0].nextCursor, "base64url").toString("utf8"));
+  assert.deepEqual(decoded, [true, single[0].stations[0].createdAt, built.id], "[builtIn, createdAt, id] of the last Station on the page");
+  assert.deepEqual((await walk(3)).map((page) => [page.stations.length, page.complete]), [[3, false], [1, true]]);
+  assert.deepEqual((await walk(4)).map((page) => [page.stations.length, page.complete]), [[4, true]], "the page that ends the list is complete");
+  const whole = await (await directory(app, bearer)).json();
+  assert.deepEqual([whole.stations.map((entry) => entry.id), whole.complete], [ids, true], "the default limit is 100");
+  assert.deepEqual((await (await directory(app, bearer, "?limit=100")).json()).stations.length, 4);
+  // Every page the same entries as the one list.
+  assert.deepEqual(single.flatMap((page) => page.stations), whole.stations);
+});
+
+test("GET /api/v1/stations refuses a bad limit or cursor with 400 limit or cursor, before Auth", async (t) => {
+  const integrations = await stack(t, { delegatedHostWork: true });
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const ada = await signIn(app);
+  const bearer = await directoryToken(app, ada.sub);
+  const calls = integrations.manage.calls.length;
+  for (const limit of ["0", "101", "-1", "1.5", "abc", "", "%20", "1e2", "0x1", "+5", "5%20", "1000000000000000000000"]) {
+    const response = await directory(app, bearer, "?limit=" + limit);
+    assert.deepEqual([response.status, await response.json()], [400, NO_LIMIT], "limit=" + limit);
+  }
+  const wellFormed = Buffer.from(JSON.stringify([false, "2026-01-02T03:04:05.678Z", "st1"])).toString("base64url");
+  for (const cursor of ["", "garbage!", "e30", "%20", wellFormed + "=", Buffer.from("[1,2,3]").toString("base64url"), Buffer.from(JSON.stringify([false, "2026-01-02", "st1"])).toString("base64url"), Buffer.from(JSON.stringify([false, "2026-01-02T03:04:05.678Z", ""])).toString("base64url"), "a".repeat(2000)]) {
+    const response = await directory(app, bearer, "?cursor=" + cursor);
+    assert.deepEqual([response.status, await response.json()], [400, NO_CURSOR], "cursor=" + cursor.slice(0, 40));
+  }
+  // The limit is checked first, and a refusal does not hide behind another: both bad is the limit.
+  assert.deepEqual((await (await directory(app, bearer, "?limit=0&cursor=!")).json()).code, "limit");
+  assert.equal(integrations.manage.calls.length, calls, "Auth was not asked");
+  assert.equal((await directory(app, bearer, "?limit=1&cursor=" + wellFormed)).status, 200, "a cursor of this list's form is a place in it");
+  assert.equal((await directory(app, bearer, "?limit=100")).status, 200);
+  assert.equal((await directory(app, bearer, "?limit=1&foo=bar")).status, 200, "other parameters are ignored");
+});
+
+test("GET /api/v1/stations is stale, and never complete, when Auth's listing fails with 503", async (t) => {
+  const integrations = await stack(t, { delegatedHostWork: true });
+  if (!integrations) return;
+  const built = integrations.manage.seedBuiltIn({ integrations: true });
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const ada = await signIn(app);
+  const a = (await registerStation(app, integrations, ada.cookie, "https://a.example")).station;
+  const bearer = await directoryToken(app, ada.sub);
+  const fresh = await (await directory(app, bearer)).json();
+  assert.deepEqual([fresh.stale, fresh.complete, fresh.stations.length], [false, true, 2]);
+  integrations.manage.failNext.stations = { status: 503, code: "unavailable" };
+  const stale = await directory(app, bearer);
+  assert.equal(stale.status, 200, "the Portal's last copy, not an error");
+  const body = await stale.json();
+  assert.deepEqual([body.stale, body.complete, body.nextCursor], [true, false, null], "the last page, but not complete");
+  assert.deepEqual(body.stations, fresh.stations);
+  // Each page of a stale list is stale and incomplete, the last one too.
+  integrations.manage.down = true;
+  const pages = [];
+  let cursor = null;
+  do {
+    const page = await (await directory(app, bearer, "?limit=1" + (cursor ? "&cursor=" + encodeURIComponent(cursor) : ""))).json();
+    pages.push(page);
+    cursor = page.nextCursor;
+  } while (cursor && pages.length < 5);
+  assert.deepEqual(pages.map((page) => [page.stations.map((entry) => entry.id), page.stale, page.complete]), [[[built.id], true, false], [[a.id], true, false]]);
+  integrations.manage.down = false;
+  assert.deepEqual([(await (await directory(app, bearer)).json()).stale, (await (await directory(app, bearer)).json()).complete], [false, true], "Auth is back");
+  // Only Auth being unavailable is stale: another refusal is the error the browser's list gives.
+  integrations.manage.failNext.stations = { status: 400, code: "invalid_request" };
+  const refused = await directory(app, bearer);
+  assert.deepEqual([refused.status, (await refused.json()).code], [400, "invalid_request"]);
+});
+
+test("GET /api/v1/stations needs integrations:read, shares the account's list budget, and is for access tokens", async (t) => {
+  const integrations = await stack(t, { delegatedHostWork: true });
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const ada = await signIn(app);
+  const calls = integrations.manage.calls.length;
+  for (const scope of ["credits", "integrations:approve", "station.read"]) assertScope(await directory(app, await directoryToken(app, ada.sub, scope)), "integrations:read");
+  assert.equal(integrations.manage.calls.length, calls, "a token without the scope reaches nothing");
+  assert.equal((await directory(app, await directoryToken(app, ada.sub, "integrations:read integrations:approve"))).status, 200, "among others");
+  // A Station's own report token is not an account's.
+  const reporter = await directory(app, await app.fake.issueAccessToken({ sub: BUILT_IN_REPORT_CLIENT, client_id: BUILT_IN_REPORT_CLIENT, scope: "station.report integrations:read" }));
+  assert.equal(reporter.status, 403);
+  assert.match((await reporter.json()).error, /report token/);
+  // No credentials, or a bad token.
+  assert.equal((await call(app.base, "/api/v1/stations")).status, 401);
+  const bad = await directory(app, "not-a-token");
+  assert.equal(bad.status, 401);
+  assert.match(bad.headers.get("www-authenticate"), /invalid_token/);
+  // Only GET.
+  assert.equal((await call(app.base, "/api/v1/stations", { bearer: await directoryToken(app, ada.sub), method: "POST", data: {} })).status, 404);
+  assert.equal((await call(app.base, "/api/v1/stations/st-unknown", { bearer: await directoryToken(app, ada.sub) })).status, 404);
+  // 60 a minute for an account, as for the browser's list; a limited request does not reach Auth.
+  const busy = await signIn(app);
+  const bearer = await directoryToken(app, busy.sub);
+  for (let index = 0; index < 59; index += 1) assert.notEqual((await directory(app, bearer)).status, 429, "#" + (index + 1));
+  assert.equal((await call(app.base, "/api/stations", { cookie: busy.cookie })).status, 200, "the 60th is the browser's");
+  const seen = integrations.manage.calls.length;
+  const over = await directory(app, bearer);
+  assert.deepEqual([over.status, (await over.json()).error], [429, "A few too many requests. Please try again in a moment."]);
+  assert.equal(integrations.manage.calls.length, seen);
+  assert.equal((await directory(app, await directoryToken(app, ada.sub))).status, 200, "another account is not limited");
+});
+
+test("with the setting on, a token on the unversioned /api/stations gets the versioned-API 404, and the browser's list is as it was", async (t) => {
+  const integrations = await stack(t, { delegatedHostWork: true });
+  if (!integrations) return;
+  const built = integrations.manage.seedBuiltIn({ integrations: true });
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const ada = await signIn(app);
+  const { station } = await registerStation(app, integrations, ada.cookie);
+  const token = await call(app.base, "/api/stations", { bearer: await directoryToken(app, ada.sub) });
+  assert.equal(token.status, 404);
+  assert.equal((await token.json()).error, "Access tokens use the versioned API: /api/v1/stations.");
+  const listed = await call(app.base, "/api/stations?limit=1&cursor=nonsense", { cookie: ada.cookie });
+  assert.equal(listed.status, 200, "a browser session ignores the directory's parameters");
+  const body = await listed.json();
+  assert.deepEqual(Object.keys(body).sort(), ["notices", "stale", "stations"], "with the setting on the list also carries the account's notices (none here)");
+  assert.deepEqual(body.notices, []);
+  assert.deepEqual(body.stations.map((entry) => [entry.id, entry.role]), [[built.id, "built_in"], [station.id, "owner"]]);
+  assert.deepEqual(Object.keys(body.stations[1]).sort(), ["builtIn", "createdAt", "id", "integrationsEnabled", "name", "origin", "ownerAccount", "reportClientId", "role", "status"], "today's view, not the directory's");
+});
+
+test("with the setting on, a cookie with no token on /api/v1/stations gets the browser's list, as on /api/v1/integrations: the directory needs a token", async (t) => {
+  const integrations = await stack(t, { delegatedHostWork: true });
+  if (!integrations) return;
+  const built = integrations.manage.seedBuiltIn({ integrations: true });
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const ada = await signIn(app);
+  const { station } = await registerStation(app, integrations, ada.cookie);
+  const cookie = await call(app.base, "/api/v1/stations?limit=1", { cookie: ada.cookie });
+  assert.equal(cookie.status, 200);
+  const body = await cookie.json();
+  assert.deepEqual(Object.keys(body).sort(), ["notices", "stale", "stations"], "the browser's list: no nextCursor, no complete");
+  assert.deepEqual(body.stations.map((entry) => entry.id), [built.id, station.id], "and the limit is ignored");
+  assert.deepEqual(Object.keys(body.stations[1]).sort(), ["builtIn", "createdAt", "id", "integrationsEnabled", "name", "origin", "ownerAccount", "reportClientId", "role", "status"]);
+  const token = await (await directory(app, await directoryToken(app, ada.sub, "integrations:read"), "?limit=1")).json();
+  assert.deepEqual(Object.keys(token).sort(), ["complete", "nextCursor", "stale", "stations"], "with a token it is the directory");
+  assert.equal(token.stations.length, 1);
+});
+
+test("with the setting off, GET /api/v1/stations does not exist and the browser's list is as it was", async (t) => {
+  const integrations = await stack(t);
+  if (!integrations) return;
+  const built = integrations.manage.seedBuiltIn({ integrations: true });
+  const app = await start(t, { integrations: integrations.service });
+  const ada = await signIn(app);
+  const { station } = await registerStation(app, integrations, ada.cookie);
+  const calls = integrations.manage.calls.length;
+  const missing = await directory(app, await directoryToken(app, ada.sub));
+  assert.deepEqual([missing.status, (await missing.json()).error], [404, "This API was not found. See https://github.com/Agora-Build/Portal/blob/main/docs/platform.md for the /api/v1 routes."]);
+  assert.equal(integrations.manage.calls.length, calls, "no listing");
+  const unversioned = await call(app.base, "/api/stations", { bearer: await directoryToken(app, ada.sub) });
+  assert.equal(unversioned.status, 403, "a token on the browser's route is refused as it was");
+  assert.match((await unversioned.json()).error, /browser session/);
+  const listed = await call(app.base, "/api/stations?limit=1", { cookie: ada.cookie });
+  assert.equal(listed.status, 200);
+  const body = await listed.json();
+  assert.deepEqual(Object.keys(body).sort(), ["stale", "stations"]);
+  assert.deepEqual(body.stations.map((entry) => [entry.id, entry.role]), [[built.id, "built_in"], [station.id, "owner"]]);
 });
