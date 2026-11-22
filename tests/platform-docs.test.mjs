@@ -65,7 +65,10 @@ test("the example answers in platform.md are what the Portal gives", async (t) =
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
   const repository = createRepository(db);
-  const clock = { now: Date.now() };
+  // The examples carry fixed times (the notice's attempt is 2026-11-21T09:59Z), and the page shows an attempt for 30 days
+  // only, so the Portal's clock is pinned just after them rather than read: on the real date the test would stop passing a
+  // month after the examples were written.
+  const clock = { now: Date.parse("2026-11-22T10:00:00.000Z") };
   const manage = fakeManage({ now: () => clock.now, delegated: true });
   const served = { status: 200, body: "" };
   let counter = 0;

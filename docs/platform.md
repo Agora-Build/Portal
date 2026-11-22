@@ -550,7 +550,7 @@ The tables:
 | `integration_events` | every change, kept forever; also the Stations' change feed |
 | `station_reports` | a Station's reports that carry a `reportId` (migration 005, with `DELEGATED_HOST_WORK=1` only): the id, the integration (none for a binding report), the body and the answer it got, kept forever so a retry gets the same answer; the key is the Station and the id |
 | `revocation_hosts` | the hosts that applied an integration's revocation (migration 005, with `DELEGATED_HOST_WORK=1` only): the host id, the record's id and the report's id, one row per host |
-| `auth_change_feed` | one row: where the Portal is in Auth's change feed (Auth's cursor) and, since migration 006, how it follows Auth's account entries: `accounts_mode` (`rebuilding`, `live` or `waiting`), `accounts_epoch`, the baseline the current rebuild has seen and whether the Stations are owed an `accounts_incomplete` change |
+| `auth_change_feed` | one row: where the Portal is in Auth's change feed (Auth's cursor) and, since migration 006, how it follows Auth's account entries: `accounts_mode` (`rebuilding`, `live` or `waiting`), `accounts_epoch`, `accounts_cursor` (a copy of the cursor, written with it, which an image from before 006 leaves alone), the baseline the current rebuild has seen and whether the Stations are owed an `accounts_incomplete` change |
 | `account_availability` | migration 006, with `DELEGATED_HOST_WORK=1` only: each account Auth's feed has disabled or enabled, and the feed entry that said so; an account with no row is enabled (or doesn't exist) |
 | `auth_account_entries` | migration 006, with the setting on only: the account-level entries of Auth's feed the Portal has applied, once each |
 | `account_availability_rebuild`, `auth_account_entries_rebuild` | migration 006, with the setting on only: a rebuild's own copy of the two tables above, kept until the rebuild catches up with the end of Auth's feed |
@@ -592,8 +592,9 @@ D29's Phase B (below). It runs when the server starts, whatever the setting. The
 
 Migration `006_availability_bindings.sql` adds the tables `account_availability`, `auth_account_entries`,
 `account_availability_rebuild`, `auth_account_entries_rebuild`, `account_baseline`, `station_bindings` and
-`binding_attempts`, and, on `auth_change_feed`, the columns `accounts_mode`, `accounts_epoch`, `rebuild_baseline_cursor`,
-`rebuild_baseline_at` and `accounts_incomplete_owed` (see "Account Availability" under "Admin Changes From Auth"). It also
+`binding_attempts`, and, on `auth_change_feed`, the columns `accounts_mode`, `accounts_epoch`, `accounts_cursor`,
+`rebuild_baseline_cursor`, `rebuild_baseline_at` and `accounts_incomplete_owed` (see "Account Availability" under "Admin
+Changes From Auth"; `accounts_cursor` starts as the cursor, and is the older-image guard's). It also
 lets `integration_events.account_id` and `station_reports.integration_id` be empty (a baseline names no account, and a
 binding report no integration) and indexes `station_members` by account, for the Station directory. It runs when the server
 starts, whatever the setting, and waits for any change in the middle of being recorded. A Portal that has already read
@@ -708,10 +709,11 @@ integration's Station refuses still-valid tokens and closes open sessions at onc
   names the reason once when it starts, then at most once an hour, and says once when reads work again:
   `Auth change feed read failed: <code>.` (Auth refused or was unreachable), `Auth change feed not available yet:
   <code>.` (Auth answered 404: this Auth has no feed yet, as when the Portal was deployed first),
-  `Auth change not applied: <code>.` (a Portal database failure while following a change; with `DELEGATED_HOST_WORK=1`
-  also `stale_pass`, a read that began before another replica or a reset started account availability over, which stops
-  without applying or saving anything, "Account Availability") and `Auth change feed failed: <code>.`. No cursor, admin or
-  reason is logged.
+  `Auth change not applied: <code>.` (a Portal database failure while following a change) and `Auth change feed failed:
+  <code>.`. No cursor, admin or reason is logged. With `DELEGATED_HOST_WORK=1` a read that began before another replica or
+  a reset started account availability over stops without applying or saving anything, and logs `Auth change pass
+  superseded by a reset: read again.` each time. That is no failure: it is expected after a reset, and no line says that
+  reads work again after it ("Account Availability").
 - **Following a change.** Changes the Portal made itself (an account's pause, resume or revoke through the routes
   below) are in the feed too; they are already recorded and are skipped. For each other change the Portal updates its
   row, records an `integration_events` row with the admin as `actor` (`system` when Auth acted itself) and the reason
@@ -788,13 +790,16 @@ checkpoint whether its view is complete. The one row of `auth_change_feed` says 
 | --- | --- | --- |
 | `rebuilding` | The Portal is reading Auth's feed from its first entry. A new Portal with the setting on starts here, and every start-over (below) returns here. | Applied to the rebuild's own tables only, once each. No Station is told, and the live table is left alone. |
 | `live` | The rebuild has caught up with the end of Auth's feed. | Applied once, in one transaction with the changes of each active built-in Station, which are pushed after the commit. A failure rolls it all back, and the next read applies it. |
-| `waiting` | The Portal skipped an account-level entry, so what it holds can't be trusted to be all of Auth's feed. A Portal that had already read Auth's feed when migration 006 ran starts here. | Skipped and not recorded. The log has the WAITING line (below), once for each read. |
+| `waiting` | The Portal skipped an account-level entry, so what it holds can't be trusted to be all of Auth's feed. A Portal that had already read Auth's feed when migration 006 ran starts here, and so does one whose cursor an older image moved while the setting was off (the older-image guard, below). | Skipped and not recorded. The log has the WAITING line (below) once for each read that skips one, and otherwise about once an hour. |
 
-- **A start-over** happens on the first read (the Portal has no saved cursor), after a reset (below), and when Auth answers
-  409 `cursor_ahead`. In one transaction it raises `accounts_epoch`, empties the cursor and the rebuild's tables, sets
+- **A start-over** happens on the first read (the Portal has no saved cursor), after a reset (below), when Auth answers
+  409 `cursor_ahead`, and when the older-image guard (below) finds the cursor moved by an image from before migration 006.
+  In one transaction it raises `accounts_epoch`, empties the cursor (and its copy) and the rebuild's tables, sets
   `rebuilding` and makes the view incomplete. The live table is not touched, so the Stations see no superseded state.
   Each start-over reads the whole feed again, in pages of 100 with at most 10 pages a read, so a long feed takes several
-  reads, a second or more apart.
+  reads, a second or more apart. A read with no saved cursor starts over each time, so while Auth's feed is empty, or
+  while a first page keeps failing, every read starts over. That is harmless: the view is already incomplete, and the
+  Stations are told nothing more.
 - **Catching up.** When a read reaches the end of Auth's feed while `rebuilding`, in one transaction the Portal:
   1. compares the rebuild with the live table, and for each account whose state differs (an account missing from the
      rebuild counts as enabled) updates the live table and gives each active built-in Station one `account_disabled` or
@@ -816,17 +821,20 @@ checkpoint whether its view is complete. The one row of `auth_change_feed` says 
   move to `waiting`) each active built-in Station gets one `accounts_incomplete` change, in the same transaction. It
   means: from here the Portal's view is not complete; the next `accounts_baseline` change says it is again.
 - **The epoch fence.** A read pass applies account-level entries, and saves Auth's cursor, only in the epoch it began in.
-  A pass still running when another replica or a reset starts over stops with `Auth change not applied: stale_pass.`
-  without applying or saving anything, and the next read goes on from the saved cursor in the new epoch. Integration
-  entries are not fenced: each is applied once whatever the epoch. So a reset needs no replica stopped (below).
+  A pass still running when another replica or a reset starts over stops with `Auth change pass superseded by a reset:
+  read again.` without applying or saving anything, and the next read goes on from the saved cursor in the new epoch.
+  That line is expected after a reset, so don't alert on it. Integration entries are not fenced: each is applied once
+  whatever the epoch. So a reset needs no replica stopped (below).
 - **`waiting`** is where a skipped account-level entry leaves the Portal, and it stays there until the cursor is reset. An
   entry is skipped when its kind is not one the Portal follows (the setting is off), when it is not the shape Auth writes,
   or when it names a person as its actor without being an admin's (Auth never writes one). Nothing is forgotten and no
   availability changes, but the view is no longer complete, and if it had been, the Stations get `accounts_incomplete`
   once. A rebuild that meets the same entry again moves to `waiting` again, so the Portal fails closed until Auth's feed is
-  fixed. **The WAITING line** is logged once for each read while it waits:
-  `Account availability waits for Auth's change feed to be read again from the start: empty the Portal's Auth cursor with
-  every Portal replica stopped.`
+  fixed. **The WAITING line** is logged once for each read that skips an account-level entry while it waits, and at the
+  end of a read that skips none at most once an hour in each Portal process, so a Portal that waits says so however quiet
+  Auth's feed is:
+  `Account availability waits for Auth's change feed to be read again from the start: reset the Portal's Auth cursor
+  (docs/platform.md, "Resetting The Portal's Auth Cursor").`
 - **The setting-off rule.** With the setting off the hooks do nothing, so the Portal neither rebuilds nor applies an
   entry. It still moves to `waiting` and clears the complete mark the first time it skips an account-level entry (and a
   Portal that has no row yet creates it in `waiting` when it first saves Auth's cursor). That, with the owed flag below,
@@ -842,6 +850,25 @@ checkpoint whether its view is complete. The one row of `auth_change_feed` says 
   one an `account_disabled`, then `accounts_baseline` once the rebuild has caught up. A restore the Portal cannot see
   (Auth wrote entries past the Portal's cursor before the Portal read again, so the cursor looks valid and the lost
   entries keep their effect) needs the reset below, as Auth's restore runbook says.
+- **The older-image guard.** A Portal image from before migration 006 reads Auth's feed too, skips the account-level
+  entries without applying them, and saves its cursor past them; it writes `auth_change_feed.cursor` alone. This image
+  writes the same value to `accounts_cursor` every time it writes the cursor, so a cursor that differs from its copy was
+  moved by an older image. With the setting on, the next read logs `Auth change feed cursor was moved by an older Portal
+  image: account availability rebuilds.` and starts over, so the built-in Stations get `accounts_incomplete` if the view
+  was complete, and the rebuild ends as Auth's feed says. With the setting off, the Portal moves to `waiting` as a skipped
+  entry makes it (the setting-off rule, above), takes the cursor as it is and logs nothing new; it then needs the reset
+  below. Never run such an image next to this one while the setting is on ("Rolling Back, And After Restoring Auth").
+- **Log lines.** Besides the WAITING line, the older-image line and the superseded line, the Portal says how its view
+  changes in counts only, never naming an account: `Account availability rebuilt: <n> accounts changed.` when it adopts
+  a rebuild (`Account availability rebuilt: <n> accounts changed; complete.` when that completes the view),
+  `Account availability complete.` when a baseline applied live completes it, and `Account availability incomplete:
+  rebuilding.` or `Account availability incomplete: waiting.` when the built-in Stations are told the view is no longer
+  complete.
+- **Auth's setting off, the Portal's on.** The Portal can't tell that Auth's own `AUTH_DELEGATED_HOST_WORK` is off. Auth
+  then writes no account entry when an admin disables an account (only the per-integration entries, which the Portal
+  follows as pauses), so the Portal stays complete with that account missing from the disabled list, and a Station
+  treats it as enabled. That happens when the settings are turned off in the wrong order, or when Auth is rolled back to
+  an image without the setting. That is why Auth's setting goes on first and off last ("Turning On Delegated Host Work").
 
 #### Resetting The Portal's Auth Cursor
 
@@ -850,15 +877,17 @@ skipped, so reading again is safe. With the setting on it also starts account av
 this on the Portal's database:
 
 ```sql
-UPDATE auth_change_feed SET cursor = NULL, accounts_epoch = accounts_epoch + 1;
+UPDATE auth_change_feed SET cursor = NULL, accounts_cursor = NULL, accounts_epoch = accounts_epoch + 1;
 ```
 
 - **No replica needs stopping.** Raising the epoch fences any read that began before it: it applies no account entry and
-  saves no cursor (`Auth change not applied: stale_pass.`), and the next read starts over. A plain
-  `UPDATE auth_change_feed SET cursor = NULL;` is safe only with every Portal replica stopped, because a read in flight
-  saves its cursor again, and the log's WAITING line says that. The statement above does both jobs, whatever the setting.
+  saves no cursor (`Auth change pass superseded by a reset: read again.`), and the next read starts over. Emptying
+  `accounts_cursor` with the cursor keeps the reset from being taken for an older image's write (the older-image guard).
+  It works whatever the setting.
 - **The setting must be on for accounts.** A reset made while the setting is off re-reads the feed and does nothing for
-  account availability: the hooks do nothing then, so a Portal in `waiting` stays there. Reset again after the setting is on.
+  account availability: the hooks do nothing then, so a Portal in `waiting` stays there. Reset once every replica runs
+  with the setting on: a replica still running with it off skips the account entries again and moves the Portal back to
+  `waiting`.
 - **When it is needed.**
   - The log has the WAITING line.
   - The first time the setting is turned on after migration 006: every Portal that had read Auth's feed before it starts
@@ -910,7 +939,11 @@ Alert on the reader's log lines `Auth change feed read failed`, `Auth change not
 `Auth change feed not available yet`. While the reader is stalled an admin's change holds at Auth, which issues the
 integration no new token, but the Station is not told: an admin's pause is then enforced only by token expiry (at most
 300 seconds). With `DELEGATED_HOST_WORK=1` also alert on `Account availability waits for Auth's change feed…`: until an
-operator resets the cursor, the Portal follows no account change and the built-in Station's view is incomplete.
+operator resets the cursor, the Portal follows no account change and the built-in Station's view is incomplete. While it
+waits the line comes with every read that skips an account entry and otherwise about once an hour, so an alert that looks
+back over an hour or more always finds it. Alert as well on `Auth change feed cursor was moved by an older Portal image`
+(an image from before migration 006 is running: "Rolling Back, And After Restoring Auth"). `Auth change pass superseded by
+a reset: read again.` is expected after a reset and is not a failure: don't alert on it.
 
 Pauses an admin made through the D24 Portal's admin views, before Auth's migration 009, are not locks in the Portal
 either: Auth recorded nobody as their pauser, so `paused_by` is NULL and the owner may resume them. Pause again on the
@@ -953,6 +986,17 @@ Portal keep working.
   valid and would skip changes, so reset it by hand after every restore.
 - **After restoring the Portal's database** the Stations' own feed refuses an old cursor (see "Cursors"). The reader
   continues from the backup's cursor and applies again, by itself, the admin changes Auth made since the backup.
+- **Never run a Portal image from before migration 006 next to this one while `DELEGATED_HOST_WORK=1` is on**, in a
+  rolling deploy or a rollback. The older image reads Auth's feed too, skips the account-level entries unrecorded and
+  saves its cursor past them, so this image's view of the accounts could say complete with an admin's disable missing.
+  The older-image guard ("Account Availability") catches it: this image writes a copy of the cursor in `accounts_cursor`,
+  and a cursor that differs from it was moved by an older image. An operator then sees `Auth change feed cursor was moved
+  by an older Portal image: account availability rebuilds.` on this image's next read, which starts account availability
+  over (the built-in Stations get `accounts_incomplete`, then `accounts_baseline` once the rebuild has caught up). While
+  both images run the line comes back after each of the older image's saves and the view keeps rebuilding, so finish the
+  deploy or the rollback first. After a rollback to such an image and forward again, the line shows once and nothing else
+  is needed. With the setting off the guard moves the Portal to `waiting` instead, silently, and the cursor needs the
+  reset once every replica runs with the setting on.
 
 #### Turning On Delegated Host Work
 
@@ -964,14 +1008,18 @@ until then it describes behaviour nothing has yet. Turn the three settings on in
    `true` (an unticked revoke sends exactly what it sent before the setting, and Auth records a missing choice as
    `false`), and an Auth with its setting off refuses that unknown field with 400. So with the Portal's setting on and
    Auth's off, only a revoke that asks to interrupt fails, with Auth's 400; every other call works.
-2. **Then the Portal.** Set `DELEGATED_HOST_WORK=1` and restart it. Migrations 004 and 006 run when the server starts,
-   whatever the setting. While the setting was off the reader skipped Auth's new entries (an admin's interrupt requests
-   and account changes) and moved past them, and migration 006 put the Portal's account availability in `waiting` (it had
-   read Auth's feed already), so with the setting on it follows no account entry yet and logs the WAITING line. Reset the
-   cursor once, now that the setting is on (the statement, and what it does, are in "Resetting The Portal's Auth
-   Cursor"):
-   `UPDATE auth_change_feed SET cursor = NULL, accounts_epoch = accounts_epoch + 1;` on the Portal database. Reading
-   again is safe, since changes it applied are recognised and skipped, and no replica needs stopping. The Portal then
+2. **Then the Portal.** Set `DELEGATED_HOST_WORK=1` and restart it, every replica on an image with migration 006: never
+   leave one from before it running next to them while the setting is on (the older-image guard logs `Auth change feed
+   cursor was moved by an older Portal image: account availability rebuilds.` and keeps starting account availability
+   over; "Rolling Back, And After Restoring Auth"). Migrations 004 and 006 run when the server starts, whatever the
+   setting. While the setting was off the reader skipped Auth's new entries (an admin's interrupt requests and account
+   changes) and moved past them, and migration 006 put the Portal's account availability in `waiting` (it had read
+   Auth's feed already), so with the setting on it follows no account entry yet and logs the WAITING line, with its first
+   read and then about once an hour. Reset the cursor once every replica runs with the setting on (the statement, and
+   what it does, are in "Resetting The Portal's Auth Cursor"):
+   `UPDATE auth_change_feed SET cursor = NULL, accounts_cursor = NULL, accounts_epoch = accounts_epoch + 1;` on the
+   Portal database. Reading again is safe, since changes it applied are recognised and skipped, and no replica needs
+   stopping. The Portal then
    rebuilds account availability from Auth's first entry, and each built-in Station hears only the differences from what
    it was told before, then `accounts_baseline` once the rebuild has caught up with Auth's feed; the interrupt requests
    skipped while the setting was off come in too. To check it, once the reader has caught up, read
@@ -1360,7 +1408,7 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
 
   | Code | Refused when | Message |
   | --- | --- | --- |
-  | `report` | not an object; a field outside the form's own, so an `integrationId`, a field of the other binding form or of a revocation report | "Send a binding report as { state: "binding_changed", reportId, account, accountId, genesisHash, bindingId, version, bindingState } or { state: "binding_attempt", reportId, account, accountId, genesisHash, reason, attemptedAt }." |
+  | `report` | a field outside the form's own, so an `integrationId`, a field of the other binding form or of a revocation report | "Send a binding report as { state: "binding_changed", reportId, account, accountId, genesisHash, bindingId, version, bindingState } or { state: "binding_attempt", reportId, account, accountId, genesisHash, reason, attemptedAt }." |
   | `report_id` | missing, or not 1 to 128 characters of `[A-Za-z0-9._:-]` | "Send the reportId as 1 to 128 characters of letters, digits, '.', '_', ':' or '-'." |
   | `account` | missing, or not an Agora.Build account ID: `ab` and 26 upper-case Crockford base32 characters | "Name the account as ab and 26 letters or digits." |
   | `account_id` | missing, or not 1 to 128 characters of `[A-Za-z0-9._:-]` | "Send the accountId as 1 to 128 characters of letters, digits, '.', '_', ':' or '-'." |
@@ -1638,8 +1686,8 @@ as recorded.
   neither the changes nor `disabledAccounts`. `disabledAccounts` has no completeness mark: to know whether an account
   missing from it is enabled, read the checkpoint and its `accounts.complete`. The built-in Station's feed has two more
   account-level changes, `accounts_baseline` and `accounts_incomplete`, and the checkpoint gives its whole state at one
-  cursor: "The checkpoint" and "Account availability", below. Provisional: Atem's design (III.5) defines these feed
-  entries jointly with Astation, so the shape of the account changes and of `disabledAccounts` may change.
+  cursor: "The checkpoint" and "Account availability", below. The account changes and `disabledAccounts` are final from
+  Auth's and the Portal's side.
 - **Expiry never produces a control record.** Each integration's effective state counts only a pause (by the owner, a
   Station owner or an admin) and a disabled owner account. Expiry never produces a control record: the Station's current
   rule that "an expired integration is treated like a pause" applies to API access only. For delegated senders, work
@@ -1806,7 +1854,8 @@ Changes From Auth") and keeps them in one durable table.
 - **Reconnect or reset.** After 409 `cursor_ahead`, a restore, or any doubt, read the checkpoint again.
 - **Turning the setting off.** If Auth's setting is turned off, Auth writes no account entries meanwhile. The next start
   with it on writes the corrections and a new baseline. For the Portal's own setting, see "Account Availability".
-- Provisional: Atem's design (III.5) defines these entries jointly with Astation, so they may still change.
+- These account changes are final from Auth's and the Portal's side. Only the grammar of the binding reports' fields
+  stays provisional (below).
 
 **The built-in Station's binding reports.** The ownership rules stay the Station's, as Atem's design (III.5) says: the
 native-manager proof and challenge bytes, consent for transfers, refusals, and closing routes and channels. The Portal

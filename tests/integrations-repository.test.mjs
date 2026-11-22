@@ -265,7 +265,7 @@ test("Auth's change feed cursor starts empty and is saved as given; an applied c
   const { repo, db } = await setup(t);
   if (!repo) return;
   const cursor = async () => (await repo.authChangePlace()).cursor;
-  assert.deepEqual(await repo.authChangePlace(), { cursor: null, epoch: 0 });
+  assert.deepEqual(await repo.authChangePlace(), { cursor: null, epoch: 0, foreign: false });
   await repo.saveAuthChangeCursor("YzEy");
   assert.equal(await cursor(), "YzEy");
   for (const bad of ["", "has space", "x".repeat(65), 12, undefined, {}]) await assert.rejects(repo.saveAuthChangeCursor(bad), TypeError, JSON.stringify(bad));
@@ -274,7 +274,7 @@ test("Auth's change feed cursor starts empty and is saved as given; an applied c
   assert.equal(await cursor(), null, "null resets the cursor to re-read Auth's feed from the start");
   await repo.saveAuthChangeCursor("YzEy");
   await db.pool.query("DELETE FROM auth_change_feed");
-  assert.deepEqual(await repo.authChangePlace(), { cursor: null, epoch: 0 }, "a missing row reads as no cursor");
+  assert.deepEqual(await repo.authChangePlace(), { cursor: null, epoch: 0, foreign: false }, "a missing row reads as no cursor");
   await repo.saveAuthChangeCursor("YzEz");
   assert.equal(await cursor(), "YzEz", "saving heals a missing row");
   assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM auth_change_feed")).rows[0].n, 1);
@@ -586,7 +586,7 @@ test("the accounts' sync state starts rebuilding in epoch 0; a start-over raises
   await assert.rejects(repo.startAccountsOver(), TypeError, "a start-over is one transaction");
   assert.equal(await db.transaction((client) => repo.startAccountsOver(client)), 1);
   assert.deepEqual(await repo.accountSync(), { ...fresh, epoch: 1 });
-  assert.deepEqual(await repo.authChangePlace(), { cursor: null, epoch: 1 }, "the cursor is emptied with the epoch");
+  assert.deepEqual(await repo.authChangePlace(), { cursor: null, epoch: 1, foreign: false }, "the cursor is emptied with the epoch");
   assert.deepEqual(await counts(), { entries: 0, availability: 0 }, "and the rebuild");
   for (const mode of ["live", "waiting"]) {
     await repo.setAccountsMode(mode);
@@ -615,12 +615,12 @@ test("a read pass's cursor is saved only in the epoch it began in", async (t) =>
   const { repo, db } = await setup(t);
   if (!repo) return;
   assert.equal(await repo.moveAuthChangeCursor("YzEy", 0), true);
-  assert.deepEqual(await repo.authChangePlace(), { cursor: "YzEy", epoch: 0 });
+  assert.deepEqual(await repo.authChangePlace(), { cursor: "YzEy", epoch: 0, foreign: false });
   await db.transaction((client) => repo.startAccountsOver(client));
   assert.equal(await repo.moveAuthChangeCursor("YzEz", 0), false, "a pass that began before the start-over");
-  assert.deepEqual(await repo.authChangePlace(), { cursor: null, epoch: 1 });
+  assert.deepEqual(await repo.authChangePlace(), { cursor: null, epoch: 1, foreign: false });
   assert.equal(await repo.moveAuthChangeCursor("YzEz", 1), true);
-  assert.deepEqual(await repo.authChangePlace(), { cursor: "YzEz", epoch: 1 });
+  assert.deepEqual(await repo.authChangePlace(), { cursor: "YzEz", epoch: 1, foreign: false });
   for (const bad of [null, "", "has space"]) await assert.rejects(repo.moveAuthChangeCursor(bad, 1), TypeError, String(bad));
   for (const bad of [undefined, -1, 1.5, "1"]) await assert.rejects(repo.moveAuthChangeCursor("YzE0", bad), TypeError, String(bad));
   // A save that waits for a start-over in flight (the row's lock) is decided on the epoch the start-over commits.
@@ -635,10 +635,52 @@ test("a read pass's cursor is saved only in the epoch it began in", async (t) =>
   } finally {
     client.release();
   }
-  assert.deepEqual(await repo.authChangePlace(), { cursor: null, epoch: 2 });
+  assert.deepEqual(await repo.authChangePlace(), { cursor: null, epoch: 2, foreign: false });
   await db.pool.query("DELETE FROM auth_change_feed");
   assert.equal(await repo.moveAuthChangeCursor("YzE2", 5), true, "a missing row is made");
-  assert.deepEqual([await repo.authChangePlace(), (await repo.accountSync()).mode], [{ cursor: "YzE2", epoch: 5 }, "waiting"]);
+  assert.deepEqual([await repo.authChangePlace(), (await repo.accountSync()).mode], [{ cursor: "YzE2", epoch: 5, foreign: false }, "waiting"]);
+});
+
+// An image from before migration 006 saves Auth's cursor alone. This one writes accounts_cursor with it, always the same
+// value, so a cursor the older image moved (perhaps past account-level entries it skipped unrecorded) reads as foreign
+// (D29, the reader's guard).
+test("the cursor is written with its copy, accounts_cursor, by every writer of this image; a cursor moved without it reads as foreign until the copy is taken up", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  const row = async () => (await db.pool.query("SELECT cursor, accounts_cursor FROM auth_change_feed")).rows[0];
+  // The save of an image from before 006, exactly as it was.
+  const olderSave = (cursor) => db.pool.query("INSERT INTO auth_change_feed (id, cursor) VALUES (true, $1) ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = now()", [cursor]);
+  assert.deepEqual(await row(), { cursor: null, accounts_cursor: null });
+  await repo.saveAuthChangeCursor("YzEy");
+  assert.deepEqual(await row(), { cursor: "YzEy", accounts_cursor: "YzEy" });
+  assert.equal(await repo.moveAuthChangeCursor("YzEz", 0), true);
+  assert.deepEqual(await row(), { cursor: "YzEz", accounts_cursor: "YzEz" });
+  assert.equal(await repo.moveAuthChangeCursor("YzE0", 3), false);
+  assert.deepEqual(await row(), { cursor: "YzEz", accounts_cursor: "YzEz" }, "a stale pass writes neither");
+  assert.deepEqual(await repo.authChangePlace(), { cursor: "YzEz", epoch: 0, foreign: false });
+
+  await olderSave("YzE1");
+  assert.deepEqual(await repo.authChangePlace(), { cursor: "YzE1", epoch: 0, foreign: true }, "moved by an older image");
+  await repo.acceptAuthChangeCursor();
+  assert.deepEqual([await row(), (await repo.authChangePlace()).foreign], [{ cursor: "YzE1", accounts_cursor: "YzE1" }, false], "the copy is taken up as it is");
+  await olderSave(null);
+  assert.equal((await repo.authChangePlace()).foreign, true, "an older image's reset too");
+  assert.equal(await db.transaction((client) => repo.startAccountsOver(client)), 1);
+  assert.deepEqual([await row(), await repo.authChangePlace()], [{ cursor: null, accounts_cursor: null }, { cursor: null, epoch: 1, foreign: false }], "a start-over empties both");
+  await olderSave("YzE2");
+  await repo.saveAuthChangeCursor(null);
+  assert.deepEqual(await row(), { cursor: null, accounts_cursor: null }, "a reset by this image empties both");
+
+  // A row made by a save is made with the copy; one an older image made has none.
+  for (const save of [() => repo.saveAuthChangeCursor("YzE3"), () => repo.moveAuthChangeCursor("YzE3", 4)]) {
+    await db.pool.query("DELETE FROM auth_change_feed");
+    await save();
+    assert.deepEqual(await row(), { cursor: "YzE3", accounts_cursor: "YzE3" });
+  }
+  await db.pool.query("DELETE FROM auth_change_feed");
+  await olderSave("YzE4");
+  assert.equal((await repo.authChangePlace()).foreign, true);
+  await assert.rejects(db.pool.query("UPDATE auth_change_feed SET accounts_cursor = 'not a cursor!'"), { code: "23514" }, "the copy is checked as the cursor is");
 });
 
 // A rebuild applies Auth's feed to tables of its own; at its end the Portal compares them with the live table and adopts

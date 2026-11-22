@@ -264,13 +264,20 @@ test("migration 006 adds the availability, applied-entry, rebuild, baseline and 
     await assert.rejects(entry("YzEy", "2026-11-10T10:00:00Z", "ab2"), { code: "23505" }, table);
     await entry("YzEy", "2026-11-10T11:00:00Z", "ab1");
     await entry("YzEz", "2026-11-10T10:00:00Z", null, "accounts_baseline");
+    await entry("YzE0", "2026-11-10T10:00:00Z", "ab1", "account_enabled");
+    // Only the three account-level kinds of Auth's feed: never the Portal's own accounts_incomplete, or another kind.
+    for (const kind of ["accounts_incomplete", "paused", "account_deleted", ""]) await assert.rejects(entry("YzE1", "2026-11-10T10:00:00Z", "ab1", kind), { code: "23514" }, table + ": " + kind);
     await assert.rejects(q("INSERT INTO " + table + " (auth_cursor, auth_at, kind) VALUES ('c', now(), NULL)"), { code: "23502" }, table);
     assert.ok((await q("SELECT applied_at FROM " + table + " LIMIT 1")).rows[0].applied_at instanceof Date, table);
   }
 
-  // How the Portal follows Auth's accounts sits on the feed's one row: a fresh Portal starts rebuilding, in epoch 0.
-  assert.deepEqual((await q("SELECT accounts_mode, accounts_epoch, rebuild_baseline_cursor, rebuild_baseline_at, accounts_incomplete_owed FROM auth_change_feed")).rows,
-    [{ accounts_mode: "rebuilding", accounts_epoch: "0", rebuild_baseline_cursor: null, rebuild_baseline_at: null, accounts_incomplete_owed: false }]);
+  // How the Portal follows Auth's accounts sits on the feed's one row: a fresh Portal starts rebuilding, in epoch 0, with
+  // no cursor and no copy of one.
+  assert.deepEqual((await q("SELECT accounts_mode, accounts_epoch, rebuild_baseline_cursor, rebuild_baseline_at, accounts_incomplete_owed, accounts_cursor FROM auth_change_feed")).rows,
+    [{ accounts_mode: "rebuilding", accounts_epoch: "0", rebuild_baseline_cursor: null, rebuild_baseline_at: null, accounts_incomplete_owed: false, accounts_cursor: null }]);
+  await q("UPDATE auth_change_feed SET accounts_cursor = 'YzEy'");
+  await assert.rejects(q("UPDATE auth_change_feed SET accounts_cursor = 'not a cursor!'"), { code: "23514" });
+  await q("UPDATE auth_change_feed SET accounts_cursor = NULL");
   for (const mode of ["live", "waiting", "rebuilding"]) await q("UPDATE auth_change_feed SET accounts_mode = $1", [mode]);
   await assert.rejects(q("UPDATE auth_change_feed SET accounts_mode = 'off'"), { code: "23514" });
   await assert.rejects(q("UPDATE auth_change_feed SET accounts_mode = NULL"), { code: "23502" });
@@ -330,8 +337,9 @@ test("migration 006 adds the availability, applied-entry, rebuild, baseline and 
 });
 
 // No Portal before 006 applied an account-level entry of Auth's feed: one that had read some of the feed skipped those in
-// it unrecorded, so it waits for an operator to empty its cursor; one that had read nothing starts by rebuilding.
-test("migration 006 makes a Portal that had already read Auth's feed wait for a reset, and one that had read nothing rebuild", async (t) => {
+// it unrecorded, so it waits for an operator to reset its cursor; one that had read nothing starts by rebuilding. Either
+// way the copy of the cursor is the cursor, so the migration itself is not taken for an older image's write.
+test("migration 006 makes a Portal that had already read Auth's feed wait for a reset, and one that had read nothing rebuild, each with its cursor copied", async (t) => {
   for (const [cursor, mode] of [["YzEy", "waiting"], [null, "rebuilding"]]) {
     const open = await emptySchema(t);
     if (!open) return t.skip("PORTAL_TEST_DATABASE_URL is not set");
@@ -345,7 +353,7 @@ test("migration 006 makes a Portal that had already read Auth's feed wait for a 
     });
     await db.pool.query("UPDATE auth_change_feed SET cursor = $1", [cursor]);
     assert.deepEqual(await db.migrate(), ["006_availability_bindings.sql"]);
-    assert.deepEqual((await db.pool.query("SELECT cursor, accounts_mode, accounts_epoch FROM auth_change_feed")).rows, [{ cursor, accounts_mode: mode, accounts_epoch: "0" }], String(cursor));
+    assert.deepEqual((await db.pool.query("SELECT cursor, accounts_cursor, accounts_mode, accounts_epoch FROM auth_change_feed")).rows, [{ cursor, accounts_cursor: cursor, accounts_mode: mode, accounts_epoch: "0" }], String(cursor));
   }
 });
 

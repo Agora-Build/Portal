@@ -410,28 +410,38 @@ export function createRepository(db) {
 
     // Where the Portal is in Auth's change feed (auth-changes.mjs): Auth's opaque cursor, or null before the first page,
     // and the epoch of the Portal's following of Auth's accounts (D29), read together so a read pass begins in the epoch
-    // its cursor was saved in. A missing row reads as no cursor, in epoch 0.
+    // its cursor was saved in. `foreign` says the cursor differs from its copy (accounts_cursor), which every writer
+    // here writes with it: an image from before migration 006, which writes the cursor alone, moved it. A missing row
+    // reads as no cursor, in epoch 0.
     async authChangePlace(client) {
-      const { rows } = await run(client, "SELECT cursor, accounts_epoch FROM auth_change_feed WHERE id");
-      return { cursor: rows[0]?.cursor ?? null, epoch: rows[0] ? Number(rows[0].accounts_epoch) : 0 };
+      const { rows } = await run(client, "SELECT cursor, accounts_epoch, cursor IS DISTINCT FROM accounts_cursor AS foreign FROM auth_change_feed WHERE id");
+      return { cursor: rows[0]?.cursor ?? null, epoch: rows[0] ? Number(rows[0].accounts_epoch) : 0, foreign: rows[0]?.foreign === true };
     },
 
     // null resets it, to read Auth's feed again from the start. The row is created when it is missing, waiting (D29): it
-    // knows nothing of what the Portal followed of Auth's accounts.
+    // knows nothing of what the Portal followed of Auth's accounts. Like every save here, it writes the copy too.
     async saveAuthChangeCursor(cursor, client) {
       if (cursor !== null && (typeof cursor !== "string" || !AUTH_CURSOR.test(cursor))) throw new TypeError("An Auth change cursor is 1 to 64 base64url characters, or null.");
-      await run(client, "INSERT INTO auth_change_feed (id, cursor, accounts_mode) VALUES (true, $1, 'waiting') ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = now()", [cursor]);
+      await run(client,
+        "INSERT INTO auth_change_feed (id, cursor, accounts_cursor, accounts_mode) VALUES (true, $1, $1, 'waiting') ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor, accounts_cursor = EXCLUDED.cursor, updated_at = now()",
+        [cursor]);
     },
 
-    // The cursor a read pass reached, saved only while the epoch is still the one the pass began in: a start-over raises
-    // it, so a pass that began before one saves nothing (D29). Returns whether it was saved. A missing row is created as
-    // saveAuthChangeCursor creates it.
+    // The cursor a read pass reached, saved (with its copy) only while the epoch is still the one the pass began in: a
+    // start-over raises it, so a pass that began before one saves nothing (D29). Returns whether it was saved. A missing
+    // row is created as saveAuthChangeCursor creates it.
     async moveAuthChangeCursor(cursor, epoch, client) {
       if (!Number.isSafeInteger(epoch) || epoch < 0) throw new TypeError("An epoch is a non-negative integer.");
       const { rowCount } = await run(client,
-        "INSERT INTO auth_change_feed (id, cursor, accounts_mode, accounts_epoch) VALUES (true, $1, 'waiting', $2) ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = now() WHERE auth_change_feed.accounts_epoch = EXCLUDED.accounts_epoch",
+        "INSERT INTO auth_change_feed (id, cursor, accounts_cursor, accounts_mode, accounts_epoch) VALUES (true, $1, $1, 'waiting', $2) ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor, accounts_cursor = EXCLUDED.cursor, updated_at = now() WHERE auth_change_feed.accounts_epoch = EXCLUDED.accounts_epoch",
         [authCursorOf(cursor), epoch]);
       return rowCount > 0;
+    },
+
+    // Takes the saved cursor as it is, an older image's included: its copy is set to it (service.accountsForeignCursor,
+    // with the setting off, once it has made the Portal wait).
+    async acceptAuthChangeCursor(client) {
+      await run(client, "UPDATE auth_change_feed SET accounts_cursor = cursor WHERE id");
     },
 
     // How the Portal follows Auth's accounts (D29, service.accountChange): { mode, epoch, incompleteOwed, rebuildBaseline }.
@@ -460,13 +470,13 @@ export function createRepository(db) {
     },
 
     // A start-over (service.accountsStartingOver): the epoch is raised, the mode set to rebuilding, the rebuild emptied
-    // (the baseline it saw too) and Auth's cursor emptied with them, so a read pass in the new epoch begins at the feed's
-    // first entry or at a cursor a pass in that epoch saved. Returns the new epoch. The live tables are left alone. In the
-    // caller's transaction; the row is created when it is missing.
+    // (the baseline it saw too) and Auth's cursor emptied with them, its copy too, so a read pass in the new epoch begins
+    // at the feed's first entry or at a cursor a pass in that epoch saved. Returns the new epoch. The live tables are left
+    // alone. In the caller's transaction; the row is created when it is missing.
     async startAccountsOver(client) {
       if (!client) throw new TypeError("startAccountsOver needs a transaction client.");
       const { rows: [row] } = await client.query(
-        "INSERT INTO auth_change_feed (id, cursor, accounts_mode, accounts_epoch) VALUES (true, NULL, 'rebuilding', 1) ON CONFLICT (id) DO UPDATE SET cursor = NULL, accounts_mode = 'rebuilding', accounts_epoch = auth_change_feed.accounts_epoch + 1, rebuild_baseline_cursor = NULL, rebuild_baseline_at = NULL, updated_at = now() RETURNING accounts_epoch");
+        "INSERT INTO auth_change_feed (id, cursor, accounts_mode, accounts_epoch) VALUES (true, NULL, 'rebuilding', 1) ON CONFLICT (id) DO UPDATE SET cursor = NULL, accounts_cursor = NULL, accounts_mode = 'rebuilding', accounts_epoch = auth_change_feed.accounts_epoch + 1, rebuild_baseline_cursor = NULL, rebuild_baseline_at = NULL, updated_at = now() RETURNING accounts_epoch");
       await client.query("DELETE FROM auth_account_entries_rebuild");
       await client.query("DELETE FROM account_availability_rebuild");
       return Number(row.accounts_epoch);

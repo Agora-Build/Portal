@@ -37,21 +37,26 @@ function watched(list = []) {
 }
 const HOUR = 3600000;
 const RECOVERED = "Auth change feed read again.";
+const SUPERSEDED = "Auth change pass superseded by a reset: read again.";
+const OLDER_IMAGE = "Auth change feed cursor was moved by an older Portal image: account availability rebuilds.";
 const CURSOR_AHEAD = "Auth change feed cursor is ahead of Auth (restored from a backup?): reading the feed again from the start.";
 // The Portal's saved cursor and the epoch it is in (D29: a start-over raises it); `fail` makes reading them throw. A
 // page's cursor is saved only in the epoch the read pass began in, as repository.moveAuthChangeCursor does; `saved` has
-// every cursor saved, the resets included.
-function memoryCursor(cursor = null, epoch = 0) {
+// every cursor saved, the resets included. `foreign` says an older Portal image moved the cursor (it writes the cursor
+// without its copy); a save by this image writes both, so it is no longer foreign.
+function memoryCursor(cursor = null, epoch = 0, { foreign = false } = {}) {
   const repository = {
     cursor,
     epoch,
+    foreign,
     saved: [],
     fail: null,
-    async authChangePlace() { if (repository.fail) throw repository.fail; return { cursor: repository.cursor, epoch: repository.epoch }; },
-    async saveAuthChangeCursor(next) { repository.cursor = next; repository.saved.push(next); },
+    async authChangePlace() { if (repository.fail) throw repository.fail; return { cursor: repository.cursor, epoch: repository.epoch, foreign: repository.foreign }; },
+    async saveAuthChangeCursor(next) { repository.cursor = next; repository.foreign = false; repository.saved.push(next); },
     async moveAuthChangeCursor(next, passEpoch) {
       if (passEpoch !== repository.epoch) return false;
       repository.cursor = next;
+      repository.foreign = false;
       repository.saved.push(next);
       return true;
     }
@@ -91,11 +96,11 @@ function feedOf(count) {
   return manage;
 }
 const QUICK = { pollMs: 3600000, minGapMs: 20, pageSize: 2, pagesPerPull: 3 };
-function reader(t, { manage, repository = memoryCursor(), apply, log = () => {}, settings = {}, now, startingOver, caughtUp }) {
+function reader(t, { manage, repository = memoryCursor(), apply, log = () => {}, settings = {}, now, startingOver, caughtUp, foreignCursor }) {
   const applied = [];
   const feed = createAuthChanges({
     repository, manage, log, settings: { ...QUICK, ...settings }, apply: apply ?? (async (change) => { applied.push(change.cursor); }),
-    ...(now ? { now } : {}), ...(startingOver ? { startingOver } : {}), ...(caughtUp ? { caughtUp } : {})
+    ...(now ? { now } : {}), ...(startingOver ? { startingOver } : {}), ...(caughtUp ? { caughtUp } : {}), ...(foreignCursor ? { foreignCursor } : {})
   });
   t.after(() => feed.stop());
   return { feed, applied, repository };
@@ -479,7 +484,7 @@ test("a read pass hands each change and its end the epoch it began in: the saved
   }
 });
 
-test("a page's cursor is not saved once another replica has started the feed over: the read stops there with the stale-pass line, before its next page and its end; the next read goes on in the new epoch", async (t) => {
+test("a page's cursor is not saved once another replica has started the feed over: the read stops there with the superseded line, before its next page and its end; the next read goes on in the new epoch", async (t) => {
   const manage = feedOf(6);
   const logs = [];
   const hooks = hooked();
@@ -495,15 +500,15 @@ test("a page's cursor is not saved once another replica has started the feed ove
   } });
   feed.start();
   await feed.idle();
-  assert.deepEqual([hooks.events.slice(), repository.saved, manage.reads.length, logs], [["apply c2", "apply c3"], [], 1, ["Auth change not applied: stale_pass."]]);
+  assert.deepEqual([hooks.events.slice(), repository.saved, manage.reads.length, logs], [["apply c2", "apply c3"], [], 1, [SUPERSEDED]]);
   feed.request();
   await feed.idle();
   assert.deepEqual(hooks.events.slice(2), ["apply c2", "apply c3", "apply c4", "apply c5", "apply c6", "caught up"]);
   assert.deepEqual(repository.saved, ["c3", "c5", "c6"]);
-  assert.deepEqual(logs, ["Auth change not applied: stale_pass.", RECOVERED]);
+  assert.deepEqual(logs, [SUPERSEDED], "a superseded pass is not a failure: nothing to recover from");
 });
 
-test("a change the service refuses as from a stale pass stops the read before its page's cursor is saved, logged by its code", async (t) => {
+test("a change the service refuses as from a stale pass stops the read before its page's cursor is saved, with the superseded line, never a failure's; a superseded pass during a failure leaves the failure as it was", async (t) => {
   const manage = feedOf(3);
   const logs = [];
   const { feed, repository } = reader(t, { manage, log: (line) => logs.push(line), settings: { pageSize: 10 }, apply: async (change) => {
@@ -511,5 +516,69 @@ test("a change the service refuses as from a stale pass stops the read before it
   } });
   feed.start();
   await feed.idle();
-  assert.deepEqual([repository.saved, logs], [[], ["Auth change not applied: stale_pass."]]);
+  assert.deepEqual([repository.saved, logs], [[], [SUPERSEDED]]);
+  // Each superseded pass says so (it is not throttled like a failure), and a failure logged before one is still said to
+  // have ended once reads work again.
+  feed.request();
+  await feed.idle();
+  assert.deepEqual(logs, [SUPERSEDED, SUPERSEDED]);
+  const failing = memoryCursor();
+  const failingLogs = [];
+  let stale = false;
+  const other = reader(t, { manage: feedOf(2), repository: failing, log: (line) => failingLogs.push(line), settings: { pageSize: 10 }, apply: async () => {
+    if (stale) throw Object.assign(new Error("stale"), { code: "stale_pass" });
+  } });
+  failing.fail = Object.assign(new Error("down"), { code: "ECONNREFUSED" });
+  other.feed.start();
+  await other.feed.idle();
+  failing.fail = null;
+  stale = true;
+  other.feed.request();
+  await other.feed.idle();
+  stale = false;
+  other.feed.request();
+  await other.feed.idle();
+  assert.deepEqual(failingLogs, ["Auth change feed failed: ECONNREFUSED.", SUPERSEDED, RECOVERED]);
+});
+
+// An image from before migration 006 saves the cursor alone, so it may have moved it past account-level entries it never
+// applied (D29). The reader asks the service what to do once per read that finds such a cursor: start over (the setting
+// on), with one fixed line, or read on from it (off; the service then waits instead).
+test("a cursor moved by an older Portal image is put to the foreignCursor hook: when it says start over the read logs the fixed line and reads from the first entry; otherwise it reads on, logging nothing", async (t) => {
+  const events = watched();
+  const hooks = {
+    apply: async (change) => { events.push("apply " + change.cursor); },
+    caughtUp: async () => { events.push("caught up"); }
+  };
+  const logs = [];
+  const repository = memoryCursor("c2", 3, { foreign: true });
+  const { feed } = reader(t, { manage: feedOf(3), repository, log: (line) => logs.push(line), settings: { pageSize: 5 }, ...hooks,
+    foreignCursor: async () => { events.push("foreign"); return true; },
+    startingOver: async () => { events.push("starting over"); repository.cursor = null; repository.foreign = false; repository.epoch += 1; } });
+  feed.start();
+  await feed.idle();
+  assert.deepEqual(events, ["foreign", "starting over", "apply c1", "apply c2", "apply c3", "caught up"]);
+  assert.deepEqual(logs, [OLDER_IMAGE]);
+  // The next read finds the cursor this image saved: nothing to ask.
+  feed.request();
+  await feed.idle();
+  assert.deepEqual(events.slice(6), ["caught up"]);
+
+  const quiet = [];
+  const offEvents = [];
+  const off = memoryCursor("c2", 0, { foreign: true });
+  const manage = feedOf(3);
+  const kept = reader(t, { manage, repository: off, log: (line) => quiet.push(line), settings: { pageSize: 5 }, apply: async (change) => { offEvents.push("apply " + change.cursor); },
+    foreignCursor: async () => { offEvents.push("foreign"); off.foreign = false; return false; },
+    startingOver: async () => { offEvents.push("starting over"); } });
+  kept.feed.start();
+  await kept.feed.idle();
+  assert.deepEqual([offEvents, manage.reads.map((read) => read.after), quiet], [["foreign", "apply c3"], ["c2"], []]);
+
+  // Without the hook (a reader not wired for D29) the cursor is read on from, as before.
+  const plain = memoryCursor("c2", 0, { foreign: true });
+  const { feed: before, applied } = reader(t, { manage: feedOf(3), repository: plain, settings: { pageSize: 5 } });
+  before.start();
+  await before.idle();
+  assert.deepEqual(applied, ["c3"]);
 });

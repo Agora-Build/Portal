@@ -3,6 +3,7 @@
 // the admin site's calls and Auth's own changes (Auth D26 Tasks 13 and 14).
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createAuthChanges } from "../scripts/integrations/auth-changes.mjs";
 import { createRepository } from "../scripts/integrations/repository.mjs";
@@ -146,7 +147,7 @@ async function setup(t, { delegatedHostWork = false, authDelegated = delegatedHo
         await each?.(change, result);
         return result;
       },
-      startingOver: () => on.accountsStartingOver(), caughtUp: (readPass) => on.accountsCaughtUp(readPass)
+      startingOver: () => on.accountsStartingOver(), caughtUp: (readPass) => on.accountsCaughtUp(readPass), foreignCursor: () => on.accountsForeignCursor()
     });
     t.after(() => {
       for (const held of gates) held.open();
@@ -1042,8 +1043,8 @@ test("with the setting on, account entries apply in Auth's feed order whatever A
   assert.deepEqual(await s.repository.disabledAccountList(), [THIRD]);
 });
 
-const WAITING = "Account availability waits for Auth's change feed to be read again from the start: empty the Portal's Auth cursor with every Portal replica stopped.";
-const STALE_PASS = "Auth change not applied: stale_pass.";
+const WAITING = "Account availability waits for Auth's change feed to be read again from the start: reset the Portal's Auth cursor (docs/platform.md, \"Resetting The Portal's Auth Cursor\").";
+const STALE_PASS = "Auth change pass superseded by a reset: read again.";
 const CURSOR_AHEAD = "Auth change feed cursor is ahead of Auth (restored from a backup?): reading the feed again from the start.";
 const READ_AGAIN = "Auth change feed read again.";
 
@@ -1140,7 +1141,7 @@ test("P2: a reset after a skip rebuilds without replaying history: no Station he
 // P3. Every start-over raises the epoch, and a read pass applies account-level entries only in the epoch it began in. One
 // that was in flight when another replica started over is fenced, so it can never apply a newer entry ahead of the
 // rebuild's older ones.
-test("P3: a start-over while another replica's read is in flight, past an entry skipped with the setting off, fences that read: it stops with the stale-pass line, and the rebuild ends as Auth's feed says", async (t) => {
+test("P3: a start-over while another replica's read is in flight, past an entry skipped with the setting off, fences that read: it stops with the superseded line, and the rebuild ends as Auth's feed says", async (t) => {
   const s = await setup(t, { delegatedHostWork: true, fresh: true });
   if (!s) return;
   const a = s.replica();
@@ -1184,7 +1185,7 @@ test("P3: a start-over while another replica's read is in flight, past an entry 
   // A's next read is in the new epoch, from B's cursor: nothing is left to do.
   readerA.request();
   await readerA.idle();
-  assert.deepEqual(a.logs, [STALE_PASS, READ_AGAIN]);
+  assert.deepEqual(a.logs, [STALE_PASS], "a superseded pass is no failure, so nothing says reads work again");
   assert.deepEqual(await s.told(s.built, start), [["accounts_incomplete", null], ["accounts_baseline", null]]);
 });
 
@@ -1299,7 +1300,7 @@ test("P6: two fresh replicas over a long feed rebuild it between them in Auth's 
   assert.ok(seen.length >= 81, String(seen.length));
   assert.ok(seen.some((entry) => entry.mode === "rebuilding"));
   assert.deepEqual(seen.filter((entry) => entry.mode === "rebuilding" && entry.complete), [], "never complete mid-rebuild");
-  assert.deepEqual([...a.logs, ...b.logs].filter((line) => line !== STALE_PASS && line !== READ_AGAIN), []);
+  assert.deepEqual([...a.logs, ...b.logs].filter((line) => line !== STALE_PASS), ["Account availability rebuilt: " + disabled.length + " accounts changed; complete."], "one adopted the rebuild");
 
   // A reset, and two replicas sharing one epoch: B begins while A's rebuild is under way, at the cursor A saved, and they
   // apply the rest between them, each entry once.
@@ -1314,17 +1315,217 @@ test("P6: two fresh replicas over a long feed rebuild it between them in Auth's 
   } });
   const then = s.reader({ service: b.service, log: b.logs, pageSize: 7, pagesPerPull: 2, each: async (change, result) => shared.push(["b", result, await s.view()]) });
   a.logs.length = 0;
+  b.logs.length = 0;
   first.start();
   await underWay;
   then.start();
   await Promise.all([first.idle(), then.idle()]);
-  assert.deepEqual([...a.logs, ...b.logs], [], "one epoch: neither is fenced");
+  assert.deepEqual([...a.logs, ...b.logs], ["Account availability incomplete: rebuilding.", "Account availability rebuilt: 0 accounts changed; complete."], "one epoch: neither is fenced");
   assert.ok(shared.some(([who]) => who === "b"), "B applied some");
   assert.equal(shared.filter(([, result]) => result === "applied").length, 81, "each entry applied once between them");
   assert.deepEqual(shared.filter(([, , view]) => view.mode === "rebuilding" && view.complete), []);
   assert.deepEqual(await s.told(s.built, start), [["accounts_incomplete", null], ["accounts_baseline", null]], "nothing differs");
   assert.deepEqual(await s.repository.disabledAccountList(), disabled);
   assert.equal(await s.repository.baselineApplied(), true);
+});
+
+const OLDER_IMAGE = "Auth change feed cursor was moved by an older Portal image: account availability rebuilds.";
+// The cursor save of a Portal image from before migration 006, exactly as it was: Auth's cursor alone.
+const olderSave = (s, cursor) => s.db.pool.query("INSERT INTO auth_change_feed (id, cursor) VALUES (true, $1) ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = now()", [cursor]);
+
+// I1. An image from before migration 006 skips Auth's account-level entries unrecorded and saves its cursor without the
+// copy this image writes with it (accounts_cursor). The reader takes a cursor that differs from its copy for such a write:
+// with the setting on it starts over, and with it off the Portal waits, as an entry skipped with the setting off makes it.
+test("I1: a cursor an older Portal image moved makes the next read start over with the setting on, with one fixed line; with it off the Portal moves to waiting, owing the Stations the news, and logs nothing new", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true, fresh: true });
+  if (!s) return;
+  const second = await secondBuiltIn(s);
+  const id = await s.ready();
+  const later = await s.ready();
+  s.manage.accountChange(OWNER, true, { actor: ADMIN, reason: "Abuse" });
+  s.manage.baselineChange();
+  await s.readAll();
+  assert.deepEqual(await s.view(), { mode: "live", complete: true });
+  const start = {};
+  for (const station of [s.built, second]) start[station.id] = await s.cursorOf(station);
+
+  // An older image reads on past an admin's pause (an integration's entry: nothing account-level is skipped) and saves.
+  s.manage.adminChange(id, { status: "paused", actor: ADMIN, reason: "Spam" });
+  await olderSave(s, s.manage.feed.at(-1).cursor);
+  const { epoch } = await s.sync();
+  s.logs.length = 0;
+  await s.readAll();
+  assert.equal(s.logs.filter((line) => line === OLDER_IMAGE).length, 1, "said once");
+  assert.equal((await s.sync()).epoch, epoch + 1, "it started over");
+  assert.deepEqual(await s.view(), { mode: "live", complete: true }, "and rebuilt from Auth's first entry");
+  assert.deepEqual(await s.repository.disabledAccountList(), [OWNER]);
+  assert.equal((await s.repository.integration(id)).state, "paused", "the entry the older image moved past is applied too");
+  for (const station of [s.built, second]) assert.deepEqual(await s.told(station, start[station.id]), [["accounts_incomplete", null], ["accounts_baseline", null]], station.id);
+  s.logs.length = 0;
+  await s.readAll();
+  assert.deepEqual(s.logs.filter((line) => line === OLDER_IMAGE), [], "the cursor this image saved is its own");
+
+  // With the setting off the same save moves the Portal to waiting and owes the Stations the news, as a skipped
+  // account-level entry does; nothing new is logged, and the read goes on from the cursor.
+  const off = s.replica({ on: false });
+  for (const station of [s.built, second]) start[station.id] = await s.cursorOf(station);
+  s.manage.adminChange(later, { status: "paused", actor: ADMIN, reason: "Spam" });
+  await olderSave(s, s.manage.feed.at(-1).cursor);
+  const before = await s.sync();
+  await s.readAll({ service: off.service, log: off.logs });
+  assert.deepEqual(off.logs, [], "nothing new is logged");
+  assert.deepEqual(await s.sync(), { ...before, mode: "waiting", owed: true });
+  assert.equal(await s.repository.baselineApplied(), false);
+  assert.deepEqual(await s.repository.authChangePlace(), { cursor: s.manage.feed.at(-1).cursor, epoch: before.epoch, foreign: false }, "the cursor is taken as it is");
+  for (const station of [s.built, second]) assert.deepEqual(await s.told(station, start[station.id]), [], "with the setting off the Stations are told nothing: " + station.id);
+  // With it on again, the Portal waits and the Stations hear once that the view is not complete; a reset rebuilds it.
+  await s.readAll();
+  for (const station of [s.built, second]) assert.deepEqual(await s.told(station, start[station.id]), [["accounts_incomplete", null]], station.id);
+  assert.equal((await s.sync()).mode, "waiting");
+  await s.repository.saveAuthChangeCursor(null);
+  await s.readAll();
+  assert.deepEqual(await s.view(), { mode: "live", complete: true });
+  assert.equal((await s.repository.integration(later)).state, "paused", "the rebuild reads what the older image moved past");
+  for (const station of [s.built, second]) assert.deepEqual(await s.told(station, start[station.id]), [["accounts_incomplete", null], ["accounts_baseline", null]], station.id);
+});
+
+// The reviewer's probe: the Portal is live and complete, an admin disables X, and an older image reads the entry, skips
+// it unrecorded and saves its cursor past it. Until this image reads, nothing can tell; once it reads, it must never say
+// complete with X missing, and it ends complete with X disabled.
+test("I1 probe: live and complete, an admin disables X, an older image's cursor save moves past it; this image's next read rebuilds, is never complete with X missing, and ends with X disabled", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true, fresh: true });
+  if (!s) return;
+  s.manage.accountChange(OWNER, true, { actor: ADMIN, reason: "Abuse" });
+  s.manage.baselineChange();
+  await s.readAll();
+  assert.deepEqual(await s.view(), { mode: "live", complete: true });
+  const start = await s.cursorOf(s.built);
+  s.manage.accountChange(THIRD, true, { actor: ADMIN, reason: "Abuse" });
+  await olderSave(s, s.manage.feed.at(-1).cursor);
+  const seen = [];
+  const look = async () => seen.push({ ...(await s.view()), missing: !(await s.repository.disabledAccountList()).includes(THIRD) });
+  await s.readAll({ pageSize: 1, hold: look, each: look });
+  await look();
+  assert.ok(seen.length >= 6, String(seen.length));
+  assert.deepEqual(seen.filter((entry) => entry.complete && entry.missing), [], "never complete with X missing");
+  assert.deepEqual(seen.at(-1), { mode: "live", complete: true, missing: false });
+  assert.deepEqual(await s.repository.disabledAccountList(), [OWNER, THIRD]);
+  assert.deepEqual(await s.told(s.built, start), [["accounts_incomplete", null], ["account_disabled", THIRD], ["accounts_baseline", null]]);
+  assert.ok(s.logs.includes(OLDER_IMAGE));
+});
+
+// A mixed rolling deploy: this image's rebuild is part way through Auth's feed when an older image, which read on from
+// a cursor of its own, saves one further on. Going on from there would skip the entries between, and adopt a rebuild
+// that never applied them; the guard starts over instead.
+test("I1: a rebuild an older image's cursor save would cut short starts over rather than skip the entries between", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true, fresh: true });
+  if (!s) return;
+  const accounts = Array.from({ length: 8 }, (_, n) => "ab" + "2".repeat(25) + n);
+  for (const account of accounts) s.manage.accountChange(account, true, { actor: ADMIN, reason: "Abuse" });
+  s.manage.baselineChange();
+  // This image's first read applies two entries to the rebuild and saves its cursor in its epoch.
+  const epoch = await s.service.accountsStartingOver();
+  for (const entry of s.manage.feed.slice(0, 2)) assert.equal(await s.service.applyAuthChange(entry, { epoch }), "applied");
+  assert.equal(await s.repository.moveAuthChangeCursor(s.manage.feed[1].cursor, epoch), true);
+  assert.deepEqual(await s.rebuilt(), { entries: 2, availability: 2 });
+  // The older image saves the cursor of the sixth entry.
+  await olderSave(s, s.manage.feed[5].cursor);
+  await s.readAll();
+  assert.equal(s.logs.filter((line) => line === OLDER_IMAGE).length, 1);
+  assert.deepEqual(await s.view(), { mode: "live", complete: true });
+  assert.deepEqual(await s.repository.disabledAccountList(), [...accounts].sort(), "every account, the ones between included");
+});
+
+// The reset platform.md documents empties the copy with the cursor, so it is not taken for an older image's write.
+test("I1: the documented reset of the Portal's Auth cursor is not taken for an older image's write", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true, fresh: true });
+  if (!s) return;
+  s.manage.accountChange(OWNER, true, { actor: ADMIN, reason: "Abuse" });
+  s.manage.baselineChange();
+  await s.readAll();
+  const section = readFileSync(new URL("../docs/platform.md", import.meta.url), "utf8").split("#### Resetting The Portal's Auth Cursor")[1];
+  const [, statement] = /```sql\n([^`]+)```/.exec(section);
+  const { epoch } = await s.sync();
+  await s.db.pool.query(statement);
+  s.logs.length = 0;
+  await s.readAll();
+  assert.deepEqual(s.logs.filter((line) => line === OLDER_IMAGE), []);
+  assert.equal((await s.sync()).epoch, epoch + 2, "the reset's epoch, then the start-over's");
+  assert.deepEqual(await s.view(), { mode: "live", complete: true });
+});
+
+// I3. While the Portal waits, a read that skips an account-level entry logs the WAITING line, as before; a read that skips
+// none (nothing new in Auth's feed) logs it at its end at most once an hour, so a Portal that waits says so however quiet
+// Auth's feed is.
+test("I3: waiting, with the cursor at the end of Auth's feed, a read logs the WAITING line once, then not again within the hour, and again after it; a read that skips an entry says it every time", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true, fresh: true });
+  if (!s) return;
+  s.manage.accountChange(OWNER, true, { actor: ADMIN, reason: "Abuse" });
+  s.manage.baselineChange();
+  await s.readAll();
+  const off = s.replica({ on: false });
+  s.manage.accountChange(OWNER, false, { actor: ADMIN, reason: "Appeal" });
+  await s.readAll({ service: off.service, log: off.logs });
+  assert.equal((await s.sync()).mode, "waiting");
+  assert.equal(off.logs.includes(WAITING), false, "with the setting off nothing new is logged");
+  const end = await s.savedCursor();
+  const said = () => s.logs.filter((line) => line === WAITING).length;
+  s.logs.length = 0;
+  await s.readAll();
+  assert.equal(said(), 1, "the end of a read that skipped nothing says it");
+  assert.equal(await s.savedCursor(), end, "there was nothing to read");
+  s.clock.now += 59 * 60000;
+  await s.readAll();
+  await s.readAll();
+  assert.equal(said(), 1, "not again within the hour");
+  s.clock.now += 60000;
+  await s.readAll();
+  assert.equal(said(), 2, "and again an hour later");
+  // A read that skips an entry says it, every time, and its end says nothing more.
+  s.manage.accountChange(THIRD, true, { actor: ADMIN, reason: "Abuse" });
+  await s.readAll();
+  s.manage.accountChange(THIRD, false, { actor: ADMIN, reason: "Appeal" });
+  await s.readAll();
+  assert.equal(said(), 4);
+  // Another replica is another process, with its own hour.
+  const other = s.replica();
+  await s.readAll({ service: other.service, log: other.logs });
+  assert.equal(other.logs.filter((line) => line === WAITING).length, 1);
+  // A read whose pass is stale says nothing.
+  assert.equal(await other.service.accountsCaughtUp({ epoch: (await s.sync()).epoch + 1 }), false);
+  s.clock.now += 2 * 3600000;
+  assert.equal(await other.service.accountsCaughtUp({ epoch: (await s.sync()).epoch - 1 }), false);
+  assert.equal(other.logs.filter((line) => line === WAITING).length, 1);
+});
+
+// The Portal says how its view of the accounts changes in counts only, never naming an account.
+test("with the setting on, account availability logs counts only: a rebuild adopted (and whether it completed the view), a live baseline that completes it, and each time it stops being complete", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true, fresh: true });
+  if (!s) return;
+  const lines = () => {
+    const said = s.logs.filter((line) => line.startsWith("Account availability "));
+    s.logs.length = 0;
+    return said;
+  };
+  s.manage.accountChange(OWNER, true, { actor: ADMIN, reason: "Abuse" });
+  s.manage.accountChange(THIRD, true, { actor: ADMIN, reason: "Abuse" });
+  await s.readAll();
+  assert.deepEqual(lines(), ["Account availability rebuilt: 2 accounts changed."], "no baseline: not complete");
+  s.manage.baselineChange();
+  await s.readAll();
+  assert.deepEqual(lines(), ["Account availability complete."]);
+  s.manage.baselineChange();
+  await s.readAll();
+  assert.deepEqual(lines(), [], "already complete");
+  await s.repository.saveAuthChangeCursor(null);
+  await s.readAll();
+  assert.deepEqual(lines(), ["Account availability incomplete: rebuilding.", "Account availability rebuilt: 0 accounts changed; complete."]);
+  s.manage.rawChange({ kind: "account_disabled", clientId: null, stationId: null, owner: "not an account", status: null, pausedBy: null, actorAccountId: null, reason: null, admin: true });
+  await s.readAll();
+  assert.deepEqual(lines(), ["Account availability incomplete: waiting.", WAITING]);
+  await s.repository.saveAuthChangeCursor(null);
+  await s.readAll();
+  assert.deepEqual(lines(), [WAITING], "already incomplete: the Stations know, and the rebuild waits again");
 });
 
 // A start-over (a first start, a reset, or a cursor ahead of Auth's) raises the epoch and rebuilds the view into tables of

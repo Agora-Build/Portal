@@ -115,9 +115,10 @@ const DELEGATED_AUTH_KINDS = [...AUTH_KINDS, "interrupt_requested", ...ACCOUNT_L
 const INCOMPLETE_KIND = "accounts_incomplete";
 const STATION_ACCOUNT_KINDS = [...ACCOUNT_LEVEL_KINDS, INCOMPLETE_KIND];
 const AUTH_REASON_MAX = 500;
-// Logged at most once per read pass while the Portal waits (D29): it skipped an account-level entry, and follows no more
-// until the feed is read again from its first entry.
-const WAITING_LINE = "Account availability waits for Auth's change feed to be read again from the start: empty the Portal's Auth cursor with every Portal replica stopped.";
+// Logged while the Portal waits (D29): it skipped an account-level entry, and follows no more until the feed is read again
+// from its first entry. Once by each read pass that skips one, and otherwise at the end of a read at most once an hour.
+const WAITING_LINE = "Account availability waits for Auth's change feed to be read again from the start: reset the Portal's Auth cursor (docs/platform.md, \"Resetting The Portal's Auth Cursor\").";
+const WAITING_AGAIN_MS = 3600000;
 const WAITING = Symbol("waiting");
 // How the Station's feed and an integration's history name a change an Agora.Build admin made (spec §3.3.4): the admin
 // and the reason they gave stay in the Portal's event (actor, reason) and in Auth's audit.
@@ -177,8 +178,9 @@ function directoryLimit(value) {
 
 // A directory cursor is base64url (unpadded) of JSON.stringify([builtIn, createdAt, id]) of the last Station on a page,
 // createdAt as the page showed it. Only exactly that is accepted: one spelling of the base64, the JSON as stringify writes
-// it, a boolean, a time as toISOString writes it (a four-digit year), and an identifier. Anything else is 400 cursor, so a cursor is only ever
-// one this list gave. It names a place in the order, not a Station: the Station need not be there any more.
+// it, a boolean, a time as toISOString writes it (a four-digit year), and an identifier. Anything else is 400 cursor, so
+// a cursor is only ever one this list gave. It names a place in the order, not a Station: the Station need not be there
+// any more.
 function directoryCursor(value) {
   if (value === undefined || value === null) return null;
   if (typeof value !== "string" || !CURSOR_CHARACTERS.test(value)) throw cursorInvalid();
@@ -764,12 +766,20 @@ export function createIntegrationService({
   // gets one accounts_incomplete change; when it stopped with the setting off, the Stations are owed it, and get it the
   // next time the Portal runs with the setting on.
 
-  // Read passes the waiting line was logged for: once per pass.
+  // Read passes the waiting line was logged for, and when this process last logged it. A pass that skips an account-level
+  // entry says it once (sayWaiting); the end of a read that skipped none says it at most once an hour (stillWaiting), so a
+  // Portal that waits says so however quiet Auth's feed is.
   const waitingSaid = new WeakSet();
+  let waitingLoggedAt = -Infinity;
   function sayWaiting(pass) {
     if (waitingSaid.has(pass)) return;
     waitingSaid.add(pass);
+    waitingLoggedAt = now();
     log(WAITING_LINE);
+  }
+  function stillWaiting(pass) {
+    if (waitingSaid.has(pass) || now() - waitingLoggedAt < WAITING_AGAIN_MS) return;
+    sayWaiting(pass);
   }
 
   // The fence: an account-level step of a read pass is done only in the epoch the pass began in. Called under the event
@@ -788,14 +798,22 @@ export function createIntegrationService({
 
   // The view stops being complete (a start-over, or a move to waiting, with the setting on): the mark is cleared and, if
   // the Stations were told it was complete (it was, or they are owed the news), each active built-in Station gets one
-  // accounts_incomplete change. Returns the Stations to push once the transaction has committed.
+  // accounts_incomplete change. Returns null when nobody was told, and otherwise { mode, stations } for toldIncomplete
+  // once the transaction has committed.
   async function becameIncomplete(sync, mode, client) {
     const was = await repository.markBaselineIncomplete(client);
-    if (!was && !sync.incompleteOwed) return [];
+    if (!was && !sync.incompleteOwed) return null;
     if (sync.incompleteOwed) await repository.setAccountsIncompleteOwed(false, client);
     const stations = await repository.builtInStations(client);
     await tell(stations, { kind: INCOMPLETE_KIND, details: { admin: false, mode } }, client);
-    return stations;
+    return { mode, stations };
+  }
+
+  // After the commit: the counts-only line, and the push to each Station told.
+  function toldIncomplete(told) {
+    if (!told) return;
+    log("Account availability incomplete: " + told.mode + ".");
+    for (const station of told.stations) changed(station.id);
   }
 
   // An account-level entry of Auth's change feed (D29, the setting on): an admin disabled or enabled an account, or Auth
@@ -829,7 +847,7 @@ export function createIntegrationService({
         await repository.setBaseline(entry.cursor, entry.at, client);
         if (!(await repository.markBaselineComplete(client))) return { stations: [] };
         await tell(active, { kind: BASELINE_KIND, details: { authCursor: entry.cursor, authAt: entry.at, admin: false } }, client);
-        return { stations: active };
+        return { stations: active, completed: true };
       }
       await repository.setAvailability(entry.owner, entry.kind === "account_disabled", entry.cursor, entry.at, client);
       await tell(active, { kind: entry.kind, accountId: entry.owner, actor, reason, details: { authCursor: entry.cursor, authAt: entry.at, admin: entry.admin === true } }, client);
@@ -841,6 +859,7 @@ export function createIntegrationService({
     }
     if (done === null) return "skipped";
     if (done.unheard) log("Auth account change skipped: no built-in Station.");
+    if (done.completed) log("Account availability complete.");
     for (const station of done.stations) changed(station.id);
     return "applied";
   }
@@ -851,20 +870,24 @@ export function createIntegrationService({
   // now (becameIncomplete); with it off nothing is written to a Station, so they are owed the news instead.
   async function accountsWait(pass) {
     if (!delegatedHostWork) {
-      await appending(async (client) => {
-        await repository.setAccountsMode("waiting", client);
-        if (await repository.markBaselineIncomplete(client)) await repository.setAccountsIncompleteOwed(true, client);
-      });
+      await appending((client) => waitUnheard(client));
       return;
     }
-    const stations = await appending(async (client) => {
+    const told = await appending(async (client) => {
       const sync = await repository.accountSync(client);
       fenced(sync, pass);
       await repository.setAccountsMode("waiting", client);
       return becameIncomplete(sync, "waiting", client);
     });
+    toldIncomplete(told);
     sayWaiting(pass);
-    for (const station of stations) changed(station.id);
+  }
+
+  // The setting-off move to waiting: the mark is cleared and, if the Stations were told the view was complete, they are
+  // owed the news, since nothing is written to a Station with the setting off.
+  async function waitUnheard(client) {
+    await repository.setAccountsMode("waiting", client);
+    if (await repository.markBaselineIncomplete(client)) await repository.setAccountsIncompleteOwed(true, client);
   }
 
   // Shown as paused while its own state is not: its owner's account is disabled.
@@ -1210,9 +1233,9 @@ export function createIntegrationService({
       return stationView(await repository.station(registered.id), "owner");
     },
 
-    // The browser's list. With the setting on it also carries the account's notices (D29): the binding attempts the built-in
-    // Station refused for it in the last 30 days, the 50 newest, newest first. Each names the R9 account, in its own id, and nothing of
-    // the other Agora.Build account the attempt came from or went to.
+    // The browser's list. With the setting on it also carries the account's notices (D29): the binding attempts the
+    // built-in Station refused for it in the last 30 days, the 50 newest, newest first. Each names the R9 account, in its
+    // own id, and nothing of the other Agora.Build account the attempt came from or went to.
     async stations(accountId) {
       const fresh = await reconcileWithAuth(accountId);
       const stations = (await repository.stationsFor(accountId)).map((station) => stationView(station, station.role));
@@ -1623,13 +1646,27 @@ export function createIntegrationService({
     // epoch; with the setting off it does nothing.
     async accountsStartingOver() {
       if (!delegatedHostWork) return undefined;
-      const { epoch, stations } = await appending(async (client) => {
+      const { epoch, told } = await appending(async (client) => {
         const sync = await repository.accountSync(client);
         const raised = await repository.startAccountsOver(client);
-        return { epoch: raised, stations: await becameIncomplete(sync, "rebuilding", client) };
+        return { epoch: raised, told: await becameIncomplete(sync, "rebuilding", client) };
       });
-      for (const station of stations) changed(station.id);
+      toldIncomplete(told);
       return epoch;
+    },
+
+    // The reader found Auth's cursor moved by a Portal image from before migration 006 (auth-changes.mjs, the guard): that
+    // image skips account-level entries unrecorded, so what this Portal holds may miss some. With the setting on (D29) the
+    // answer is true, and the reader starts over (accountsStartingOver). With it off, the Portal moves to waiting as a
+    // skipped entry makes it (waitUnheard), takes the cursor as it is, and answers false: the reader reads on from it, and
+    // logs nothing new.
+    async accountsForeignCursor() {
+      if (delegatedHostWork) return true;
+      await appending(async (client) => {
+        await waitUnheard(client);
+        await repository.acceptAuthChangeCursor(client);
+      });
+      return false;
     },
 
     // A read pass of Auth's feed reached its end (its last page wasn't full). With the setting on (D29) and the pass's
@@ -1639,14 +1676,16 @@ export function createIntegrationService({
     //   or account_enabled change; the live table and applied entries become the rebuild's; if the rebuild applied a
     //   baseline, it is recorded, the view is complete and each Station gets one accounts_baseline change (otherwise the
     //   next baseline applied live completes it); and the Portal is live.
-    // * waiting, the Stations get the accounts_incomplete change they are owed, if they are, once.
+    // * waiting, the Stations get the accounts_incomplete change they are owed, if they are, once, and the WAITING line is
+    //   logged unless this pass said it, at most once an hour (stillWaiting).
     // * live, there is nothing to do.
     // The Stations are pushed after the commit, and a failure rolls all of it back, so the next read does it. Several
-    // replicas may call it at once: the event lock serializes them, and only the first finds anything to do. Returns
-    // whether this call did something; a stale pass, or the setting off, does nothing.
+    // replicas may call it at once: the event lock serializes them, and only the first finds anything to do. Adopting
+    // logs the number of accounts that changed, never which. Returns whether this call did something; a stale pass, or
+    // the setting off, does nothing.
     async accountsCaughtUp(pass) {
       if (!delegatedHostWork) return false;
-      const stations = await appending(async (client) => {
+      const done = await appending(async (client) => {
         const sync = await repository.accountSync(client);
         try {
           fenced(sync, pass);
@@ -1654,7 +1693,7 @@ export function createIntegrationService({
           if (error.code === "stale_pass") return null;
           throw error;
         }
-        if (sync.mode === "waiting") return sync.incompleteOwed ? becameIncomplete(sync, "waiting", client) : null;
+        if (sync.mode === "waiting") return { waiting: true, told: sync.incompleteOwed ? await becameIncomplete(sync, "waiting", client) : null };
         if (sync.mode !== "rebuilding") return null;
         const differences = await repository.availabilityDifferences(client);
         await repository.adoptRebuild(client);
@@ -1672,10 +1711,16 @@ export function createIntegrationService({
           if (completed) await tell(active, { kind: BASELINE_KIND, details: { authCursor: sync.rebuildBaseline.cursor, authAt: sync.rebuildBaseline.at, admin: false } }, client);
         }
         await repository.setAccountsMode("live", client);
-        return differences.length || completed ? active : [];
+        return { stations: differences.length || completed ? active : [], changed: differences.length, completed };
       });
-      if (stations === null) return false;
-      for (const station of stations) changed(station.id);
+      if (done === null) return false;
+      if (done.waiting) {
+        toldIncomplete(done.told);
+        stillWaiting(pass);
+        return done.told !== null;
+      }
+      log("Account availability rebuilt: " + done.changed + " accounts changed" + (done.completed ? "; complete." : "."));
+      for (const station of done.stations) changed(station.id);
       return true;
     },
 

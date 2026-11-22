@@ -44,10 +44,12 @@ export function createIntegrationStack({ db, manage, idp, log, stationFetch = cr
   const service = createIntegrationService({ repository, db, manage, stationFetch, pushFetch, exchange, log, authChanged: () => feed?.request(), delegatedHostWork });
   // The reader tells the service when it starts the feed over and when it has caught up, and hands it the read pass
   // (its epoch) with each change and at the end: account availability is rebuilt from the feed's first entry, and a read
-  // that began before another replica started over is fenced (D29, the setting on; with it off the hooks do nothing).
+  // that began before another replica started over is fenced (D29, the setting on; with it off the hooks do nothing). It
+  // also asks the service what to do with a cursor an older Portal image moved: start over (on) or wait (off).
   feed = createAuthChanges({
     repository, manage, apply: (change, pass) => service.applyAuthChange(change, pass), log, settings: authChanges,
-    startingOver: () => service.accountsStartingOver(), caughtUp: (pass) => service.accountsCaughtUp(pass)
+    startingOver: () => service.accountsStartingOver(), caughtUp: (pass) => service.accountsCaughtUp(pass),
+    foreignCursor: () => service.accountsForeignCursor()
   });
   let pending = null;
   let prepared = false;

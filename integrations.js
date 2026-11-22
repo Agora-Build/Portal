@@ -55,7 +55,8 @@ const date = (value) => value ? new Date(value).toLocaleDateString() : "";
 const time = (value) => value ? new Date(value).toLocaleString() : "";
 const stateLabel = (state) => STATE_LABELS[state] || String(state || "Unknown").replace(/_/g, " ");
 const words = (value) => String(value || "").replace(/_/g, " ");
-// Running tasks can still be interrupted: not asked for yet, and within 24 hours of the revocation. A revokedAt of null (never dated) is too late, as at the server.
+// Running tasks can still be interrupted: not asked for yet, and within 24 hours of the revocation. A revokedAt of null
+// (never dated) is too late, as at the server.
 const interruptible = (integration) => !integration.interruptRunning && Boolean(integration.revokedAt) && Date.now() - Date.parse(integration.revokedAt) <= DAY;
 // How a revocation went on the hosts, from the view's `revocation` ({ appliedHosts, outcome, unconfirmedHosts }, which
 // the server sends only with the setting on); a count, never host names. A revoking integration says how many hosts have
@@ -63,8 +64,8 @@ const interruptible = (integration) => !integration.interruptRunning && Boolean(
 const hostCount = (count) => count + (count === 1 ? " host" : " hosts");
 const appliedNote = (integration) => integration.state === "revoking" && integration.revocation?.appliedHosts >= 1 ? "Applied on " + hostCount(integration.revocation.appliedHosts) : "";
 const unconfirmedNote = (integration) => integration.state === "revoked" && integration.revocation?.outcome === "deadline_passed" && integration.revocation.unconfirmedHosts >= 1 ? "Revoked (" + hostCount(integration.revocation.unconfirmedHosts) + " didn't confirm; any unstarted work there has passed its deadline)" : "";
-// A binding attempt the built-in Station refused for this account (the browser list's `notices`, only with the setting on): the
-// R9 account's own id, as text, and the day. It never names the other account; the Portal doesn't send it.
+// A binding attempt the built-in Station refused for this account (the browser list's `notices`, only with the setting
+// on): the R9 account's own id, as text, and the day. It never names the other account; the Portal doesn't send it.
 const boundElsewhereNote = (notice) => "An attempt to bind your R9 account " + notice.accountId + " to another Agora.Build account at the built-in Station was refused (" + date(notice.attemptedAt) + ").";
 const ownerDisabledNote = (notice) => "An attempt to bind your R9 account " + notice.accountId + " at the built-in Station was refused while an owner account was disabled (" + date(notice.attemptedAt) + ").";
 const bindingNotice = (notice) => notice?.kind !== "binding_attempt" ? "" : notice.reason === "bound_elsewhere" ? boundElsewhereNote(notice) : notice.reason === "owner_disabled" ? ownerDisabledNote(notice) : "";
