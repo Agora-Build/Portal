@@ -254,3 +254,37 @@ test("with the setting on the page offers the revoke choice, Interrupt running t
   }
   assert.doesNotMatch(script, /console\.|innerHTML/);
 });
+
+test("with the setting on the Stations section shows each refused binding attempt as a muted notice, in the exact copy, the account id as text; with it off none (D29)", async () => {
+  const script = await read("integrations.js");
+  const line = (name) => script.match(new RegExp("^const " + name + " = .*;$", "m"))?.[0] || "";
+  const dateLine = line("date");
+  const elsewhere = line("boundElsewhereNote");
+  const disabled = line("ownerDisabledNote");
+  const notice = line("bindingNotice");
+  assert.ok(dateLine && elsewhere && disabled && notice, "one small named function for each sentence");
+  const bindingNotice = new Function(dateLine + "\n" + elsewhere + "\n" + disabled + "\n" + notice + "\nreturn bindingNotice;")();
+  const attemptedAt = "2026-11-20T10:30:00.000Z";
+  const day = new Date(attemptedAt).toLocaleDateString();
+  const attempt = (fields) => ({ kind: "binding_attempt", accountId: "r9:account-1", genesisHash: "b".repeat(64), reason: "bound_elsewhere", attemptedAt, ...fields });
+  // The exact copy of the design: the R9 account and the day, and for the first no word of who the other account is.
+  assert.equal(bindingNotice(attempt()), "An attempt to bind your R9 account r9:account-1 to another Agora.Build account at the built-in Station was refused (" + day + ").");
+  assert.equal(bindingNotice(attempt({ reason: "owner_disabled" })), "An attempt to bind your R9 account r9:account-1 at the built-in Station was refused while an owner account was disabled (" + day + ").");
+  // The account id is text, never markup: it comes out as given, and is set as text content below.
+  const hostile = "<img src=x onerror=alert(1)>&amp;";
+  assert.equal(bindingNotice(attempt({ accountId: hostile })), "An attempt to bind your R9 account " + hostile + " to another Agora.Build account at the built-in Station was refused (" + day + ").");
+  // Anything that isn't one of the two is no notice.
+  for (const other of [attempt({ reason: "other" }), attempt({ reason: undefined }), attempt({ reason: "constructor" }), attempt({ kind: "something_else" }), { ...attempt(), kind: undefined }, null, undefined, "x"]) assert.equal(bindingNotice(other), "");
+  // The list shows them first, only with the setting on and only from an array; each is a muted paragraph set as text.
+  assert.match(script, /const notices = me\?\.delegatedHostWork && Array\.isArray\(result\.notices\) \? result\.notices\.map\(bindingNotice\)\.filter\(Boolean\) : \[\];/);
+  assert.match(script, /list\.replaceChildren\(\.\.\.notices\.map\(\(text\) => el\("p", \{ class: "muted", text \}\)\), \.\.\.stations\.map\(stationRow\)\);/);
+  const loading = script.match(/^async function loadStations[\s\S]*?\n\}$/m)?.[0] || "";
+  assert.ok(loading.includes("const notices = me?.delegatedHostWork") && loading.includes("list.replaceChildren(...notices.map("), "in the Stations list, not the integrations'");
+  // Everything new is behind the setting: each use of the new copy is on a line that tests it.
+  for (const name of ["boundElsewhereNote", "ownerDisabledNote", "bindingNotice"]) {
+    const uses = script.split("\n").filter((entry) => new RegExp("\\b" + name + "\\b").test(entry) && !entry.startsWith("const " + name + " ="));
+    assert.ok(uses.length, name + " is used");
+    for (const entry of uses) assert.match(entry, /\bhostWork\b|me\?\.delegatedHostWork|^const bindingNotice = /, name + ": " + entry.trim());
+  }
+  assert.doesNotMatch(script, /console\.|innerHTML/);
+});

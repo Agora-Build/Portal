@@ -63,6 +63,11 @@ const interruptible = (integration) => !integration.interruptRunning && Boolean(
 const hostCount = (count) => count + (count === 1 ? " host" : " hosts");
 const appliedNote = (integration) => integration.state === "revoking" && integration.revocation?.appliedHosts >= 1 ? "Applied on " + hostCount(integration.revocation.appliedHosts) : "";
 const unconfirmedNote = (integration) => integration.state === "revoked" && integration.revocation?.outcome === "deadline_passed" && integration.revocation.unconfirmedHosts >= 1 ? "Revoked (" + hostCount(integration.revocation.unconfirmedHosts) + " didn't confirm; any unstarted work there has passed its deadline)" : "";
+// A binding attempt the built-in Station refused for this account (the browser list's `notices`, only with the setting on): the
+// R9 account's own id, as text, and the day. It never names the other account; the Portal doesn't send it.
+const boundElsewhereNote = (notice) => "An attempt to bind your R9 account " + notice.accountId + " to another Agora.Build account at the built-in Station was refused (" + date(notice.attemptedAt) + ").";
+const ownerDisabledNote = (notice) => "An attempt to bind your R9 account " + notice.accountId + " at the built-in Station was refused while an owner account was disabled (" + date(notice.attemptedAt) + ").";
+const bindingNotice = (notice) => notice?.kind !== "binding_attempt" ? "" : notice.reason === "bound_elsewhere" ? boundElsewhereNote(notice) : notice.reason === "owner_disabled" ? ownerDisabledNote(notice) : "";
 // A removal that revokes integrations says, with the setting on, that tasks already running on the hosts continue; unless
 // the Station is removed, the owner of each revoked integration can still interrupt them.
 const indirect = (text) => me?.delegatedHostWork ? text + " " + INDIRECT_NOTE : text;
@@ -286,7 +291,8 @@ async function loadStations(current = version) {
     if (current !== version) return;
     stations = result.stations;
     document.querySelector("#stations-stale").textContent = result.stale ? STALE : "";
-    list.replaceChildren(...stations.map(stationRow));
+    const notices = me?.delegatedHostWork && Array.isArray(result.notices) ? result.notices.map(bindingNotice).filter(Boolean) : [];
+    list.replaceChildren(...notices.map((text) => el("p", { class: "muted", text })), ...stations.map(stationRow));
     if (!stations.length) list.append(el("p", { class: "empty-panel", text: "No Stations yet. Add one to connect your apps to your agents." }));
   } catch (error) {
     if (current !== version) return;

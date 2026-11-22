@@ -32,6 +32,16 @@ const PENDING_HOSTS_MAX = 100;
 const ID_GRAMMAR = /^[A-Za-z0-9._:-]{1,128}$/;
 const RECORD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PRINTABLE_REASON = /^[^\p{Cc}]{1,200}$/u;
+// The built-in Station's two binding reports (D29, the setting on). Each has its own fields, and neither names an integration.
+const BINDING_REPORT_FIELDS = {
+  binding_changed: ["state", "reportId", "account", "accountId", "genesisHash", "bindingId", "version", "bindingState"],
+  binding_attempt: ["state", "reportId", "account", "accountId", "genesisHash", "reason", "attemptedAt"]
+};
+const GENESIS_HASH = /^[0-9a-f]{64}$/;
+const BINDING_STATES = ["bound", "unbound", "released"];
+const ATTEMPT_REASONS = ["bound_elsewhere", "owner_disabled"];
+// A refused binding attempt is shown on the page of the account it protects for 30 days.
+const ATTEMPTS_SHOWN_FOR = 30 * 86400000;
 const CURSOR = /^\d{1,15}$/;
 const FEED_LIMIT = 500;
 // The Station directory (D29, GET /api/v1/stations): pages of at most 100 Stations, and a Station lost within 30 days (the
@@ -54,6 +64,17 @@ const REPORT_FORM = "Send a report as { integrationId, state, reason }.";
 const DELEGATED_REPORT_FORMS = REPORT_FORM.slice(0, -1) + ', { integrationId, state: "revocation_applied", reportId, host, recordId } or { integrationId, state: "revoked", reportId, outcome, pendingHosts }.';
 const IDENTIFIER = "1 to 128 characters of letters, digits, '.', '_', ':' or '-'.";
 const reportIdInvalid = () => failure(400, "Send the reportId as " + IDENTIFIER, "report_id");
+const BINDING_REPORT_FORMS = 'Send a binding report as { state: "binding_changed", reportId, account, accountId, genesisHash, bindingId, version, bindingState } or { state: "binding_attempt", reportId, account, accountId, genesisHash, reason, attemptedAt }.';
+const bindingAccountInvalid = () => failure(400, "Name the account as ab and 26 letters or digits.", "account");
+const bindingAccountIdInvalid = () => failure(400, "Send the accountId as " + IDENTIFIER, "account_id");
+const genesisHashInvalid = () => failure(400, "Send the genesisHash as 64 lowercase hex characters.", "genesis_hash");
+const bindingIdInvalid = () => failure(400, "Send the bindingId as " + IDENTIFIER, "binding_id");
+const bindingVersionInvalid = () => failure(400, "Send the version as a positive whole number.", "version");
+const bindingStateInvalid = () => failure(400, "Send the bindingState as bound, unbound or released.", "binding_state");
+const attemptReasonInvalid = () => failure(400, "Send the reason as bound_elsewhere or owner_disabled.", "reason");
+const attemptedAtInvalid = () => failure(400, "Send attemptedAt as an ISO time.", "attempted_at");
+const builtInOnly = () => failure(403, "Only the built-in Station reports bindings.", "forbidden");
+const bindingNotNewer = () => failure(409, "This binding's version is not newer than the one recorded.", "binding_version");
 const hostInvalid = () => failure(400, "Name the host by its id: " + IDENTIFIER, "host");
 const recordIdInvalid = () => failure(400, "Send the recordId as the record's lowercase UUID.", "record_id");
 const outcomeInvalid = () => failure(400, "Send all_applied with no pendingHosts, or deadline_passed with the hosts that didn't confirm.", "outcome");
@@ -244,13 +265,38 @@ function reportReason(value) {
   return value;
 }
 
+// A binding report (the setting on): the built-in Station's binding_changed or binding_attempt, validated in this order: its
+// shape (exactly its form's fields: no integrationId, and none of another report's), the reportId, then the fields as the
+// contract lists them. The reason is a code here, not the free text of today's report reason.
+function bindingBody(body) {
+  if (Object.keys(body).some((key) => !BINDING_REPORT_FIELDS[body.state].includes(key))) throw failure(400, BINDING_REPORT_FORMS, "report");
+  const { state, reportId, account, accountId, genesisHash } = body;
+  if (typeof reportId !== "string" || !ID_GRAMMAR.test(reportId)) throw reportIdInvalid();
+  if (typeof account !== "string" || !ACCOUNT_ID.test(account)) throw bindingAccountInvalid();
+  if (typeof accountId !== "string" || !ID_GRAMMAR.test(accountId)) throw bindingAccountIdInvalid();
+  if (typeof genesisHash !== "string" || !GENESIS_HASH.test(genesisHash)) throw genesisHashInvalid();
+  if (state === "binding_changed") {
+    const { bindingId, version, bindingState } = body;
+    if (typeof bindingId !== "string" || !ID_GRAMMAR.test(bindingId)) throw bindingIdInvalid();
+    if (!Number.isSafeInteger(version) || version < 1) throw bindingVersionInvalid();
+    if (!BINDING_STATES.includes(bindingState)) throw bindingStateInvalid();
+    return { state, reportId, account, accountId, genesisHash, bindingId, version, bindingState };
+  }
+  const { reason, attemptedAt } = body;
+  if (!ATTEMPT_REASONS.includes(reason)) throw attemptReasonInvalid();
+  // As toISOString writes it, in the four-digit years the database holds without a doubt.
+  if (typeof attemptedAt !== "string" || !CURSOR_TIME.test(attemptedAt) || !authTime(attemptedAt)) throw attemptedAtInvalid();
+  return { state, reportId, account, accountId, genesisHash, reason, attemptedAt };
+}
+
 // A report's body: only integrationId, state and reason; `error` needs a reason, any other report may carry one. With the
 // setting on (`delegated`, D29 Phase B) a report with a reportId is one of the two revocation reports, validated in this
 // order: its shape (which fields may come together, and with which state), the state, the reportId, then the kind's
 // fields. What comes back is the normalised report, which is also what is kept and compared when the same reportId
-// comes again.
+// comes again. The two binding reports (bindingBody) have their own form, and are told apart by their state first.
 function reportBody(body, { delegated = false } = {}) {
   const forms = () => failure(400, delegated ? DELEGATED_REPORT_FORMS : REPORT_FORM, "report");
+  if (delegated && plainObject(body) && typeof body.state === "string" && Object.hasOwn(BINDING_REPORT_FIELDS, body.state)) return bindingBody(body);
   if (!plainObject(body) || Object.keys(body).some((key) => !(delegated ? DELEGATED_REPORT_FIELDS : REPORT_FIELDS).includes(key))) throw forms();
   const { integrationId, state, reason, reportId } = body;
   const given = (names) => names.some((name) => body[name] !== undefined);
@@ -892,18 +938,46 @@ export function createIntegrationService({
     return view;
   }
 
+  // A binding report (D29), in the transaction of identifiedReport, which has found no report under its id. A binding_attempt
+  // is kept as it is for the account it protects. A binding_changed is the Station's newest word on its R9 account at a
+  // genesis only if its version is higher than the recorded one; the same version with the identical binding (account,
+  // bindingId, bindingState) is the same news again and changes nothing, and any other not-newer one is refused, which
+  // rolls the transaction back (its id stays free). The answer is the recorded binding. Neither is an event or a push: the
+  // checkpoint reads the bindings, and the page reads the attempts.
+  async function recordBinding(station, report, client) {
+    if (report.state === "binding_attempt") {
+      await repository.saveBindingAttempt({ stationId: station.id, reportId: report.reportId, accountId: report.account, r9AccountId: report.accountId, genesisHash: report.genesisHash, reason: report.reason, attemptedAt: report.attemptedAt }, client);
+      return { recorded: true };
+    }
+    const recorded = await repository.binding(station.id, report.accountId, report.genesisHash, client);
+    if (!recorded || recorded.version < report.version) {
+      await repository.saveBinding({ stationId: station.id, r9AccountId: report.accountId, genesisHash: report.genesisHash, accountId: report.account, bindingId: report.bindingId, version: report.version, bindingState: report.bindingState, reportId: report.reportId }, client);
+    } else if (recorded.version !== report.version || recorded.accountId !== report.account || recorded.bindingId !== report.bindingId || recorded.bindingState !== report.bindingState) {
+      throw bindingNotNewer();
+    }
+    return { accountId: report.accountId, genesisHash: report.genesisHash, bindingId: report.bindingId, version: report.version, bindingState: report.bindingState };
+  }
+
   // A report with a reportId (the setting on, D29 Phase B): `revocation_applied` for one host, or the final `revoked` with
-  // how the revocation ended. Ids are per Station and kept forever with the report and its answer: the same id with the
-  // same body answers what was recorded and changes nothing, with another body it is refused. All of it runs in one
-  // transaction under the event lock, so a retry racing itself waits for the first and then finds its answer, and a
-  // refused report (the transaction rolls back) records nothing. Nobody is pushed: the Station made the change itself.
+  // how the revocation ended; and, from the built-in Station only (403 before anything is recorded), a binding report
+  // (recordBinding), which names no integration. Ids are per Station and kept forever with the report and its answer: the
+  // same id with the same body answers what was recorded and changes nothing, with another body it is refused. All of it
+  // runs in one transaction under the event lock, so a retry racing itself waits for the first and then finds its answer,
+  // and a refused report (the transaction rolls back) records nothing. Nobody is pushed: the Station made the change itself.
   function identifiedReport(station, report) {
     const { integrationId, reportId } = report;
+    const binding = Object.hasOwn(BINDING_REPORT_FIELDS, report.state);
+    if (binding && !station.builtIn) throw builtInOnly();
     return appending(async (client) => {
       const kept = await repository.stationReport(station.id, reportId, client);
       if (kept) {
         if (canonical(kept.body) !== canonical(report)) throw reportIdReused();
         return kept.answer;
+      }
+      if (binding) {
+        const answer = await recordBinding(station, report, client);
+        await repository.saveStationReport({ stationId: station.id, reportId, integrationId: null, body: report, answer }, client);
+        return answer;
       }
       const found = typeof integrationId === "string" && integrationId ? await repository.integration(integrationId, client) : null;
       if (!found || found.stationId !== station.id) throw notFound();
@@ -1130,10 +1204,16 @@ export function createIntegrationService({
       return stationView(await repository.station(registered.id), "owner");
     },
 
+    // The browser's list. With the setting on it also carries the account's notices (D29): the binding attempts the built-in
+    // Station refused for it in the last 30 days, newest first. Each names the R9 account, in its own id, and nothing of
+    // the other Agora.Build account the attempt came from or went to.
     async stations(accountId) {
       const fresh = await reconcileWithAuth(accountId);
       const stations = (await repository.stationsFor(accountId)).map((station) => stationView(station, station.role));
-      return { stations, stale: !fresh };
+      if (!delegatedHostWork) return { stations, stale: !fresh };
+      const attempts = await repository.bindingAttemptsFor(accountId, now() - ATTEMPTS_SHOWN_FOR);
+      const notices = attempts.map(({ r9AccountId, genesisHash, reason, attemptedAt }) => ({ kind: "binding_attempt", accountId: r9AccountId, genesisHash, reason, attemptedAt }));
+      return { stations, stale: !fresh, notices };
     },
 
     // The Station directory for Astation (D29, the setting on; GET /api/v1/stations): a page of the Stations the account
@@ -1363,7 +1443,8 @@ export function createIntegrationService({
 
     // An authenticated Station's report about one of its integrations. Only these reports move an integration into
     // waiting_for_host, ready or revoked (Portal never sets ready itself); `error` records lastError and keeps the state.
-    // With the setting on, a report with a reportId is one of the two revocation reports (identifiedReport).
+    // With the setting on, a report with a reportId is one of the two revocation reports or one of the two binding reports
+    // (identifiedReport).
     async report(clientId, body) {
       const station = await reportingStation(clientId);
       const parsed = reportBody(body, { delegated: delegatedHostWork });

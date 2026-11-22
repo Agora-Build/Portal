@@ -1093,3 +1093,369 @@ test("with the setting off, asking for a checkpoint is ignored: the answer is to
   assert.deepEqual(await s.service.changes(client, String(today.cursor), CHECKPOINT), await s.service.changes(client, String(today.cursor)));
   await assert.rejects(s.service.changes(client, String(today.cursor + 1), CHECKPOINT), refused(409, "cursor_ahead"), "the cursor check stays");
 });
+
+// The built-in Station's two binding reports (D29, Portal issue 41 §3): binding_changed, with versions that rise for each R9
+// account at a genesis, and binding_attempt, shown to the account it protects for 30 days. Neither writes an event or pushes.
+const R9_ACCOUNT = "r9:account-1";
+const reportIdOf = (kind, n) => kind + ":" + n.toString(16).padStart(64, "0");
+const changedReport = (n, fields = {}) => ({ state: "binding_changed", reportId: reportIdOf("binding_changed", n), account: OWNER, accountId: R9_ACCOUNT, genesisHash: GENESIS, bindingId: "bind-1", version: 1, bindingState: "bound", ...fields });
+const attemptReport = (n, at, fields = {}) => ({ state: "binding_attempt", reportId: reportIdOf("binding_attempt", n), account: OWNER, accountId: R9_ACCOUNT, genesisHash: GENESIS, reason: "bound_elsewhere", attemptedAt: ISO(at), ...fields });
+const BINDING_MESSAGES = {
+  account: "Name the account as ab and 26 letters or digits.",
+  account_id: "Send the accountId as 1 to 128 characters of letters, digits, '.', '_', ':' or '-'.",
+  genesis_hash: "Send the genesisHash as 64 lowercase hex characters.",
+  binding_id: "Send the bindingId as 1 to 128 characters of letters, digits, '.', '_', ':' or '-'.",
+  version: "Send the version as a positive whole number.",
+  binding_state: "Send the bindingState as bound, unbound or released.",
+  reason: "Send the reason as bound_elsewhere or owner_disabled.",
+  attempted_at: "Send attemptedAt as an ISO time."
+};
+const BINDING_FORMS = 'Send a binding report as { state: "binding_changed", reportId, account, accountId, genesisHash, bindingId, version, bindingState } or { state: "binding_attempt", reportId, account, accountId, genesisHash, reason, attemptedAt }.';
+const BINDING_NOT_NEWER = "This binding's version is not newer than the one recorded.";
+const bindingRows = async (s) => (await s.db.pool.query("SELECT station_id, r9_account_id, genesis_hash, account_id, binding_id, version::float8 AS version, binding_state, report_id FROM station_bindings ORDER BY r9_account_id, genesis_hash")).rows;
+const attemptRows = async (s) => (await s.db.pool.query("SELECT station_id, report_id, account_id, r9_account_id, genesis_hash, reason, attempted_at FROM binding_attempts ORDER BY report_id")).rows;
+const countOf = async (s, table) => (await s.db.pool.query("SELECT count(*)::int AS n FROM " + table)).rows[0].n;
+async function assertNothingRecorded(s, label = "") {
+  for (const table of ["station_reports", "station_bindings", "binding_attempts"]) assert.equal(await countOf(s, table), 0, table + " " + label);
+}
+
+test("with the setting on, the built-in Station's binding reports are validated: shape, reportId, then each field in order", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const built = await builtIn(s);
+  const client = built.reportClientId;
+  const send = (body) => s.service.report(client, body);
+  const bad = (body, code, message, label) => assert.rejects(send(body), (error) => refused(400, code)(error) && (message === undefined || error.message === message), label ?? JSON.stringify(body));
+  const changed = changedReport(1);
+  const attempt = attemptReport(2, s.clock.now);
+
+  // Shape: only the form's own fields, and no integrationId in either (400 report, naming the forms).
+  for (const body of [
+    { ...changed, integrationId: "i-1" }, { ...attempt, integrationId: "i-1" }, { ...changed, extra: 1 }, { ...attempt, extra: 1 },
+    { ...changed, reason: "bound_elsewhere" }, { ...changed, attemptedAt: ISO(s.clock.now) }, { ...attempt, bindingId: "bind-1" }, { ...attempt, version: 1 }, { ...attempt, bindingState: "bound" },
+    { ...changed, host: "laptop" }, { ...changed, outcome: "all_applied" }
+  ]) await bad(body, "report", BINDING_FORMS, "shape " + JSON.stringify(body));
+  // The shape comes before the reportId and the fields.
+  await bad({ ...changed, reportId: "bad id", integrationId: "i-1" }, "report", BINDING_FORMS);
+  await bad({ ...attempt, account: "nope", version: 1 }, "report", BINDING_FORMS);
+  // A binding field on any other report is an unknown field, as before.
+  for (const body of [{ integrationId: "i-1", state: "ready", account: OWNER }, { integrationId: "i-1", state: "revoked", reportId: "r1", outcome: "all_applied", pendingHosts: [], bindingId: "b" }, { integrationId: "i-1", state: "error", reason: "x", attemptedAt: ISO(s.clock.now) }]) {
+    await bad(body, "report", undefined, "binding field on another report: " + JSON.stringify(body));
+  }
+
+  // The reportId: with the rule of Phase B's, and before the fields.
+  for (const reportId of [undefined, "", "x".repeat(129), "has space", "bad/id", "café", "line\nbreak", "trailing\n", 5, null, {}, ["a"]]) {
+    for (const body of [changed, attempt]) await bad({ ...body, reportId }, "report_id", "Send the reportId as 1 to 128 characters of letters, digits, '.', '_', ':' or '-'.", body.state + " " + JSON.stringify(reportId));
+  }
+  await bad({ ...changed, reportId: "bad id", account: "nope" }, "report_id");
+
+  // Each field, in the contract's order: account, accountId, genesisHash, then the form's own.
+  const ids = [undefined, "", "x".repeat(129), "has space", "a/b", "café", "a\nb", "trailing\n", 5, null, ["a"], {}];
+  const everyAccount = [undefined, "", null, 5, "ab", "ab" + "0".repeat(25), "ab" + "0".repeat(27), "AB" + "0".repeat(26), "ab" + "a".repeat(26), "ab" + "I" + "0".repeat(25), "ab" + "U" + "0".repeat(25), OWNER + "\n", " " + OWNER, ["x"]];
+  const hashes = [undefined, "", null, 5, "A".repeat(64), "a".repeat(63), "a".repeat(65), "g".repeat(64), "a".repeat(64) + "\n", ["a"]];
+  const versions = [undefined, null, 0, -1, 1.5, "1", NaN, Infinity, 2 ** 53, true, [1], {}];
+  for (const body of [changed, attempt]) {
+    for (const account of everyAccount) await bad({ ...body, account }, "account", BINDING_MESSAGES.account, body.state + " account " + JSON.stringify(account));
+    for (const accountId of ids) await bad({ ...body, accountId }, "account_id", BINDING_MESSAGES.account_id, body.state + " accountId " + JSON.stringify(accountId));
+    for (const genesisHash of hashes) await bad({ ...body, genesisHash }, "genesis_hash", BINDING_MESSAGES.genesis_hash, body.state + " genesisHash " + JSON.stringify(genesisHash));
+  }
+  for (const bindingId of ids) await bad({ ...changed, bindingId }, "binding_id", BINDING_MESSAGES.binding_id, "bindingId " + JSON.stringify(bindingId));
+  for (const version of versions) await bad({ ...changed, version }, "version", BINDING_MESSAGES.version, "version " + String(version));
+  for (const bindingState of [undefined, "", "Bound", "rebound", "bound ", "bound\n", "binding_changed", 5, null, ["bound"]]) await bad({ ...changed, bindingState }, "binding_state", BINDING_MESSAGES.binding_state, "bindingState " + JSON.stringify(bindingState));
+  // The reason is an exact code here, not the free text of today's report reason.
+  for (const reason of [undefined, "", "Bound_elsewhere", "bound_elsewhere ", "bound elsewhere", "the other account was bound", "owner disabled", "disabled", 5, null, ["owner_disabled"]]) await bad({ ...attempt, reason }, "reason", BINDING_MESSAGES.reason, "reason " + JSON.stringify(reason));
+  // An ISO time as toISOString writes it.
+  const instant = ISO(s.clock.now);
+  for (const attemptedAt of [undefined, "", null, 5, s.clock.now, "2026-11-22", instant.replace(".", ","), instant.replace(/\.\d{3}Z$/, "Z"), instant.replace("Z", "+00:00"), instant.replace("T", " "), instant.toLowerCase(), instant + "\n", "2026-02-30T10:00:00.000Z", "not a time", ["2026-11-22T10:00:00.000Z"]]) {
+    await bad({ ...attempt, attemptedAt }, "attempted_at", BINDING_MESSAGES.attempted_at, "attemptedAt " + JSON.stringify(attemptedAt));
+  }
+  // The order of the fields: with several wrong, the first of the contract's list is the one named.
+  await bad({ ...changed, account: "x", accountId: "", genesisHash: "x", bindingId: "", version: 0, bindingState: "x" }, "account");
+  await bad({ ...changed, accountId: "", genesisHash: "x", bindingId: "", version: 0, bindingState: "x" }, "account_id");
+  await bad({ ...changed, genesisHash: "x", bindingId: "", version: 0, bindingState: "x" }, "genesis_hash");
+  await bad({ ...changed, bindingId: "", version: 0, bindingState: "x" }, "binding_id");
+  await bad({ ...changed, version: 0, bindingState: "x" }, "version");
+  await bad({ ...attempt, reason: "x", attemptedAt: "x" }, "reason");
+  await bad(null, "report");
+  await bad([], "report");
+  await bad("binding_changed", "report");
+  await assertNothingRecorded(s, "after every refusal");
+
+  // The limits are accepted: 128 characters of the grammar's own, the largest safe version, and the four-digit years' ends.
+  const edge = "A._:-9".padEnd(128, "z");
+  assert.equal(edge.length, 128);
+  assert.deepEqual(await send(changedReport(3, { accountId: edge, bindingId: edge, version: Number.MAX_SAFE_INTEGER, reportId: "r".repeat(128) })), { accountId: edge, genesisHash: GENESIS, bindingId: edge, version: Number.MAX_SAFE_INTEGER, bindingState: "bound" });
+  assert.equal((await bindingRows(s))[0].version, Number.MAX_SAFE_INTEGER);
+  assert.deepEqual(await send(attemptReport(4, 0, { accountId: edge, attemptedAt: "0001-01-01T00:00:00.000Z", reason: "owner_disabled" })), { recorded: true });
+  assert.deepEqual(await send(attemptReport(5, 0, { attemptedAt: "9999-12-31T23:59:59.999Z" })), { recorded: true });
+});
+
+test("a custom Station's binding reports are 403 forbidden, and nothing is recorded", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const events = await countOf(s, "integration_events");
+  for (const body of [changedReport(1), attemptReport(2, s.clock.now)]) {
+    await assert.rejects(s.service.report(client, body), (error) => refused(403, "forbidden")(error) && error.message === "Only the built-in Station reports bindings.", body.state);
+    // Asking again is the same answer: the id was never recorded.
+    await assert.rejects(s.service.report(client, body), refused(403, "forbidden"));
+  }
+  await assertNothingRecorded(s);
+  assert.equal(await countOf(s, "integration_events"), events);
+  // The built-in Station, in the same database, is not held back by it.
+  const built = await builtIn(s);
+  assert.deepEqual(await s.service.report(built.reportClientId, changedReport(1)), { accountId: R9_ACCOUNT, genesisHash: GENESIS, bindingId: "bind-1", version: 1, bindingState: "bound" });
+  // An unknown report client is refused as for any report.
+  await assert.rejects(s.service.report("s-unknown", changedReport(9)), refused(403, "station"));
+});
+
+test("binding versions rise for each R9 account and genesis; the same version with the same binding changes nothing; any other not-newer one is 409 binding_version", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const built = await builtIn(s);
+  const client = built.reportClientId;
+  const send = (body) => s.service.report(client, body);
+  await s.service._pushesIdle();
+  s.pushFetch.posts.length = 0;
+  const events = await countOf(s, "integration_events");
+  const cursor = await s.repository.latestCursor(built.id);
+
+  // The first report for an R9 account and genesis is recorded, whatever its version.
+  const first = await send(changedReport(1, { version: 3 }));
+  assert.deepEqual(first, { accountId: R9_ACCOUNT, genesisHash: GENESIS, bindingId: "bind-1", version: 3, bindingState: "bound" });
+  assert.deepEqual(Object.keys(first), ["accountId", "genesisHash", "bindingId", "version", "bindingState"]);
+  assert.equal(typeof first.version, "number");
+  assert.deepEqual(await bindingRows(s), [{ station_id: built.id, r9_account_id: R9_ACCOUNT, genesis_hash: GENESIS, account_id: OWNER, binding_id: "bind-1", version: 3, binding_state: "bound", report_id: reportIdOf("binding_changed", 1) }]);
+
+  // A higher version replaces it: another owner, another binding, each state.
+  assert.deepEqual(await send(changedReport(2, { version: 4, account: MEMBER, bindingId: "bind-2" })), { accountId: R9_ACCOUNT, genesisHash: GENESIS, bindingId: "bind-2", version: 4, bindingState: "bound" });
+  assert.deepEqual((await bindingRows(s)).map((row) => [row.account_id, row.binding_id, row.version, row.binding_state, row.report_id]), [[MEMBER, "bind-2", 4, "bound", reportIdOf("binding_changed", 2)]]);
+  // Versions need not be consecutive, and unbound and released are bindings too: the owner is the one let go.
+  assert.equal((await send(changedReport(3, { version: 9, account: MEMBER, bindingId: "bind-2", bindingState: "unbound" }))).bindingState, "unbound");
+  assert.equal((await send(changedReport(4, { version: 10, account: MEMBER, bindingId: "bind-2", bindingState: "released" }))).bindingState, "released");
+  assert.deepEqual((await bindingRows(s)).map((row) => [row.account_id, row.version, row.binding_state]), [[MEMBER, 10, "released"]]);
+
+  // The same version with the same binding (the account, the bindingId and the bindingState) is 200 and changes nothing:
+  // the first report's id stays on the row, and this one is kept under its own id.
+  const before = (await s.db.pool.query("SELECT * FROM station_bindings")).rows[0];
+  const again = await send(changedReport(5, { version: 10, account: MEMBER, bindingId: "bind-2", bindingState: "released" }));
+  assert.deepEqual(again, { accountId: R9_ACCOUNT, genesisHash: GENESIS, bindingId: "bind-2", version: 10, bindingState: "released" });
+  assert.deepEqual((await s.db.pool.query("SELECT * FROM station_bindings")).rows[0], before, "the row is untouched, updated_at included");
+  assert.deepEqual((await savedReports(s)).map((row) => [row.report_id, row.integration_id]), [1, 2, 3, 4, 5].map((n) => [reportIdOf("binding_changed", n), null]));
+  assert.deepEqual(await send(changedReport(5, { version: 10, account: MEMBER, bindingId: "bind-2", bindingState: "released" })), again, "and its replay");
+
+  // A lower version, and the same version with another binding in any of the three fields, are 409, final: the id is not recorded.
+  const refusals = [
+    changedReport(6, { version: 9, account: MEMBER, bindingId: "bind-2", bindingState: "released" }),
+    changedReport(7, { version: 1, account: MEMBER, bindingId: "bind-2", bindingState: "released" }),
+    changedReport(8, { version: 9, account: OWNER, bindingId: "bind-9", bindingState: "bound" }),
+    changedReport(9, { version: 10, account: OWNER, bindingId: "bind-2", bindingState: "released" }),
+    changedReport(10, { version: 10, account: MEMBER, bindingId: "bind-other", bindingState: "released" }),
+    changedReport(11, { version: 10, account: MEMBER, bindingId: "bind-2", bindingState: "bound" }),
+    changedReport(12, { version: 10, account: MEMBER, bindingId: "bind-2", bindingState: "unbound" })
+  ];
+  for (const body of refusals) {
+    await assert.rejects(send(body), (error) => refused(409, "binding_version")(error) && error.message === BINDING_NOT_NEWER, JSON.stringify(body));
+    await assert.rejects(send(body), refused(409, "binding_version"), "the same refusal again: nothing was recorded");
+  }
+  assert.deepEqual((await bindingRows(s)).map((row) => [row.account_id, row.binding_id, row.version, row.binding_state, row.report_id]), [[MEMBER, "bind-2", 10, "released", reportIdOf("binding_changed", 4)]]);
+  assert.equal(await countOf(s, "station_reports"), 5, "a refused report records nothing, its id included");
+  // A refused id is free to be used for a newer binding.
+  assert.equal((await send(changedReport(6, { version: 11, account: OWNER, bindingId: "bind-3" }))).version, 11);
+
+  // Each R9 account at each genesis has its own versions.
+  assert.equal((await send(changedReport(13, { version: 1, genesisHash: "c".repeat(64) }))).version, 1);
+  assert.equal((await send(changedReport(14, { version: 1, accountId: "r9:account-2" }))).version, 1);
+  assert.equal((await send(changedReport(15, { version: 1, accountId: "R9:account-1" }))).version, 1, "an account id is case-sensitive");
+  assert.equal((await bindingRows(s)).length, 4);
+
+  // Nothing is an event, a change or a push.
+  assert.equal(await countOf(s, "integration_events"), events);
+  assert.equal(await s.repository.latestCursor(built.id), cursor);
+  await s.service._pushesIdle();
+  assert.deepEqual(s.pushFetch.posts, []);
+});
+
+test("a binding report's reportId: the same id with the same body is the recorded answer, with another body 409 report_id_reused", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const built = await builtIn(s);
+  const client = built.reportClientId;
+  const send = (body) => s.service.report(client, body);
+  const first = await send(changedReport(1, { version: 2 }));
+  assert.deepEqual(await send(changedReport(1, { version: 2 })), first);
+  // The same body with its keys in another order is the same body.
+  const { account, ...rest } = changedReport(1, { version: 2 });
+  assert.deepEqual(await send({ version: rest.version, bindingState: rest.bindingState, bindingId: rest.bindingId, genesisHash: rest.genesisHash, accountId: rest.accountId, account, reportId: rest.reportId, state: rest.state }), first);
+  // Another body under the id: refused, whichever field differs and whichever kind it is.
+  for (const body of [
+    changedReport(1, { version: 3 }), changedReport(1, { version: 2, bindingId: "bind-2" }), changedReport(1, { version: 2, account: MEMBER }), changedReport(1, { version: 2, bindingState: "unbound" }),
+    changedReport(1, { version: 2, accountId: "r9:other" }), changedReport(1, { version: 2, genesisHash: "c".repeat(64) }),
+    { ...attemptReport(1, s.clock.now), reportId: changedReport(1).reportId }
+  ]) await assert.rejects(send(body), (error) => refused(409, "report_id_reused")(error) && error.message === REUSED, JSON.stringify(body));
+  assert.deepEqual((await bindingRows(s)).map((row) => [row.version, row.report_id]), [[2, reportIdOf("binding_changed", 1)]]);
+  // The replay answers what was recorded even once the binding has moved on, and does not move it back.
+  await send(changedReport(2, { version: 7, bindingId: "bind-7" }));
+  assert.deepEqual(await send(changedReport(1, { version: 2 })), first);
+  assert.deepEqual((await bindingRows(s)).map((row) => [row.version, row.binding_id]), [[7, "bind-7"]]);
+
+  // An attempt's id works the same way, and is one namespace with every other report's.
+  const refused1 = await send(attemptReport(1, s.clock.now));
+  assert.deepEqual(refused1, { recorded: true });
+  assert.deepEqual(await send(attemptReport(1, s.clock.now)), { recorded: true });
+  assert.equal((await attemptRows(s)).length, 1, "the replay records no second attempt");
+  for (const body of [attemptReport(1, s.clock.now + 1), attemptReport(1, s.clock.now, { reason: "owner_disabled" }), attemptReport(1, s.clock.now, { account: MEMBER }), attemptReport(1, s.clock.now, { accountId: "r9:other" }), attemptReport(1, s.clock.now, { genesisHash: "c".repeat(64) }), { ...changedReport(3), reportId: attemptReport(1, s.clock.now).reportId }]) {
+    await assert.rejects(send(body), refused(409, "report_id_reused"), JSON.stringify(body));
+  }
+  assert.equal((await attemptRows(s)).length, 1);
+  // The same id for a revocation report of this Station is a reuse too.
+  const integration = await s.service.createIntegration(OWNER, { stationId: built.id, name: "Hosted", scopes: [], publicJwk: publicJwk() });
+  await s.service.approve(OWNER, integration.id, { r9Svc: R9 });
+  await s.service.revoke(OWNER, integration.id, { interruptRunning: false });
+  await s.service.report(client, appliedReport(integration.id, 1));
+  await assert.rejects(send(changedReport(9, { reportId: REPORT_ID(1) })), refused(409, "report_id_reused"));
+  await assert.rejects(send(attemptReport(9, s.clock.now, { reportId: REPORT_ID(1) })), refused(409, "report_id_reused"));
+  await assert.rejects(s.service.report(client, appliedReport(integration.id, 1, "desktop")), refused(409, "report_id_reused"));
+  // And a binding report's id is not free for a revocation report.
+  await assert.rejects(s.service.report(client, { ...appliedReport(integration.id, 2), reportId: changedReport(1).reportId }), refused(409, "report_id_reused"));
+});
+
+test("a retry of a binding report racing itself is recorded once and both calls get the same answer", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const built = await builtIn(s);
+  const body = changedReport(1, { version: 4 });
+  const answers = await Promise.all([1, 2, 3].map(() => s.service.report(built.reportClientId, body)));
+  assert.deepEqual(answers[1], answers[0]);
+  assert.deepEqual(answers[2], answers[0]);
+  assert.equal(await countOf(s, "station_reports"), 1);
+  assert.equal((await bindingRows(s)).length, 1);
+  // Two different reports at once: the higher version stands, whichever got in first.
+  const [low, high] = await Promise.allSettled([changedReport(2, { version: 5, bindingId: "low" }), changedReport(3, { version: 6, bindingId: "high" })].map((report) => s.service.report(built.reportClientId, report)));
+  assert.ok(high.status === "fulfilled");
+  assert.ok(low.status === "fulfilled" || low.reason.details?.code === "binding_version");
+  assert.deepEqual((await bindingRows(s)).map((row) => [row.binding_id, row.version]), [["high", 6]]);
+});
+
+test("a binding report shows in the built-in Station's checkpoint, in the contract's shape, and moves no cursor", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const built = await builtIn(s);
+  const client = built.reportClientId;
+  const before = await s.service.changes(client, "0", CHECKPOINT);
+  assert.deepEqual(before.checkpoint.bindings, []);
+  await s.service.report(client, changedReport(1, { version: 2 }));
+  await s.service.report(client, changedReport(2, { account: MEMBER, accountId: "r9:account-0", bindingId: "bind-0", genesisHash: "a".repeat(64) }));
+  await s.service.report(client, attemptReport(3, s.clock.now));
+  const after = await s.service.changes(client, "0", CHECKPOINT);
+  assert.equal(after.cursor, before.cursor, "a binding report is not a change of the feed");
+  assert.deepEqual(after.checkpoint.bindings, [
+    { account: MEMBER, accountId: "r9:account-0", genesisHash: "a".repeat(64), bindingId: "bind-0", version: 1, bindingState: "bound" },
+    { account: OWNER, accountId: R9_ACCOUNT, genesisHash: GENESIS, bindingId: "bind-1", version: 2, bindingState: "bound" }
+  ]);
+  for (const binding of after.checkpoint.bindings) assert.deepEqual(Object.keys(binding), ["account", "accountId", "genesisHash", "bindingId", "version", "bindingState"]);
+  // A newer version replaces it; a refused one changes nothing. An attempt is not a binding.
+  await s.service.report(client, changedReport(4, { version: 3, account: OTHER, bindingId: "bind-3", bindingState: "unbound" }));
+  await assert.rejects(s.service.report(client, changedReport(5, { version: 2 })), refused(409, "binding_version"));
+  assert.deepEqual((await s.service.changes(client, "0", CHECKPOINT)).checkpoint.bindings.map((binding) => [binding.accountId, binding.account, binding.version, binding.bindingState]), [
+    ["r9:account-0", MEMBER, 1, "bound"], [R9_ACCOUNT, OTHER, 3, "unbound"]
+  ]);
+  // Another Station's checkpoint has no bindings, and the feed is as it was.
+  assert.equal(Object.hasOwn((await s.service.changes(s.station.reportClientId, "0", CHECKPOINT)).checkpoint, "bindings"), false);
+  assert.equal((await s.service.changes(client, "0")).cursor, before.cursor);
+});
+
+test("a stopped integration revoked before migration 004 (revoked_at null) shows revokedAt: null in the checkpoint", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const id = await s.approved();
+  await s.service.revoke(OWNER, id, { interruptRunning: false });
+  await s.db.pool.query("UPDATE integrations SET revoked_at = NULL WHERE id = $1", [id]);
+  const [entry] = (await s.service.changes(s.station.reportClientId, "0", CHECKPOINT)).checkpoint.integrations;
+  assert.deepEqual([entry.id, entry.state, entry.revokedAt, Object.hasOwn(entry, "revokedAt")], [id, "revoking", null, true]);
+});
+
+test("a binding attempt is recorded, listed only on the page of the account it protects, for 30 days, and names no other account", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const built = await builtIn(s);
+  const client = built.reportClientId;
+  const send = (body) => s.service.report(client, body);
+  const events = await countOf(s, "integration_events");
+  const cursor = await s.repository.latestCursor(built.id);
+  await s.service._pushesIdle();
+  s.pushFetch.posts.length = 0;
+  const T = s.clock.now;
+  const notice = (fields) => ({ kind: "binding_attempt", accountId: R9_ACCOUNT, genesisHash: GENESIS, reason: "bound_elsewhere", attemptedAt: ISO(T), ...fields });
+
+  assert.deepEqual((await s.service.stations(OWNER)).notices, [], "none yet");
+  assert.deepEqual(await send(attemptReport(1, T)), { recorded: true });
+  const rows = await attemptRows(s);
+  assert.deepEqual(rows.map((row) => [row.station_id, row.report_id, row.account_id, row.r9_account_id, row.genesis_hash, row.reason, row.attempted_at.toISOString()]), [[built.id, reportIdOf("binding_attempt", 1), OWNER, R9_ACCOUNT, GENESIS, "bound_elsewhere", ISO(T)]]);
+  assert.equal(await countOf(s, "station_bindings"), 0, "an attempt binds nothing");
+  assert.equal(await countOf(s, "integration_events"), events);
+  assert.equal(await s.repository.latestCursor(built.id), cursor);
+  await s.service._pushesIdle();
+  assert.deepEqual(s.pushFetch.posts, []);
+
+  // Listed on the alerted account's page, in its own words: the R9 account, never the Agora.Build one reported as `account`.
+  const mine = await s.service.stations(OWNER);
+  assert.deepEqual(mine.notices, [notice()]);
+  assert.deepEqual(Object.keys(mine.notices[0]), ["kind", "accountId", "genesisHash", "reason", "attemptedAt"]);
+  assert.equal(mine.stale, false);
+  assert.ok(mine.stations.some((station) => station.builtIn));
+  // No other account sees it, or anything of it; its own list has an empty one.
+  for (const other of [MEMBER, OTHER]) {
+    const theirs = await s.service.stations(other);
+    assert.deepEqual(theirs.notices, [], other);
+    assert.doesNotMatch(JSON.stringify(theirs), new RegExp(OWNER + "|" + R9_ACCOUNT), "nothing of the attempt: " + other);
+  }
+  // Each account sees its own, newest first (by when it was attempted, not when it was reported), with owner_disabled.
+  await send(attemptReport(2, T - 5 * DAY, { reason: "owner_disabled", accountId: "r9:account-2", genesisHash: "c".repeat(64) }));
+  await send(attemptReport(3, T + 1000, { reason: "owner_disabled" }));
+  await send(attemptReport(4, T - 2 * DAY));
+  await send(attemptReport(5, T, { account: MEMBER, accountId: "r9:member" }));
+  assert.deepEqual((await s.service.stations(OWNER)).notices, [
+    notice({ reason: "owner_disabled", attemptedAt: ISO(T + 1000) }), notice(), notice({ attemptedAt: ISO(T - 2 * DAY) }),
+    notice({ reason: "owner_disabled", accountId: "r9:account-2", genesisHash: "c".repeat(64), attemptedAt: ISO(T - 5 * DAY) })
+  ]);
+  assert.deepEqual((await s.service.stations(MEMBER)).notices, [notice({ accountId: "r9:member" })]);
+  assert.deepEqual((await s.service.stations(OTHER)).notices, []);
+
+  // Thirty days: an attempt exactly 30 days old is still shown, one a millisecond older is not. The rows are kept.
+  s.clock.now = T + 30 * DAY - 5 * DAY;
+  assert.equal((await s.service.stations(OWNER)).notices.length, 4, "the oldest is exactly 30 days old");
+  s.clock.now += 1;
+  assert.deepEqual((await s.service.stations(OWNER)).notices.map((entry) => entry.attemptedAt), [ISO(T + 1000), ISO(T), ISO(T - 2 * DAY)]);
+  s.clock.now = T + 30 * DAY + 1000;
+  assert.deepEqual((await s.service.stations(OWNER)).notices.map((entry) => entry.attemptedAt), [ISO(T + 1000)]);
+  s.clock.now = T + 30 * DAY + 1001;
+  assert.deepEqual((await s.service.stations(OWNER)).notices, []);
+  assert.equal((await attemptRows(s)).length, 5);
+
+  // Auth being down is a stale list from the Portal's own rows, and the notices are the Portal's own too.
+  s.clock.now = T;
+  s.manage.down = true;
+  const stale = await s.service.stations(OWNER);
+  assert.equal(stale.stale, true);
+  assert.equal(stale.notices.length, 4);
+});
+
+test("with the setting off, the binding reports are 400 report, nothing is recorded, and the browser list has no notices", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const built = await builtIn(s);
+  for (const client of [built.reportClientId, s.station.reportClientId]) {
+    for (const body of [changedReport(1), attemptReport(2, s.clock.now)]) {
+      await assert.rejects(s.service.report(client, body), (error) => refused(400, "report")(error) && error.message === "Send a report as { integrationId, state, reason }.", body.state);
+    }
+    // Even a body of today's own fields: the state is not one of today's.
+    await assert.rejects(s.service.report(client, { integrationId: "i-1", state: "binding_changed" }), refused(400, "state"));
+    await assert.rejects(s.service.report(client, { integrationId: "i-1", state: "binding_attempt", reason: "bound_elsewhere" }), refused(400, "state"));
+  }
+  await assertNothingRecorded(s);
+  assert.equal(Object.hasOwn(await s.service.stations(OWNER), "notices"), false);
+  // Rows the table might hold are not shown with the setting off.
+  await s.db.transaction((client) => s.repository.saveBindingAttempt({ stationId: built.id, reportId: "x", accountId: OWNER, r9AccountId: R9_ACCOUNT, genesisHash: GENESIS, reason: "bound_elsewhere", attemptedAt: s.clock.now }, client));
+  assert.deepEqual(Object.keys(await s.service.stations(OWNER)).sort(), ["stale", "stations"]);
+});

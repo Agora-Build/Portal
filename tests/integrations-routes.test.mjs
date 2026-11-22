@@ -819,6 +819,59 @@ test("with the setting on, a Station sends revocation_applied and the final revo
   assert.deepEqual(mine.revocation, { appliedHosts: 1, outcome: "deadline_passed", unconfirmedHosts: 100 });
 });
 
+test("with the setting on, the built-in Station sends binding reports at /api/v1/stations/reports and the account's list shows its refused attempts; a custom Station is 403 and with it off they are 400", async (t) => {
+  const integrations = await stack(t, { delegatedHostWork: true });
+  if (!integrations) return;
+  const built = integrations.manage.seedBuiltIn({ integrations: true });
+  await integrations.service.syncBuiltIn();
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const owner = await signIn(app);
+  const { station } = await registerStation(app, integrations, owner.cookie);
+  const genesisHash = "b".repeat(64);
+  const changed = { state: "binding_changed", reportId: "binding_changed:" + "a".repeat(64), account: owner.sub, accountId: "r9:account-1", genesisHash, bindingId: "bind-1", version: 2, bindingState: "bound" };
+  const attempted = { state: "binding_attempt", reportId: "binding_attempt:" + "a".repeat(64), account: owner.sub, accountId: "r9:account-1", genesisHash, reason: "bound_elsewhere", attemptedAt: new Date().toISOString() };
+  const builtToken = await app.fake.issueAccessToken({ sub: owner.sub, client_id: built.reportClientId, scope: "station.report" });
+  const report = (data, bearer = builtToken) => call(app.base, "/api/v1/stations/reports", { bearer, method: "POST", data });
+  const answered = async (response) => [response.status, await response.json()];
+
+  assert.deepEqual(await answered(await report(changed)), [200, { accountId: "r9:account-1", genesisHash, bindingId: "bind-1", version: 2, bindingState: "bound" }]);
+  assert.deepEqual(await answered(await report(changed)), [200, { accountId: "r9:account-1", genesisHash, bindingId: "bind-1", version: 2, bindingState: "bound" }], "the same id and body: the recorded answer");
+  assert.deepEqual(await answered(await report({ ...changed, reportId: "binding_changed:" + "b".repeat(64), version: 1 })), [409, { error: "This binding's version is not newer than the one recorded.", code: "binding_version" }]);
+  assert.deepEqual(await answered(await report({ ...changed, version: 3 })), [409, { error: "This reportId was already used for another report.", code: "report_id_reused" }]);
+  assert.deepEqual(await answered(await report({ ...changed, version: 0 })), [400, { error: "Send the version as a positive whole number.", code: "version" }]);
+  assert.deepEqual(await answered(await report({ ...changed, integrationId: "i-1" })), [400, { error: 'Send a binding report as { state: "binding_changed", reportId, account, accountId, genesisHash, bindingId, version, bindingState } or { state: "binding_attempt", reportId, account, accountId, genesisHash, reason, attemptedAt }.', code: "report" }]);
+  assert.deepEqual(await answered(await report(attempted)), [200, { recorded: true }]);
+  // The checkpoint, with the Station's own token, has the binding.
+  const checkpoint = await (await call(app.base, "/api/v1/stations/changes?checkpoint=1", { bearer: builtToken })).json();
+  assert.deepEqual(checkpoint.checkpoint.bindings, [{ account: owner.sub, accountId: "r9:account-1", genesisHash, bindingId: "bind-1", version: 2, bindingState: "bound" }]);
+
+  // The browser's list carries the attempt, to the account it was made for and no one else.
+  const mine = await (await call(app.base, "/api/stations", { cookie: owner.cookie })).json();
+  assert.deepEqual(mine.notices, [{ kind: "binding_attempt", accountId: "r9:account-1", genesisHash, reason: "bound_elsewhere", attemptedAt: attempted.attemptedAt }]);
+  const stranger = await signIn(app);
+  assert.deepEqual((await (await call(app.base, "/api/stations", { cookie: stranger.cookie })).json()).notices, []);
+
+  // A custom Station may not.
+  const customToken = await app.fake.issueAccessToken({ sub: owner.sub, client_id: station.reportClientId, scope: "station.report" });
+  assert.deepEqual(await answered(await report(changed, customToken)), [403, { error: "Only the built-in Station reports bindings.", code: "forbidden" }]);
+  assert.deepEqual(await answered(await report(attempted, customToken)), [403, { error: "Only the built-in Station reports bindings.", code: "forbidden" }]);
+  // Without the Station's scope it is no report at all.
+  const readToken = await app.fake.issueAccessToken({ sub: owner.sub, client_id: built.reportClientId, scope: "integrations:read" });
+  assertScope(await report(changed, readToken), "station.report");
+
+  // With the setting off: today's report body rules, and a list as it was.
+  const off = await stack(t);
+  const offBuilt = off.manage.seedBuiltIn({ integrations: true });
+  await off.service.syncBuiltIn();
+  const offApp = await start(t, { integrations: off.service });
+  const offOwner = await signIn(offApp);
+  const offToken = await offApp.fake.issueAccessToken({ sub: offOwner.sub, client_id: offBuilt.reportClientId, scope: "station.report" });
+  const rejected = await call(offApp.base, "/api/v1/stations/reports", { bearer: offToken, method: "POST", data: { ...changed, account: offOwner.sub } });
+  assert.deepEqual([rejected.status, (await rejected.json()).code], [400, "report"]);
+  const list = await (await call(offApp.base, "/api/stations", { cookie: offOwner.cookie })).json();
+  assert.equal("notices" in list, false);
+});
+
 test("a read token for a Station comes from exchanging the session's ID token", async (t) => {
   const integrations = await stack(t);
   if (!integrations) return;
@@ -1495,7 +1548,8 @@ test("with the setting on, a token on the unversioned /api/stations gets the ver
   const listed = await call(app.base, "/api/stations?limit=1&cursor=nonsense", { cookie: ada.cookie });
   assert.equal(listed.status, 200, "a browser session ignores the directory's parameters");
   const body = await listed.json();
-  assert.deepEqual(Object.keys(body).sort(), ["stale", "stations"]);
+  assert.deepEqual(Object.keys(body).sort(), ["notices", "stale", "stations"], "with the setting on the list also carries the account's notices (none here)");
+  assert.deepEqual(body.notices, []);
   assert.deepEqual(body.stations.map((entry) => [entry.id, entry.role]), [[built.id, "built_in"], [station.id, "owner"]]);
   assert.deepEqual(Object.keys(body.stations[1]).sort(), ["builtIn", "createdAt", "id", "integrationsEnabled", "name", "origin", "ownerAccount", "reportClientId", "role", "status"], "today's view, not the directory's");
 });
