@@ -61,3 +61,9 @@ CREATE TABLE binding_attempts (
   PRIMARY KEY (station_id, report_id)
 );
 CREATE INDEX binding_attempts_account_idx ON binding_attempts (account_id, attempted_at);
+
+-- Binding reports name no integration, and are kept by their report id like the revocation reports.
+ALTER TABLE station_reports ALTER COLUMN integration_id DROP NOT NULL;
+
+-- The Station directory reads an account's ended memberships too; 001's index covers current members only.
+CREATE INDEX station_members_account_all_idx ON station_members (account_id);

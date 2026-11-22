@@ -269,4 +269,42 @@ test("migration 006 adds the availability, applied-entry, baseline and binding t
   await assert.rejects(attempt({ report: "rep-3", reason: "other" }), { code: "23514" });
   const { rows: [{ indexdef }] } = await q("SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'binding_attempts_account_idx'");
   assert.match(indexdef, /\(account_id, attempted_at\)$/);
+
+  // directoryFor reads an account's ended memberships too, which 001's partial index (current members only) can't serve.
+  const named = Object.fromEntries((await q("SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'station_members'")).rows.map((row) => [row.indexname, row.indexdef]));
+  assert.match(named.station_members_account_all_idx, /\(account_id\)$/, "every membership of an account, ended ones included");
+  assert.match(named.station_members_account_idx, /WHERE \(removed_at IS NULL\)$/, "001's index for current members is still there");
+});
+
+// A binding report names no integration (Portal #41), but is kept by its report id like the revocation reports are.
+test("migration 006 lets a Station's report name no integration, and the report id is still unique per Station", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) return t.skip("PORTAL_TEST_DATABASE_URL is not set");
+  const report = (stationId, reportId, integrationId) => db.pool.query("INSERT INTO station_reports (station_id, report_id, integration_id, body, answer) VALUES ($1, $2, $3, '{}', '{}')", [stationId, reportId, integrationId]);
+  await report("st1", "r-1", null);
+  await report("st1", "r-2", "i-1");
+  await assert.rejects(report("st1", "r-1", null), { code: "23505" }, "a report id is unique per Station, with or without an integration");
+  await report("st2", "r-1", null);
+  const { rows } = await db.pool.query("SELECT report_id, integration_id FROM station_reports WHERE station_id = 'st1' ORDER BY report_id");
+  assert.deepEqual(rows, [{ report_id: "r-1", integration_id: null }, { report_id: "r-2", integration_id: "i-1" }]);
+  await assert.rejects(report("st1", "bad id", null), { code: "23514" }, "the report id is still checked");
+});
+
+test("migration 006 keeps the reports a database had, each with its integration", async (t) => {
+  const open = await emptySchema(t);
+  if (!open) return t.skip("PORTAL_TEST_DATABASE_URL is not set");
+  const db = open();
+  await db.transaction(async (client) => {
+    await client.query("CREATE TABLE portal_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())");
+    for (const file of ["001_integrations.sql", "002_built_in_stations.sql", "003_auth_changes.sql", "004_delegated_host_work.sql", "005_station_reports.sql"]) {
+      await client.query(await readFile(new URL("../migrations/" + file, import.meta.url), "utf8"));
+      await client.query("INSERT INTO portal_migrations (version) VALUES ($1)", [file]);
+    }
+  });
+  await db.pool.query("INSERT INTO station_reports (station_id, report_id, integration_id, body, answer) VALUES ('st1', 'r-1', 'i-1', '{\"a\":1}', '{\"b\":2}')");
+  const before = (await db.pool.query("SELECT * FROM station_reports")).rows;
+  assert.deepEqual(await db.migrate(), ["006_availability_bindings.sql"]);
+  assert.deepEqual((await db.pool.query("SELECT * FROM station_reports")).rows, before);
+  await db.pool.query("INSERT INTO station_reports (station_id, report_id, body, answer) VALUES ('st1', 'r-2', '{}', '{}')");
+  assert.deepEqual((await db.pool.query("SELECT report_id, integration_id FROM station_reports ORDER BY report_id")).rows, [{ report_id: "r-1", integration_id: "i-1" }, { report_id: "r-2", integration_id: null }], "after 006 a report may name no integration");
 });

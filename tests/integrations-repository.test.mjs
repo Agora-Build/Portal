@@ -485,6 +485,15 @@ test("a Station's report is kept by its id with the body and the answer, per Sta
   await assert.rejects(db.transaction((client) => repo.saveStationReport({ stationId: "st1", reportId: "bad id", integrationId: "i-1", body, answer }, client)), { code: "23514" });
 });
 
+test("a Station's report that names no integration (a binding report) is kept and read back with integrationId null", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  const body = { state: "binding_attempt", reportId: "r-9", account: "ab1" };
+  await db.transaction((client) => repo.saveStationReport({ stationId: "st1", reportId: "r-9", integrationId: null, body, answer: { recorded: true } }, client));
+  assert.deepEqual(await repo.stationReport("st1", "r-9"), { integrationId: null, body, answer: { recorded: true } });
+  await assert.rejects(db.transaction((client) => repo.saveStationReport({ stationId: "st1", reportId: "r-9", integrationId: null, body, answer: {} }, client)), { code: "23505" }, "still once per Station");
+});
+
 test("a revocation's hosts are recorded once each, per integration, and read back as a set of names", async (t) => {
   const { repo, db } = await setup(t);
   if (!repo) return;
