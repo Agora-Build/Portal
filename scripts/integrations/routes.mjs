@@ -42,7 +42,12 @@ export function createIntegrationStack({ db, manage, idp, log, stationFetch = cr
   // seconds, and when Auth answers 409 admin_paused to a resume (it changed something the Portal has not read yet).
   let feed = null;
   const service = createIntegrationService({ repository, db, manage, stationFetch, pushFetch, exchange, log, authChanged: () => feed?.request(), delegatedHostWork });
-  feed = createAuthChanges({ repository, manage, apply: (change) => service.applyAuthChange(change), log, settings: authChanges });
+  // The reader tells the service when it starts the feed over and when it has caught up: account availability is complete
+  // only once the feed has been read to its end (D29, the setting on; with it off both do nothing).
+  feed = createAuthChanges({
+    repository, manage, apply: (change) => service.applyAuthChange(change), log, settings: authChanges,
+    startingOver: () => service.accountsStartingOver(), caughtUp: () => service.accountsCaughtUp()
+  });
   let pending = null;
   let prepared = false;
   const partitions = setInterval(() => {

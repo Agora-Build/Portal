@@ -82,11 +82,11 @@ function feedOf(count) {
   return manage;
 }
 const QUICK = { pollMs: 3600000, minGapMs: 20, pageSize: 2, pagesPerPull: 3 };
-function reader(t, { manage, repository = memoryCursor(), apply, log = () => {}, settings = {}, now }) {
+function reader(t, { manage, repository = memoryCursor(), apply, log = () => {}, settings = {}, now, startingOver, caughtUp }) {
   const applied = [];
   const feed = createAuthChanges({
     repository, manage, log, settings: { ...QUICK, ...settings }, apply: apply ?? (async (change) => { applied.push(change.cursor); }),
-    ...(now ? { now } : {})
+    ...(now ? { now } : {}), ...(startingOver ? { startingOver } : {}), ...(caughtUp ? { caughtUp } : {})
   });
   t.after(() => feed.stop());
   return { feed, applied, repository };
@@ -344,4 +344,101 @@ test("a wall clock stepped back never delays a requested read beyond minGapMs", 
   feed.request();
   await feed.idle();
   assert.equal(manage.reads.length, 3);
+});
+
+// Account availability (D29): the reader tells the service when it starts over from Auth's first entry (a first start, or
+// a reset) and when a read has caught up with the end of the feed; the service decides what that means.
+function hooked() {
+  const events = watched();
+  return {
+    events,
+    apply: async (change) => { events.push("apply " + change.cursor); },
+    startingOver: async () => { events.push("starting over"); },
+    caughtUp: async () => { events.push("caught up"); }
+  };
+}
+
+test("a read that begins with no saved cursor says it is starting over before its first page, and one that ends on a short page says it has caught up", async (t) => {
+  const manage = feedOf(3);
+  const hooks = hooked();
+  const { feed } = reader(t, { manage, ...hooks });
+  feed.start();
+  await feed.idle();
+  assert.deepEqual(hooks.events, ["starting over", "apply c1", "apply c2", "apply c3", "caught up"]);
+  // The next read begins at the saved cursor: nothing starts over, and an empty page is a short one.
+  manage.add();
+  feed.request();
+  await feed.idle();
+  assert.deepEqual(hooks.events.slice(5), ["apply c4", "caught up"]);
+});
+
+test("with a saved cursor a read does not start over, and a read of full pages that is not at the end says nothing until the page that is short", async (t) => {
+  const manage = feedOf(7);
+  const hooks = hooked();
+  const { feed } = reader(t, { manage, repository: memoryCursor("c1"), settings: { pagesPerPull: 2 }, ...hooks });
+  feed.start();
+  await feed.idle();
+  // c2..c7 is three pages of two; the read of two pages ends with more waiting, the next read ends on an empty page.
+  assert.deepEqual(hooks.events, ["apply c2", "apply c3", "apply c4", "apply c5", "apply c6", "apply c7", "caught up"]);
+  assert.deepEqual(manage.reads.map((read) => read.after), ["c1", "c3", "c5", "c7"]);
+});
+
+test("a cursor ahead of Auth's feed is a reset, and the read says it is starting over before it reads again from the start", async (t) => {
+  const manage = feedOf(2);
+  const hooks = hooked();
+  const { feed } = reader(t, { manage, repository: memoryCursor("c9"), settings: { pageSize: 5 }, ...hooks });
+  feed.start();
+  await feed.idle();
+  assert.deepEqual(hooks.events, ["starting over", "apply c1", "apply c2", "caught up"]);
+  assert.deepEqual(manage.reads.map((read) => read.after), ["c9", null]);
+});
+
+test("a read stopped before it reaches the end of the feed does not say it has caught up", async (t) => {
+  const manage = feedOf(6);
+  let release;
+  const holding = new Promise((resolve) => { release = resolve; });
+  let applying = false;
+  const hooks = hooked();
+  const { feed } = reader(t, { manage, ...hooks, apply: async (change) => {
+    if (change.cursor === "c1") { applying = true; await holding; }
+    await hooks.apply(change);
+  } });
+  feed.start();
+  while (!applying) await sleep(5);
+  const stopping = feed.stop();
+  release();
+  await stopping;
+  assert.deepEqual(hooks.events, ["starting over", "apply c1", "apply c2"]);
+});
+
+test("a hook that fails fails the read, logged by its code: starting over stops it before any change, and caught up is said again by the next read", async (t) => {
+  const manage = feedOf(2);
+  const logs = watched();
+  const hooks = hooked();
+  let failing = Object.assign(new Error("down"), { code: "ECONNREFUSED" });
+  const { feed, repository } = reader(t, { manage, log: (line) => logs.push(line), settings: { pollMs: 25, pageSize: 5 }, ...hooks,
+    startingOver: async () => { if (failing) throw failing; await hooks.startingOver(); } });
+  feed.start();
+  await logs.reached(1);
+  assert.deepEqual(logs, ["Auth change feed failed: ECONNREFUSED."]);
+  assert.deepEqual([hooks.events.slice(), repository.saved], [[], []], "nothing applied");
+  failing = null;
+  await hooks.events.reached(4);
+  await feed.idle();
+  assert.deepEqual(hooks.events.slice(0, 4), ["starting over", "apply c1", "apply c2", "caught up"]);
+
+  // The same for caught up: the page is applied and its cursor saved, and the next read says it again.
+  const second = feedOf(2);
+  const more = hooked();
+  const secondLogs = watched();
+  let fail = Object.assign(new Error("down"), { code: "ECONNREFUSED" });
+  const other = reader(t, { manage: second, log: (line) => secondLogs.push(line), settings: { pollMs: 25, pageSize: 5 }, ...more,
+    caughtUp: async () => { if (fail) throw fail; await more.caughtUp(); } });
+  other.feed.start();
+  await secondLogs.reached(1);
+  assert.deepEqual(secondLogs, ["Auth change feed failed: ECONNREFUSED."]);
+  assert.deepEqual([more.events.slice(), other.repository.saved], [["starting over", "apply c1", "apply c2"], ["c2"]]);
+  fail = null;
+  await more.events.reached(4);
+  assert.deepEqual(more.events.slice(0, 4), ["starting over", "apply c1", "apply c2", "caught up"]);
 });

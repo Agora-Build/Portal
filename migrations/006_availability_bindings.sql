@@ -28,12 +28,15 @@ CREATE TABLE account_availability (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
--- One row once an accounts_baseline is applied; deleted when the Portal, with its setting off, skips an account entry.
+-- One row once an accounts_baseline is applied; deleted when the Portal skips an account-level entry (with its setting
+-- off, say). The baseline is complete only once the Portal has also caught up with the end of Auth's feed: it is then
+-- true, and the built-in Stations are told. Starting the feed over (a first start or a reset) makes it false again.
 CREATE TABLE account_baseline (
   id boolean PRIMARY KEY DEFAULT true CHECK (id),
   auth_cursor text NOT NULL,
   auth_at timestamptz NOT NULL,
-  applied_at timestamptz NOT NULL DEFAULT now()
+  applied_at timestamptz NOT NULL DEFAULT now(),
+  complete boolean NOT NULL DEFAULT false
 );
 
 -- The built-in Station's last reported binding per R9 account.

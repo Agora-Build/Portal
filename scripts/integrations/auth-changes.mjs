@@ -15,6 +15,12 @@
 // was deployed first; the Portal database). A failure is logged when it starts, then at most once an hour while it
 // lasts, and its end once. A cursor ahead of Auth's feed (409 cursor_ahead: Auth was restored from a backup) is
 // forgotten with a warning and the feed read again from the start in the same read: applying is idempotent.
+//
+// Account availability (D29) depends on the feed being read to its end. The reader says so through two hooks, both
+// optional: `startingOver` when a read begins from Auth's first entry (no saved cursor: a first start or a reset, or
+// the cursor was just forgotten because Auth's is behind it), and `caughtUp` when a read ends with nothing more waiting,
+// that is, its last page was not full. A read that stops for pagesPerPull pages, for stop() or for a failure says
+// neither, so the Portal's view of the accounts is complete only once a read has reached the end.
 import { ManageError } from "./auth-manage.mjs";
 
 export const AUTH_CHANGES = Object.freeze({ pollMs: 30000, minGapMs: 1000, pageSize: 100, pagesPerPull: 10 });
@@ -36,7 +42,7 @@ function failure(error) {
 }
 const cursorAhead = (error) => error instanceof ManageError && error.status === 409 && error.code === "cursor_ahead";
 
-export function createAuthChanges({ repository, manage, apply, log = () => {}, settings = AUTH_CHANGES, now = Date.now }) {
+export function createAuthChanges({ repository, manage, apply, startingOver = async () => {}, caughtUp = async () => {}, log = () => {}, settings = AUTH_CHANGES, now = Date.now }) {
   const { pollMs, minGapMs, pageSize, pagesPerPull } = { ...AUTH_CHANGES, ...settings };
   let started = false;
   let running = null;
@@ -85,6 +91,7 @@ export function createAuthChanges({ repository, manage, apply, log = () => {}, s
   // throws what stopped it. After stop() it returns before the next page: the cursor of every page applied is saved.
   async function read() {
     let cursor = await repository.authChangeCursor();
+    if (cursor === null) await startingOver();
     let reset = false;
     let pages = 0;
     while (pages < pagesPerPull) {
@@ -99,6 +106,7 @@ export function createAuthChanges({ repository, manage, apply, log = () => {}, s
         await repository.saveAuthChangeCursor(null);
         cursor = null;
         reset = true;
+        await startingOver();
         continue;
       }
       pages += 1;
@@ -119,7 +127,10 @@ export function createAuthChanges({ repository, manage, apply, log = () => {}, s
         await repository.saveAuthChangeCursor(nextCursor);
         cursor = nextCursor;
       }
-      if (changes.length < pageSize) return false;
+      if (changes.length < pageSize) {
+        await caughtUp();
+        return false;
+      }
     }
     return true;
   }

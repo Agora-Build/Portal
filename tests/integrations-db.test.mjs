@@ -237,8 +237,10 @@ test("migration 006 adds the availability, applied-entry, baseline and binding t
   await assert.rejects(availability("ab1", false), { code: "23505" }, "one row per account");
   await assert.rejects(q("INSERT INTO account_availability (account_id, disabled, auth_cursor, auth_at) VALUES ('ab2', NULL, 'YzEy', now())"), { code: "23502" });
 
-  // The mark is one row.
+  // The mark is one row, incomplete until the Portal has caught up with the feed.
   await q("INSERT INTO account_baseline (auth_cursor, auth_at) VALUES ('YzEz', now())");
+  assert.equal((await q("SELECT complete FROM account_baseline")).rows[0].complete, false, "complete is false by default");
+  await assert.rejects(q("UPDATE account_baseline SET complete = NULL"), { code: "23502" });
   await assert.rejects(q("INSERT INTO account_baseline (auth_cursor, auth_at) VALUES ('YzE0', now())"), { code: "23505" });
   await assert.rejects(q("INSERT INTO account_baseline (id, auth_cursor, auth_at) VALUES (false, 'YzE0', now())"), { code: "23514" });
 

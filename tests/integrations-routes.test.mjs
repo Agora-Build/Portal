@@ -932,6 +932,35 @@ test("the stack reads Auth's change feed once it is ready and again on each nudg
   await integrations.close();
 });
 
+// The stack wires the reader's hooks to the service (D29): the first read starts the feed over and, when it reaches the end,
+// the accounts are complete and each built-in Station is told; with the setting off the same feed completes nothing.
+async function readAccountsThroughTheStack(t, delegatedHostWork) {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
+  const admin = accountId();
+  const owner = accountId();
+  const manage = fakeManage({ delegated: true });
+  const built = manage.seedBuiltIn({ integrations: true, admins: [admin] });
+  manage.accountChange(owner, true, { actor: admin, reason: "Abuse" });
+  manage.baselineChange();
+  const integrations = createIntegrationStack({ db: { ...db, close: async () => {} }, manage, idp: null, log: () => {}, delegatedHostWork, authChanges: { pollMs: 3600000, minGapMs: 5 } });
+  await integrations.ready();
+  await waitFor(async () => (await db.pool.query("SELECT cursor FROM auth_change_feed")).rows[0]?.cursor === manage.feed.at(-1).cursor, "the whole feed read");
+  const complete = async () => (await db.pool.query("SELECT complete FROM account_baseline")).rows.map((row) => row.complete);
+  if (delegatedHostWork) {
+    await waitFor(async () => (await complete()).includes(true), "the baseline completed");
+    const feed = await integrations.service.changes(built.reportClientId, "0");
+    assert.deepEqual(feed.changes.filter((change) => change.kind.startsWith("account")).map((change) => [change.kind, change.account]), [["account_disabled", owner], ["accounts_baseline", null]]);
+    assert.deepEqual(feed.disabledAccounts, [owner]);
+  } else {
+    assert.deepEqual(await complete(), [], "no mark with the setting off");
+    assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM integration_events WHERE kind IN ('account_disabled', 'accounts_baseline')")).rows[0].n, 0);
+  }
+  await integrations.close();
+}
+test("the stack's reader tells the service when it has caught up: with the setting on the baseline completes and reaches the built-in Station", (t) => readAccountsThroughTheStack(t, true));
+test("the stack's reader with the setting off completes nothing and records nothing of Auth's account entries", (t) => readAccountsThroughTheStack(t, false));
+
 test("a nudge before the stack is ready asks for nothing: no ready() retries and no log per nudge while the database is down", async () => {
   const calls = [];
   const db = {

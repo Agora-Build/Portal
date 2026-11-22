@@ -594,38 +594,46 @@ export function createIntegrationService({
 
   // An account-level entry of Auth's change feed (D29, the setting on): an admin disabled or enabled an account, or Auth
   // wrote its accounts baseline. Everything happens in one transaction: the entry is marked applied (once, whatever is
-  // read again), the account's availability or the baseline mark is written, and each active built-in Station records
-  // the entry as an event of its feed, so a cursor-0 read lists the accounts disabled now (from availability) and a
-  // Station learns of each change. A custom Station never gets one: an admin's action against a person isn't disclosed
-  // to a third-party operator (design III.5). The Stations are pushed after the commit, and a failure anywhere rolls
-  // all of it back, so the reader's next read applies the entry once. With no built-in Station the tables are still
-  // updated. An entry older than the one the account's availability already has (an entry read late) is recorded as
-  // applied but changes nothing and reaches no Station: its event would tell a Station the account was in a state the
-  // table says it isn't. Returns "applied", or "skipped" when the entry was applied before or lost to a newer one.
+  // read again), and the account's availability is written, or the baseline recorded. A disable or enable is also
+  // recorded as an event on each active built-in Station, so a Station learns of each change (and a cursor-0 read lists
+  // the accounts disabled now, from availability); a custom Station never gets one, since an admin's action against a
+  // person isn't disclosed to a third-party operator (design III.5). The baseline reaches the Stations later, when the
+  // Portal has caught up (accountsCaughtUp). The Stations are pushed after the commit, and a failure anywhere rolls all
+  // of it back, so the reader's next read applies the entry once. With no built-in Station the tables are still
+  // updated. Order is the feed's: the reader applies entries in Auth's order under the event lock, and availability is
+  // whatever the entry applied last says, never judged by Auth's clock. Returns "applied", or "skipped" when the entry
+  // was applied before.
   async function accountChange(entry, actor, reason) {
     const baseline = entry.kind === BASELINE_KIND;
-    const result = await appending(async (client) => {
-      if (!(await repository.applyAccountEntry({ cursor: entry.cursor, at: entry.at, account: entry.owner, kind: entry.kind }, client))) return { done: true };
-      if (baseline) await repository.setBaseline(entry.cursor, entry.at, client);
-      else if (!(await repository.setAvailability(entry.owner, entry.kind === "account_disabled", entry.cursor, entry.at, client))) return { superseded: true };
-      const stations = await repository.builtInStations(client);
-      for (const station of stations) {
+    const stations = await appending(async (client) => {
+      if (!(await repository.applyAccountEntry({ cursor: entry.cursor, at: entry.at, account: entry.owner, kind: entry.kind }, client))) return null;
+      if (baseline) {
+        await repository.setBaseline(entry.cursor, entry.at, client);
+        return [];
+      }
+      await repository.setAvailability(entry.owner, entry.kind === "account_disabled", entry.cursor, entry.at, client);
+      const active = await repository.builtInStations(client);
+      for (const station of active) {
         await repository.appendEvent({
-          stationId: station.id, integrationId: null, accountId: baseline ? null : entry.owner, actor, kind: entry.kind, state: null, reason,
+          stationId: station.id, integrationId: null, accountId: entry.owner, actor, kind: entry.kind, state: null, reason,
           details: { authCursor: entry.cursor, authAt: entry.at, admin: entry.admin === true }
         }, client);
       }
-      return { stations };
+      return active;
     });
-    if (result.done) return "skipped";
-    if (result.superseded) {
-      log("Auth account change recorded without its state change: the Portal has a newer one.");
-      return "skipped";
-    }
-    if (!result.stations.length) log("Auth account change skipped: no built-in Station.");
-    for (const station of result.stations) changed(station.id);
+    if (stations === null) return "skipped";
+    if (!baseline && !stations.length) log("Auth account change skipped: no built-in Station.");
+    for (const station of stations) changed(station.id);
     return "applied";
   }
+
+  // The Portal skipped an account-level entry (its setting is off, or the entry is not one it can apply), so it no longer
+  // follows Auth's accounts: the baseline mark is cleared, and every applied entry is forgotten, so that reading the feed
+  // again from the start applies each in Auth's order, the baseline included. Availability is unknown until then.
+  const forgetAccounts = () => appending(async (client) => {
+    await repository.clearBaseline(client);
+    await repository.forgetAccountEntries(client);
+  });
 
   // Shown as paused while its own state is not: its owner's account is disabled.
   const shownPaused = (row) => row.state !== "paused" && effectiveState(row, now()) === "paused";
@@ -1259,8 +1267,9 @@ export function createIntegrationService({
     //
     // With the setting on (D29) an admin's interrupt_requested entry is followed the same way, and an account-level entry
     // (account_disabled, account_enabled or accounts_baseline; no integration) is applied once to the availability
-    // tables and recorded on every built-in Station (accountChange). With it off, such an entry is skipped like any
-    // other kind this Portal does not follow, and clears the baseline mark first.
+    // tables and, a disable or enable, recorded on every built-in Station (accountChange). With it off, such an entry is
+    // skipped like any other kind this Portal does not follow, and first clears the baseline mark and forgets the
+    // applied entries (forgetAccounts), as does one that is malformed or a person's own.
     //
     // The feed may be read after the Portal already followed a newer change (an owner's listing, the owner's own call,
     // or a revocation). Such an entry is still recorded, and a pause or revocation still applies: a pause that is out
@@ -1269,16 +1278,19 @@ export function createIntegrationService({
     // keeps its state and the event says so (details.superseded), so a resume read late never undoes a newer pause
     // (Ruling R-A). Auth's clock and the Portal's are compared here, so they are kept in sync.
     async applyAuthChange(entry) {
-      // With the setting off the Portal skips an account-level entry, so it no longer follows Auth's accounts: the
-      // baseline mark is cleared, and availability is unknown until a baseline is applied again (D29). Whatever the
-      // entry's shape: a kind of this sort is one, and the mark errs on the side of unknown.
-      if (!delegatedHostWork && plainObject(entry) && ACCOUNT_LEVEL_KINDS.includes(entry.kind)) await appending((client) => repository.clearBaseline(client));
+      // An account-level entry this Portal skips (the setting is off, or the entry is malformed or a person's own) leaves
+      // its view of the accounts unknown: whatever the entry's shape, a kind of this sort is one (D29, forgetAccounts).
+      const accountLevel = plainObject(entry) && ACCOUNT_LEVEL_KINDS.includes(entry.kind);
       if (!changeEntry(entry, delegatedHostWork)) {
+        if (accountLevel) await forgetAccounts();
         log("Auth change skipped: not a change entry.");
         return "skipped";
       }
       const ours = !OWNER_KINDS.includes(entry.kind) && entry.admin !== true && entry.actorAccountId !== null;
-      if (ours) return "skipped";
+      if (ours) {
+        if (accountLevel) await forgetAccounts();
+        return "skipped";
+      }
       const actor = typeof entry.actorAccountId === "string" && ACCOUNT_ID.test(entry.actorAccountId) ? entry.actorAccountId : SYSTEM;
       const reason = typeof entry.reason === "string" && entry.reason ? [...entry.reason].slice(0, AUTH_REASON_MAX).join("") : null;
       if (ACCOUNT_LEVEL_KINDS.includes(entry.kind)) return accountChange(entry, actor, reason);
@@ -1316,6 +1328,39 @@ export function createIntegrationService({
       if (applied.superseded) log("Auth change recorded without its state change: the Portal has a newer one.");
       changed(applied.stationId);
       return "applied";
+    },
+
+    // The reader of Auth's feed (auth-changes.mjs) starts it over from its first entry: a first start, or a reset (the
+    // cursor was forgotten, or Auth was restored). Until the Portal has caught up again the accounts are unknown, so the
+    // baseline mark is made incomplete (D29, the setting on). Entries already applied are skipped as it reads them again.
+    async accountsStartingOver() {
+      if (!delegatedHostWork) return;
+      await appending((client) => repository.markBaselineIncomplete(client));
+    },
+
+    // A read of Auth's feed reached its end (its last page wasn't full). If a baseline is recorded and not yet complete,
+    // the Portal's view of the accounts now is: it is marked complete, and each active built-in Station gets one
+    // accounts_baseline change and is pushed after the commit. From that change on, a Station's view is complete too.
+    // Called by every replica after every such read: only the first one that finds it incomplete completes it and
+    // appends (the event lock serializes them). Returns whether this call did. A failure rolls all of it back, so the
+    // next read tries again.
+    async accountsCaughtUp() {
+      if (!delegatedHostWork) return false;
+      const stations = await appending(async (client) => {
+        const baseline = await repository.markBaselineComplete(client);
+        if (!baseline) return null;
+        const active = await repository.builtInStations(client);
+        for (const station of active) {
+          await repository.appendEvent({
+            stationId: station.id, integrationId: null, accountId: null, actor: SYSTEM, kind: BASELINE_KIND, state: null, reason: null,
+            details: { authCursor: baseline.cursor, authAt: baseline.at, admin: false }
+          }, client);
+        }
+        return active;
+      });
+      if (stations === null) return false;
+      for (const station of stations) changed(station.id);
+      return true;
     },
 
     notify: (stationId) => changed(stationId),

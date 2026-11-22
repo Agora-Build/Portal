@@ -444,16 +444,14 @@ export function createRepository(db) {
       return rowCount > 0;
     },
 
-    // An account's availability as the latest applied entry says: one row per account, replaced by each entry, but never
-    // by an older one: Auth's time orders the entries, and at the same time the entry applied last says. An entry
-    // skipped while the Portal's setting was off, or applied late by another reader, can arrive after a newer one.
-    // Returns whether the entry took effect: false when a newer entry already stands.
+    // An account's availability as the entry applied last says: one row per account, replaced by each entry. Order comes
+    // from Auth's feed, which the reader applies in order under the event lock, not from the entries' times (Auth's
+    // nodes' clocks may disagree).
     async setAvailability(account, disabled, cursor, at, client) {
       if (typeof disabled !== "boolean") throw new TypeError("disabled must be true or false.");
-      const { rowCount } = await run(client,
-        "INSERT INTO account_availability (account_id, disabled, auth_cursor, auth_at) VALUES ($1, $2, $3, $4) ON CONFLICT (account_id) DO UPDATE SET disabled = EXCLUDED.disabled, auth_cursor = EXCLUDED.auth_cursor, auth_at = EXCLUDED.auth_at, updated_at = now() WHERE account_availability.auth_at <= EXCLUDED.auth_at",
+      await run(client,
+        "INSERT INTO account_availability (account_id, disabled, auth_cursor, auth_at) VALUES ($1, $2, $3, $4) ON CONFLICT (account_id) DO UPDATE SET disabled = EXCLUDED.disabled, auth_cursor = EXCLUDED.auth_cursor, auth_at = EXCLUDED.auth_at, updated_at = now()",
         [account, disabled, authCursorOf(cursor), timeOf(at, "at")]);
-      return rowCount > 0;
     },
 
     // The accounts that are disabled, in order: the "disabled" of a checkpoint and a built-in Station's cursor-0 snapshot.
@@ -462,20 +460,45 @@ export function createRepository(db) {
       return rows.map((row) => row.account_id);
     },
 
-    // The mark that an accounts_baseline was applied: Auth's feed alone is then authoritative for every account.
+    // Records that an accounts_baseline was applied: its cursor and time, replacing the one before. A new row starts
+    // incomplete; an existing one keeps its mark, since a baseline applied while the Portal is already complete (or
+    // replaying) says nothing about whether it has caught up.
     async setBaseline(cursor, at, client) {
       await run(client,
         "INSERT INTO account_baseline (id, auth_cursor, auth_at) VALUES (true, $1, $2) ON CONFLICT (id) DO UPDATE SET auth_cursor = EXCLUDED.auth_cursor, auth_at = EXCLUDED.auth_at, applied_at = now()",
         [authCursorOf(cursor), timeOf(at, "at")]);
     },
 
-    // Clears the mark: the Portal skipped an account entry while its setting was off, so availability is unknown again.
+    // Marks the recorded baseline complete: the Portal has caught up with Auth's feed since it was applied, so Auth's
+    // feed alone is authoritative for every account. Returns the baseline's { cursor, at } when this call completed it,
+    // and null when none is recorded or it already was: of several replicas, only the first one gets an answer.
+    async markBaselineComplete(client) {
+      const { rows } = await run(client, "UPDATE account_baseline SET complete = true WHERE NOT complete RETURNING auth_cursor, auth_at");
+      return rows[0] ? { cursor: rows[0].auth_cursor, at: iso(rows[0].auth_at) } : null;
+    },
+
+    // The feed is read from its start again (a first start, or a reset): the accounts are unknown until the Portal has
+    // caught up. The baseline stays recorded.
+    async markBaselineIncomplete(client) {
+      await run(client, "UPDATE account_baseline SET complete = false WHERE complete");
+    },
+
+    // Clears the mark: the Portal skipped an account-level entry, so availability is unknown again and the baseline must
+    // be applied again.
     async clearBaseline(client) {
       await run(client, "DELETE FROM account_baseline");
     },
 
+    // Forgets every applied account-level entry, so the next read of the feed applies each again, in Auth's order
+    // (service.applyAuthChange: an entry was skipped, so what was applied before it can no longer be trusted to be all).
+    async forgetAccountEntries(client) {
+      await run(client, "DELETE FROM auth_account_entries");
+    },
+
+    // Whether the accounts are complete: a baseline was applied and the Portal has caught up with the feed since. An
+    // account missing from disabledAccountList() is then enabled (or doesn't exist); until then it is unknown.
     async baselineApplied(client) {
-      const { rows } = await run(client, "SELECT EXISTS (SELECT 1 FROM account_baseline) AS applied");
+      const { rows } = await run(client, "SELECT EXISTS (SELECT 1 FROM account_baseline WHERE complete) AS applied");
       return rows[0].applied === true;
     },
 

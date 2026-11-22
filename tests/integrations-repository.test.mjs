@@ -518,54 +518,87 @@ test("an account's availability is the latest applied entry's; the disabled ones
   await assert.rejects(repo.setAvailability("ab6", true, "bad cursor", "2026-11-10T10:07:00.000Z"), TypeError);
 });
 
-// An entry the Portal skipped while its setting was off, or one a second reader applied late, can arrive after a newer
-// entry for the same account: it must not overwrite it. Auth's time orders them; the same time is the later applied.
-test("an older entry applied after a newer one for the same account loses; the same time is the later applied", async (t) => {
+// Order comes from Auth's feed, which the reader applies in order, not from Auth's clocks (two Auth nodes may disagree):
+// the entry applied last says, whatever time it carries.
+test("an account's availability is the entry applied last, whatever Auth's time on it", async (t) => {
   const { repo, db } = await setup(t);
   if (!repo) return;
   const row = async (account) => (await db.pool.query("SELECT disabled, auth_cursor, auth_at FROM account_availability WHERE account_id = $1", [account])).rows[0];
-  assert.equal(await repo.setAvailability("ab1", true, "YzE2", "2026-11-10T10:05:00.000Z"), true, "the first entry for an account is written");
-  assert.equal(await repo.setAvailability("ab1", false, "YzE1", "2026-11-10T10:00:00.000Z"), false, "an older entry is not");
-  assert.deepEqual(await repo.disabledAccountList(), ["ab1"]);
-  let kept = await row("ab1");
-  assert.deepEqual([kept.disabled, kept.auth_cursor, kept.auth_at.toISOString()], [true, "YzE2", "2026-11-10T10:05:00.000Z"]);
-  assert.equal(await repo.setAvailability("ab1", false, "YzE7", "2026-11-10T10:05:00.000Z"), true, "at the same time the later applied entry says");
+  await repo.setAvailability("ab1", true, "YzE6", "2026-11-10T10:05:00.000Z");
+  await repo.setAvailability("ab1", false, "YzE7", "2026-11-10T10:00:00.000Z");
+  const kept = await row("ab1");
+  assert.deepEqual([kept.disabled, kept.auth_cursor, kept.auth_at.toISOString()], [false, "YzE7", "2026-11-10T10:00:00.000Z"], "stamped earlier, applied later: it says");
   assert.deepEqual(await repo.disabledAccountList(), []);
-  assert.equal(await repo.setAvailability("ab1", true, "YzE8", "2026-11-10T10:05:00.001Z"), true, "a newer one does");
+  await repo.setAvailability("ab1", true, "YzE8", "2026-11-10T10:05:00.000Z");
   assert.deepEqual(await repo.disabledAccountList(), ["ab1"]);
-  assert.equal(await repo.setAvailability("ab2", false, "YzE9", "2026-11-10T09:00:00.000Z"), true, "another account's is its own");
-  kept = await row("ab2");
-  assert.deepEqual([kept.disabled, kept.auth_cursor], [false, "YzE9"]);
-  await db.transaction(async (client) => {
-    assert.equal(await repo.setAvailability("ab1", false, "YzE0", "2026-11-10T08:00:00.000Z", client), false, "inside a transaction");
-    assert.deepEqual(await repo.disabledAccountList(client), ["ab1"]);
-  });
+  await repo.setAvailability("ab1", false, "YzE9", "2026-11-10T10:05:00.000Z");
+  assert.deepEqual(await repo.disabledAccountList(), []);
 });
 
-test("the accounts baseline mark is set once an accounts_baseline is applied and cleared by a skipped account entry", async (t) => {
+test("the accounts baseline is recorded when applied and marked complete once the Portal has caught up; a skipped account entry clears it and starting over makes it incomplete", async (t) => {
   const { repo, db } = await setup(t);
   if (!repo) return;
+  const row = async () => (await db.pool.query("SELECT id, auth_cursor, auth_at, complete FROM account_baseline")).rows.map((entry) => [entry.id, entry.auth_cursor, entry.auth_at.toISOString(), entry.complete]);
   assert.equal(await repo.baselineApplied(), false, "no mark before the first baseline");
+  assert.equal(await repo.markBaselineComplete(), null, "nothing recorded: nothing to complete");
+  await repo.markBaselineIncomplete();
+  assert.deepEqual(await row(), []);
   await repo.setBaseline("YzEy", "2026-11-10T10:00:00.000Z");
+  assert.deepEqual(await row(), [[true, "YzEy", "2026-11-10T10:00:00.000Z", false]], "recorded, not complete");
+  assert.equal(await repo.baselineApplied(), false, "the mark is the complete one");
+  assert.deepEqual(await repo.markBaselineComplete(), { cursor: "YzEy", at: "2026-11-10T10:00:00.000Z" }, "the first completes it, and says which baseline");
   assert.equal(await repo.baselineApplied(), true);
+  assert.equal(await repo.markBaselineComplete(), null, "the second finds it complete");
   await repo.setBaseline("YzEz", "2026-11-11T10:00:00.000Z");
-  const { rows } = await db.pool.query("SELECT id, auth_cursor, auth_at FROM account_baseline");
-  assert.deepEqual(rows.map((row) => [row.id, row.auth_cursor, row.auth_at.toISOString()]), [[true, "YzEz", "2026-11-11T10:00:00.000Z"]], "one row, the newest baseline");
+  assert.deepEqual(await row(), [[true, "YzEz", "2026-11-11T10:00:00.000Z", true]], "one row, the newest baseline; a baseline leaves complete as it is");
+  await repo.markBaselineIncomplete();
+  assert.equal(await repo.baselineApplied(), false);
+  assert.deepEqual(await row(), [[true, "YzEz", "2026-11-11T10:00:00.000Z", false]], "the baseline stays recorded");
+  await repo.markBaselineIncomplete();
+  assert.deepEqual(await repo.markBaselineComplete(), { cursor: "YzEz", at: "2026-11-11T10:00:00.000Z" });
   await repo.clearBaseline();
   assert.equal(await repo.baselineApplied(), false);
+  assert.deepEqual(await row(), []);
   await repo.clearBaseline();
   assert.equal(await repo.baselineApplied(), false, "clearing a mark that isn't there is fine");
   await repo.setBaseline("YzE0", "2026-11-12T10:00:00.000Z");
+  assert.deepEqual(await row(), [[true, "YzE0", "2026-11-12T10:00:00.000Z", false]], "a new baseline after a clear starts incomplete");
+  await repo.markBaselineComplete();
   await db.transaction(async (client) => {
     assert.equal(await repo.baselineApplied(client), true, "inside a transaction");
     await repo.clearBaseline(client);
     assert.equal(await repo.baselineApplied(client), false);
     await repo.setBaseline("YzE1", "2026-11-13T10:00:00.000Z", client);
+    assert.equal(await repo.baselineApplied(client), false);
+    assert.deepEqual(await repo.markBaselineComplete(client), { cursor: "YzE1", at: "2026-11-13T10:00:00.000Z" });
     assert.equal(await repo.baselineApplied(client), true);
   });
   await assert.rejects(repo.setBaseline("YzE6", undefined), TypeError);
   await assert.rejects(repo.setBaseline("bad cursor", "2026-11-13T10:00:00.000Z"), TypeError);
   assert.equal(await repo.baselineApplied(), true);
+});
+
+test("the applied entries of Auth's account feed can all be forgotten, so the next read applies them again", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  const at = "2026-11-10T10:00:00.000Z";
+  const entry = { cursor: "YzEy", at, account: "ab1", kind: "account_disabled" };
+  const count = async () => (await db.pool.query("SELECT count(*)::int AS n FROM auth_account_entries")).rows[0].n;
+  await repo.forgetAccountEntries();
+  assert.equal(await count(), 0, "forgetting nothing is fine");
+  assert.equal(await repo.applyAccountEntry(entry), true);
+  assert.equal(await repo.applyAccountEntry({ ...entry, cursor: "YzEz", account: null, kind: "accounts_baseline" }), true);
+  assert.equal(await repo.applyAccountEntry(entry), false);
+  assert.equal(await repo.forgetAccountEntries(), undefined);
+  assert.equal(await count(), 0);
+  assert.equal(await repo.applyAccountEntry(entry), true, "applied again");
+  await assert.rejects(db.transaction(async (client) => {
+    await repo.forgetAccountEntries(client);
+    assert.equal(await repo.applyAccountEntry(entry, client), true, "inside a transaction");
+    throw new Error("stop");
+  }), /stop/);
+  assert.equal(await count(), 1, "rolled back with the transaction");
+  assert.equal(await repo.applyAccountEntry(entry), false);
 });
 
 const bindingFields = (extra = {}) => ({ stationId: "st1", r9AccountId: "r9-1", genesisHash: "a".repeat(64), accountId: "ab1", bindingId: "b-1", version: 1, bindingState: "bound", reportId: "rep-1", ...extra });
