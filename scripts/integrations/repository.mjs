@@ -618,10 +618,13 @@ export function createRepository(db) {
         [stationId, reportId, accountId, r9AccountId, genesisHash, reason, timeOf(attemptedAt, "attemptedAt")]);
     },
 
-    // The attempts reported for this account (the one the Station says to alert) made at or after `since`, newest first.
-    // Only that account's: another account's attempt, and the other account named in one, are never read here.
-    async bindingAttemptsFor(accountId, since, client) {
-      const { rows } = await run(client, "SELECT * FROM binding_attempts WHERE account_id = $1 AND attempted_at >= $2 ORDER BY attempted_at DESC, station_id, report_id", [accountId, timeOf(since, "since")]);
+    // The attempts reported for this account (the one the Station says to alert) made at or after `since`, newest first,
+    // and with a `limit` only that many of the newest. Only that account's: another account's attempt, and the other
+    // account named in one, are never read here.
+    async bindingAttemptsFor(accountId, since, client, { limit } = {}) {
+      if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1)) throw new TypeError("limit must be a whole number, 1 or more.");
+      const { rows } = await run(client, "SELECT * FROM binding_attempts WHERE account_id = $1 AND attempted_at >= $2 ORDER BY attempted_at DESC, station_id, report_id" + (limit === undefined ? "" : " LIMIT $3"),
+        limit === undefined ? [accountId, timeOf(since, "since")] : [accountId, timeOf(since, "since"), limit]);
       return rows.map(bindingAttemptRow);
     }
   };

@@ -754,6 +754,12 @@ test("a refused binding attempt is kept once per Station and report id, and list
   assert.equal((await repo.bindingAttemptsFor("ab1", later(-40 * 86400000))).length, 4, "an earlier cut-off reaches further back");
   assert.deepEqual(await repo.bindingAttemptsFor("ab9", since), []);
   await db.transaction(async (client) => assert.equal((await repo.bindingAttemptsFor("ab1", since, client)).length, 3, "inside a transaction"));
+  // A limit keeps the newest that many, in the same order; none is the whole list.
+  assert.deepEqual((await repo.bindingAttemptsFor("ab1", since, undefined, { limit: 2 })).map((row) => [row.stationId, row.reportId]), [["st1", "rep-2"], ["st2", "rep-1"]], "the 2 newest");
+  assert.equal((await repo.bindingAttemptsFor("ab1", since, undefined, { limit: 10 })).length, 3);
+  assert.equal((await repo.bindingAttemptsFor("ab1", since, undefined, {})).length, 3);
+  await db.transaction(async (client) => assert.equal((await repo.bindingAttemptsFor("ab1", since, client, { limit: 1 })).length, 1, "inside a transaction"));
+  for (const limit of [0, -1, 1.5, "2", null, NaN]) await assert.rejects(repo.bindingAttemptsFor("ab1", since, undefined, { limit }), TypeError, String(limit));
   // The report id is kept once per Station: the caller looked it up first, so a second save is a mistake, not a replacement.
   await assert.rejects(save({ accountId: "ab2" }), { code: "23505" });
   await assert.rejects(save({ reportId: "rep-9", reason: "other" }), { code: "23514" });

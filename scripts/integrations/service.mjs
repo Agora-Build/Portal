@@ -40,8 +40,12 @@ const BINDING_REPORT_FIELDS = {
 const GENESIS_HASH = /^[0-9a-f]{64}$/;
 const BINDING_STATES = ["bound", "unbound", "released"];
 const ATTEMPT_REASONS = ["bound_elsewhere", "owner_disabled"];
-// A refused binding attempt is shown on the page of the account it protects for 30 days.
-const ATTEMPTS_SHOWN_FOR = 30 * 86400000;
+// A refused binding attempt is shown on the page of the account it protects for 30 days, the 50 newest at most. A report
+// may be dated a little ahead of the Portal's clock (the Station's own runs ahead), an hour at most: a far-future time
+// would otherwise keep its notice first on the page for good.
+const ATTEMPTS_SHOWN_FOR = 30 * DAY;
+const NOTICES_SHOWN = 50;
+const ATTEMPT_CLOCK_SKEW = 3600000;
 const CURSOR = /^\d{1,15}$/;
 const FEED_LIMIT = 500;
 // The Station directory (D29, GET /api/v1/stations): pages of at most 100 Stations, and a Station lost within 30 days (the
@@ -267,8 +271,9 @@ function reportReason(value) {
 
 // A binding report (the setting on): the built-in Station's binding_changed or binding_attempt, validated in this order: its
 // shape (exactly its form's fields: no integrationId, and none of another report's), the reportId, then the fields as the
-// contract lists them. The reason is a code here, not the free text of today's report reason.
-function bindingBody(body) {
+// contract lists them. The reason is a code here, not the free text of today's report reason. `now` is the Portal's clock,
+// for the latest time an attempt may be dated.
+function bindingBody(body, now) {
   if (Object.keys(body).some((key) => !BINDING_REPORT_FIELDS[body.state].includes(key))) throw failure(400, BINDING_REPORT_FORMS, "report");
   const { state, reportId, account, accountId, genesisHash } = body;
   if (typeof reportId !== "string" || !ID_GRAMMAR.test(reportId)) throw reportIdInvalid();
@@ -284,8 +289,9 @@ function bindingBody(body) {
   }
   const { reason, attemptedAt } = body;
   if (!ATTEMPT_REASONS.includes(reason)) throw attemptReasonInvalid();
-  // As toISOString writes it, in the four-digit years the database holds without a doubt.
-  if (typeof attemptedAt !== "string" || !CURSOR_TIME.test(attemptedAt) || !authTime(attemptedAt)) throw attemptedAtInvalid();
+  // As toISOString writes it, in the four-digit years the database holds without a doubt, and no more than an hour after
+  // the Portal's clock.
+  if (typeof attemptedAt !== "string" || !CURSOR_TIME.test(attemptedAt) || !authTime(attemptedAt) || Date.parse(attemptedAt) > now + ATTEMPT_CLOCK_SKEW) throw attemptedAtInvalid();
   return { state, reportId, account, accountId, genesisHash, reason, attemptedAt };
 }
 
@@ -294,9 +300,9 @@ function bindingBody(body) {
 // order: its shape (which fields may come together, and with which state), the state, the reportId, then the kind's
 // fields. What comes back is the normalised report, which is also what is kept and compared when the same reportId
 // comes again. The two binding reports (bindingBody) have their own form, and are told apart by their state first.
-function reportBody(body, { delegated = false } = {}) {
+function reportBody(body, { delegated = false, now = 0 } = {}) {
   const forms = () => failure(400, delegated ? DELEGATED_REPORT_FORMS : REPORT_FORM, "report");
-  if (delegated && plainObject(body) && typeof body.state === "string" && Object.hasOwn(BINDING_REPORT_FIELDS, body.state)) return bindingBody(body);
+  if (delegated && plainObject(body) && typeof body.state === "string" && Object.hasOwn(BINDING_REPORT_FIELDS, body.state)) return bindingBody(body, now);
   if (!plainObject(body) || Object.keys(body).some((key) => !(delegated ? DELEGATED_REPORT_FIELDS : REPORT_FIELDS).includes(key))) throw forms();
   const { integrationId, state, reason, reportId } = body;
   const given = (names) => names.some((name) => body[name] !== undefined);
@@ -1205,13 +1211,13 @@ export function createIntegrationService({
     },
 
     // The browser's list. With the setting on it also carries the account's notices (D29): the binding attempts the built-in
-    // Station refused for it in the last 30 days, newest first. Each names the R9 account, in its own id, and nothing of
+    // Station refused for it in the last 30 days, the 50 newest, newest first. Each names the R9 account, in its own id, and nothing of
     // the other Agora.Build account the attempt came from or went to.
     async stations(accountId) {
       const fresh = await reconcileWithAuth(accountId);
       const stations = (await repository.stationsFor(accountId)).map((station) => stationView(station, station.role));
       if (!delegatedHostWork) return { stations, stale: !fresh };
-      const attempts = await repository.bindingAttemptsFor(accountId, now() - ATTEMPTS_SHOWN_FOR);
+      const attempts = await repository.bindingAttemptsFor(accountId, now() - ATTEMPTS_SHOWN_FOR, undefined, { limit: NOTICES_SHOWN });
       const notices = attempts.map(({ r9AccountId, genesisHash, reason, attemptedAt }) => ({ kind: "binding_attempt", accountId: r9AccountId, genesisHash, reason, attemptedAt }));
       return { stations, stale: !fresh, notices };
     },
@@ -1447,7 +1453,7 @@ export function createIntegrationService({
     // (identifiedReport).
     async report(clientId, body) {
       const station = await reportingStation(clientId);
-      const parsed = reportBody(body, { delegated: delegatedHostWork });
+      const parsed = reportBody(body, { delegated: delegatedHostWork, now: now() });
       if (parsed.reportId !== undefined) return identifiedReport(station, parsed);
       const { integrationId, state, reason } = parsed;
       const row = typeof integrationId === "string" && integrationId ? await repository.integration(integrationId) : null;

@@ -1187,7 +1187,39 @@ test("with the setting on, the built-in Station's binding reports are validated:
   assert.deepEqual(await send(changedReport(3, { accountId: edge, bindingId: edge, version: Number.MAX_SAFE_INTEGER, reportId: "r".repeat(128) })), { accountId: edge, genesisHash: GENESIS, bindingId: edge, version: Number.MAX_SAFE_INTEGER, bindingState: "bound" });
   assert.equal((await bindingRows(s))[0].version, Number.MAX_SAFE_INTEGER);
   assert.deepEqual(await send(attemptReport(4, 0, { accountId: edge, attemptedAt: "0001-01-01T00:00:00.000Z", reason: "owner_disabled" })), { recorded: true });
-  assert.deepEqual(await send(attemptReport(5, 0, { attemptedAt: "9999-12-31T23:59:59.999Z" })), { recorded: true });
+  // The newest time accepted is one hour after the Portal's clock (the next test); the oldest is the first year.
+  assert.deepEqual(await send(attemptReport(5, 0, { attemptedAt: ISO(s.clock.now + 3600000) })), { recorded: true });
+});
+
+// A trusted Station's clock may run ahead, but a time far in the future could keep a notice at the top of the page for good,
+// so a binding_attempt dated more than an hour after the Portal's own clock is refused as an invalid attemptedAt.
+test("a binding_attempt dated more than an hour after the Portal's clock is 400 attempted_at, with the same message", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const built = await builtIn(s);
+  const send = (body) => s.service.report(built.reportClientId, body);
+  const HOUR = 3600000;
+  const T = s.clock.now;
+  const tooLate = (at, label) => assert.rejects(send(attemptReport(1, 0, { attemptedAt: at })), (error) => refused(400, "attempted_at")(error) && error.message === BINDING_MESSAGES.attempted_at, label);
+  await tooLate(ISO(T + HOUR + 1), "one millisecond over the hour");
+  await tooLate(ISO(T + HOUR + 1000), "a second over");
+  await tooLate(ISO(T + 2 * HOUR), "two hours");
+  await tooLate(ISO(T + 30 * DAY), "a month ahead");
+  await tooLate("9999-12-31T23:59:59.999Z", "the last day of year 9999");
+  await assertNothingRecorded(s, "after the refusals");
+  // The refusals recorded no id: the same reportId is free for a good time, and the limit is the Portal's clock, read when the report comes.
+  assert.deepEqual(await send(attemptReport(1, 0, { attemptedAt: ISO(T + HOUR) })), { recorded: true }, "exactly an hour ahead is allowed");
+  assert.deepEqual(await send(attemptReport(2, 0, { attemptedAt: ISO(T + HOUR - 1) })), { recorded: true });
+  assert.deepEqual(await send(attemptReport(3, 0, { attemptedAt: ISO(T) })), { recorded: true });
+  assert.deepEqual(await send(attemptReport(4, 0, { attemptedAt: ISO(T - 400 * DAY) })), { recorded: true }, "the past has no limit here");
+  assert.equal(await countOf(s, "binding_attempts"), 4);
+  s.clock.now = T + 10 * 60000;
+  await tooLate(ISO(T + HOUR + 10 * 60000 + 1), "the clock has moved on");
+  assert.deepEqual(await send(attemptReport(5, 0, { attemptedAt: ISO(T + HOUR + 10 * 60000) })), { recorded: true });
+  // The order of the fields stands: a wrong reason is named before the time.
+  await assert.rejects(send(attemptReport(6, 0, { reason: "x", attemptedAt: ISO(T + 30 * DAY) })), refused(400, "reason"));
+  // A binding_changed has no time, and is not touched.
+  assert.equal((await send(changedReport(7))).version, 1);
 });
 
 test("a custom Station's binding reports are 403 forbidden, and nothing is recorded", async (t) => {
@@ -1207,6 +1239,24 @@ test("a custom Station's binding reports are 403 forbidden, and nothing is recor
   assert.deepEqual(await s.service.report(built.reportClientId, changedReport(1)), { accountId: R9_ACCOUNT, genesisHash: GENESIS, bindingId: "bind-1", version: 1, bindingState: "bound" });
   // An unknown report client is refused as for any report.
   await assert.rejects(s.service.report("s-unknown", changedReport(9)), refused(403, "station"));
+});
+
+test("a malformed binding report from a custom Station is 400, not 403: the body is validated before who sent it", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const refusedShape = (error) => refused(400, "report")(error) && error.message === BINDING_FORMS;
+  // A shape no binding report has (a field of neither form, or an integrationId), from a custom Station: 400 report.
+  for (const body of [{ ...changedReport(1), integrationId: "i-1" }, { ...attemptReport(2, s.clock.now), extra: 1 }, { ...changedReport(3), reason: "bound_elsewhere" }]) {
+    await assert.rejects(s.service.report(client, body), refusedShape, JSON.stringify(body));
+  }
+  // The same with a field that is wrong: its own code, and still not the 403.
+  await assert.rejects(s.service.report(client, changedReport(4, { reportId: "bad id" })), refused(400, "report_id"));
+  await assert.rejects(s.service.report(client, changedReport(5, { version: 0 })), refused(400, "version"));
+  await assert.rejects(s.service.report(client, attemptReport(6, s.clock.now, { reason: "x" })), refused(400, "reason"));
+  // Well formed, it is the 403 it was.
+  await assert.rejects(s.service.report(client, changedReport(7)), refused(403, "forbidden"));
+  await assertNothingRecorded(s);
 });
 
 test("binding versions rise for each R9 account and genesis; the same version with the same binding changes nothing; any other not-newer one is 409 binding_version", async (t) => {
@@ -1439,6 +1489,31 @@ test("a binding attempt is recorded, listed only on the page of the account it p
   const stale = await s.service.stations(OWNER);
   assert.equal(stale.stale, true);
   assert.equal(stale.notices.length, 4);
+});
+
+test("the browser list shows at most the 50 newest notices; every attempt is kept", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const built = await builtIn(s);
+  const T = s.clock.now;
+  // 55 attempts, each a second after the one before it (n 55 is the newest), reported in an order that isn't the order they were made in.
+  const order = Array.from({ length: 55 }, (_, index) => (index * 7) % 55 + 1);
+  assert.equal(new Set(order).size, 55);
+  for (const n of order) await s.service.report(built.reportClientId, attemptReport(n, T - (55 - n) * 1000));
+  assert.equal(await countOf(s, "binding_attempts"), 55);
+  const { notices } = await s.service.stations(OWNER);
+  assert.equal(notices.length, 50);
+  assert.deepEqual(notices.map((notice) => notice.attemptedAt), Array.from({ length: 50 }, (_, index) => ISO(T - index * 1000)), "the 50 newest, newest first");
+  // An account with fewer sees them all, and nothing of another's count.
+  await s.service.report(built.reportClientId, attemptReport(100, T, { account: MEMBER, accountId: "r9:member" }));
+  assert.equal((await s.service.stations(MEMBER)).notices.length, 1);
+  assert.equal((await s.service.stations(OWNER)).notices.length, 50);
+  // The 30 days still apply first: the ones older than that are not shown, and the 50 are of those that are left.
+  s.clock.now = T + 30 * DAY - 52 * 1000;
+  assert.equal((await s.service.stations(OWNER)).notices.length, 50, "53 are inside the 30 days, 50 are shown");
+  s.clock.now = T + 30 * DAY - 30 * 1000;
+  const later = (await s.service.stations(OWNER)).notices;
+  assert.deepEqual([later.length, later[0].attemptedAt, later.at(-1).attemptedAt], [31, ISO(T), ISO(T - 30 * 1000)], "31 are inside the 30 days, all shown");
 });
 
 test("with the setting off, the binding reports are 400 report, nothing is recorded, and the browser list has no notices", async (t) => {
