@@ -548,9 +548,15 @@ The tables:
 | `station_challenges` | issued proof values, valid 10 minutes, single use |
 | `integrations` | Auth's `i-` client ID, owner, Station, scopes, state, `resume_state`, `r9_svc`, quota, expiry, `last_error`, `paused_by` (who paused it, as Auth says: `owner`, `station` or `admin`), `owner_disabled_at` (while Agora.Build has the owner's account disabled), `revoked_at` (when it was revoked; empty for one revoked before migration 004), `interrupt_running` (whether its revocation interrupts the tasks running on the owner's hosts; see below), `revocation_outcome` and `revocation_pending_hosts` (how its revocation ended, from the Station's final report: `all_applied` or `deadline_passed`, and the host ids that didn't confirm; empty until then and without the setting; migration 005) |
 | `integration_events` | every change, kept forever; also the Stations' change feed |
-| `station_reports` | a Station's reports that carry a `reportId` (migration 005, with `DELEGATED_HOST_WORK=1` only): the id, the integration, the body and the answer it got, kept forever so a retry gets the same answer; the key is the Station and the id |
+| `station_reports` | a Station's reports that carry a `reportId` (migration 005, with `DELEGATED_HOST_WORK=1` only): the id, the integration (none for a binding report), the body and the answer it got, kept forever so a retry gets the same answer; the key is the Station and the id |
 | `revocation_hosts` | the hosts that applied an integration's revocation (migration 005, with `DELEGATED_HOST_WORK=1` only): the host id, the record's id and the report's id, one row per host |
-| `auth_change_feed` | one row: where the Portal is in Auth's change feed (Auth's cursor) |
+| `auth_change_feed` | one row: where the Portal is in Auth's change feed (Auth's cursor) and, since migration 006, how it follows Auth's account entries: `accounts_mode` (`rebuilding`, `live` or `waiting`), `accounts_epoch`, the baseline the current rebuild has seen and whether the Stations are owed an `accounts_incomplete` change |
+| `account_availability` | migration 006, with `DELEGATED_HOST_WORK=1` only: each account Auth's feed has disabled or enabled, and the feed entry that said so; an account with no row is enabled (or doesn't exist) |
+| `auth_account_entries` | migration 006, with the setting on only: the account-level entries of Auth's feed the Portal has applied, once each |
+| `account_availability_rebuild`, `auth_account_entries_rebuild` | migration 006, with the setting on only: a rebuild's own copy of the two tables above, kept until the rebuild catches up with the end of Auth's feed |
+| `account_baseline` | migration 006, with the setting on only: one row, the last `accounts_baseline` applied and whether the Portal's view of the accounts is complete |
+| `station_bindings` | migration 006, with the setting on only: the built-in Station's last reported binding for each R9 account and genesis hash: the Agora.Build account, the binding id, the version and the state |
+| `binding_attempts` | migration 006, with the setting on only: the built-in Station's refused binding attempts, kept forever; the account page shows the last 30 days |
 
 Rows are never deleted: Stations get `removed_at`, members get `removed_at`,
 integrations end in `revoked`, and the event log only grows. `integration_events`
@@ -584,13 +590,29 @@ Migration `005_station_reports.sql` adds the tables `station_reports` and `revoc
 D29's Phase B (below). It runs when the server starts, whatever the setting. The Portal writes to them only with
 `DELEGATED_HOST_WORK=1`, so with it off they stay empty. Like the other rows, they are never deleted.
 
+Migration `006_availability_bindings.sql` adds the tables `account_availability`, `auth_account_entries`,
+`account_availability_rebuild`, `auth_account_entries_rebuild`, `account_baseline`, `station_bindings` and
+`binding_attempts`, and, on `auth_change_feed`, the columns `accounts_mode`, `accounts_epoch`, `rebuild_baseline_cursor`,
+`rebuild_baseline_at` and `accounts_incomplete_owed` (see "Account Availability" under "Admin Changes From Auth"). It also
+lets `integration_events.account_id` and `station_reports.integration_id` be empty (a baseline names no account, and a
+binding report no integration) and indexes `station_members` by account, for the Station directory. It runs when the server
+starts, whatever the setting, and waits for any change in the middle of being recorded. A Portal that has already read
+some of Auth's feed (its cursor is set) starts in `accounts_mode` `waiting`, since no earlier Portal applied Auth's account
+entries; a new one starts in `rebuilding`. The Portal writes to the new tables only with `DELEGATED_HOST_WORK=1`, so with
+it off they stay empty; the one exception is the setting-off rule in "Account Availability". Like the other rows, they are
+never deleted: a rebuild empties only its own two copies.
+
 **With `DELEGATED_HOST_WORK=1` (off by default):** the Portal offers delegated host work, Phase A of
 [D29](integrations.md#311-delegated-host-work-d29): a revocation says whether to interrupt the tasks running on the
 owner's hosts, those tasks can be interrupted later within 24 hours, and the built-in Station hears when an admin
 disables or enables an account. Phase B adds the Station's two revocation reports and, on a stopped integration, how many
-hosts applied the revocation ("Routes", "For Station Builders"). The Portal reads the one variable when it starts; only `1`
-turns it on, and any other value or none is off. Off is today's behaviour exactly: the routes, bodies, views and feed
-entries below do not exist and the account page shows nothing new. On, `GET /api/me` also answers
+hosts applied the revocation ("Routes", "For Station Builders"). The third slice adds the native Station directory
+(`GET /api/v1/stations`), the exact-cursor checkpoint (`?checkpoint=1`), account availability with its completeness mark
+and the built-in Station's two binding reports (`binding_changed` and `binding_attempt`). Releasing a binding
+(`binding_released`, and the admin site's release) waits for D27 and is not built. The Portal reads the one variable when it
+starts; only `1` turns it on, and any other value or none is off. Off is today's behaviour exactly: the routes, bodies,
+views and feed entries below do not exist and the account page shows nothing new (the one internal exception is the
+setting-off rule in "Account Availability"). On, `GET /api/me` also answers
 `"delegatedHostWork": true`, for the browser session only (the page reads it); the token route `GET /api/v1/me` is
 unchanged. Turn it on in the order, and with the precondition, in "Turning On Delegated Host Work".
 
@@ -633,7 +655,9 @@ unchanged. Turn it on in the order, and with the precondition, in "Turning On De
   no owner): the Portal accepts such a token only when `client_id` equals `sub`, `sub` is `s-` and 26 lower-case
   Crockford base32 characters, and the scope includes `station.report`. It reaches only the two report routes (403
   elsewhere) and is never a Portal account. Its feed lists every integration on it, each with `ownerAccount`, and
-  nothing else; push hints go to its origin.
+  nothing else; push hints go to its origin. With `DELEGATED_HOST_WORK=1` (off by default) its feed also carries the
+  account changes, its checkpoint the accounts and its bindings, and it may send the two binding reports; a custom Station
+  gets none of these ("For Station Builders").
 - **Sync.** The Portal learns of built-in Stations from Auth itself: when the Stations and integrations stack becomes
   ready (the server prepares it in the background as soon as it listens; a request to one of their routes waits for
   it) and then hourly, it reads Auth's listing of
@@ -684,8 +708,10 @@ integration's Station refuses still-valid tokens and closes open sessions at onc
   names the reason once when it starts, then at most once an hour, and says once when reads work again:
   `Auth change feed read failed: <code>.` (Auth refused or was unreachable), `Auth change feed not available yet:
   <code>.` (Auth answered 404: this Auth has no feed yet, as when the Portal was deployed first),
-  `Auth change not applied: <code>.` (a Portal database failure while following a change) and `Auth change feed failed:
-  <code>.`. No cursor, admin or reason is logged.
+  `Auth change not applied: <code>.` (a Portal database failure while following a change; with `DELEGATED_HOST_WORK=1`
+  also `stale_pass`, a read that began before another replica or a reset started account availability over, which stops
+  without applying or saving anything, "Account Availability") and `Auth change feed failed: <code>.`. No cursor, admin or
+  reason is logged.
 - **Following a change.** Changes the Portal made itself (an account's pause, resume or revoke through the routes
   below) are in the feed too; they are already recorded and are skipped. For each other change the Portal updates its
   row, records an `integration_events` row with the admin as `actor` (`system` when Auth acted itself) and the reason
@@ -727,7 +753,7 @@ integration's Station refuses still-valid tokens and closes open sessions at onc
   lift. To check by hand, compare the Portal's
   `SELECT id, owner_account, owner_disabled_at FROM integrations WHERE owner_disabled_at IS NOT NULL;` with Auth's
   `accounts.disabled_at` for those owners. A flag on an account Auth shows enabled is stale.
-- **With `DELEGATED_HOST_WORK=1` (off by default):** the Portal follows three more kinds of Auth's feed, which Auth
+- **With `DELEGATED_HOST_WORK=1` (off by default):** the Portal follows four more kinds of Auth's feed, which Auth
   writes only with its own `AUTH_DELEGATED_HOST_WORK` on.
   - `interrupt_requested`: an admin asked to interrupt the running tasks of a revoked integration. The Portal sets the
     integration's `interruptRunning`, records `integration_interrupt_requested` with the admin as `actor`, appends it to
@@ -735,12 +761,114 @@ integration's Station refuses still-valid tokens and closes open sessions at onc
     Portal sets the choice too, also on an integration its owner revoked first (the revocation keeps its first time). The
     choice only ever goes from false to true.
   - `account_disabled` and `account_enabled`: an admin disabled or enabled an account. They name the account (`owner`)
-    and no integration, and come ahead of the per-integration owner-disabled entries, which are followed as above. Each
-    active built-in Station records one, once (an event with no integration), and is pushed; a custom Station never gets
-    one, since an admin's action against a person is not disclosed to a Station's operator. With no built-in Station the
-    log says `Auth account change skipped: no built-in Station.`
-  - With the setting off the Portal skips these kinds like any entry it does not know (`Auth change skipped: not a
-    change entry.`) and its cursor moves past them.
+    and no integration, and come ahead of the per-integration owner-disabled entries, which are followed as above. Auth
+    also writes them, with no actor, as the corrections of its baseline (below). The Portal keeps each account's
+    availability and, while it is live, each active built-in Station records one, once (an event with no integration), and
+    is pushed; a custom Station never gets one, since an admin's action against a person is not disclosed to a Station's
+    operator. With no built-in Station the log says `Auth account change skipped: no built-in Station.` and the
+    availability is still kept.
+  - `accounts_baseline`: each time Auth starts with its setting on, it writes a correction (an `account_disabled` or
+    `account_enabled` with no actor) for every account whose state differs from its latest account entry, accounts
+    disabled before the setting included, and then one baseline, if it wrote any correction or had never written one. It
+    names no account and no integration. From a baseline on, Auth's feed alone says every account's state, and an account
+    with no entry is enabled.
+  - The three account-level kinds (`account_disabled`, `account_enabled` and `accounts_baseline`) are applied as the
+    Portal's mode says: see "Account Availability" below. With the setting off the Portal skips `interrupt_requested`
+    like any entry it does not know (`Auth change skipped: not a change entry.`) and its cursor moves past it. It skips the
+    account-level kinds the same way, and also moves account availability to `waiting` (below).
+
+#### Account Availability
+
+**With `DELEGATED_HOST_WORK=1` (off by default):** the Portal applies Auth's account-level entries in Auth's order, never
+by the entries' times (Auth's nodes' clocks may disagree). It keeps each account's availability in `account_availability`
+(an account with no row is enabled, or doesn't exist), tells each active built-in Station, and says on the Station's
+checkpoint whether its view is complete. The one row of `auth_change_feed` says how it follows them:
+
+| `accounts_mode` | When | An account-level entry |
+| --- | --- | --- |
+| `rebuilding` | The Portal is reading Auth's feed from its first entry. A new Portal with the setting on starts here, and every start-over (below) returns here. | Applied to the rebuild's own tables only, once each. No Station is told, and the live table is left alone. |
+| `live` | The rebuild has caught up with the end of Auth's feed. | Applied once, in one transaction with the changes of each active built-in Station, which are pushed after the commit. A failure rolls it all back, and the next read applies it. |
+| `waiting` | The Portal skipped an account-level entry, so what it holds can't be trusted to be all of Auth's feed. A Portal that had already read Auth's feed when migration 006 ran starts here. | Skipped and not recorded. The log has the WAITING line (below), once for each read. |
+
+- **A start-over** happens on the first read (the Portal has no saved cursor), after a reset (below), and when Auth answers
+  409 `cursor_ahead`. In one transaction it raises `accounts_epoch`, empties the cursor and the rebuild's tables, sets
+  `rebuilding` and makes the view incomplete. The live table is not touched, so the Stations see no superseded state.
+  Each start-over reads the whole feed again, in pages of 100 with at most 10 pages a read, so a long feed takes several
+  reads, a second or more apart.
+- **Catching up.** When a read reaches the end of Auth's feed while `rebuilding`, in one transaction the Portal:
+  1. compares the rebuild with the live table, and for each account whose state differs (an account missing from the
+     rebuild counts as enabled) updates the live table and gives each active built-in Station one `account_disabled` or
+     `account_enabled` change. The Stations hear only the differences, never the feed's history again;
+  2. replaces the applied entries with the rebuild's, so that `live` skips exactly what the rebuild applied;
+  3. if the rebuild applied an `accounts_baseline`, records it, makes the view complete and gives each Station one
+     `accounts_baseline` change. Without a baseline (Auth's setting is off, or Auth has not written one) the view stays
+     incomplete until a baseline is applied live;
+  4. sets `live`.
+
+  A failure rolls it all back and the next read does it. Several replicas may do it at once: the event lock lets the
+  first one in and the others find nothing to do.
+- **Live baseline.** In `live` a baseline that arrives while the view is not complete completes it and gives each Station
+  one `accounts_baseline` change. One that arrives while it is complete is recorded and tells nobody.
+- **Complete** means `account_baseline.complete`, which is the checkpoint's `accounts.complete`: the Portal is `live` and
+  has applied an `accounts_baseline` in order, so an account missing from the disabled list is enabled. Every start-over
+  and every move to `waiting` makes it false again, and the recorded baseline stays.
+- **`accounts_incomplete`.** Each time the view goes from complete to not complete with the setting on (a start-over or a
+  move to `waiting`) each active built-in Station gets one `accounts_incomplete` change, in the same transaction. It
+  means: from here the Portal's view is not complete; the next `accounts_baseline` change says it is again.
+- **The epoch fence.** A read pass applies account-level entries, and saves Auth's cursor, only in the epoch it began in.
+  A pass still running when another replica or a reset starts over stops with `Auth change not applied: stale_pass.`
+  without applying or saving anything, and the next read goes on from the saved cursor in the new epoch. Integration
+  entries are not fenced: each is applied once whatever the epoch. So a reset needs no replica stopped (below).
+- **`waiting`** is where a skipped account-level entry leaves the Portal, and it stays there until the cursor is reset. An
+  entry is skipped when its kind is not one the Portal follows (the setting is off), when it is not the shape Auth writes,
+  or when it names a person as its actor without being an admin's (Auth never writes one). Nothing is forgotten and no
+  availability changes, but the view is no longer complete, and if it had been, the Stations get `accounts_incomplete`
+  once. A rebuild that meets the same entry again moves to `waiting` again, so the Portal fails closed until Auth's feed is
+  fixed. **The WAITING line** is logged once for each read while it waits:
+  `Account availability waits for Auth's change feed to be read again from the start: empty the Portal's Auth cursor with
+  every Portal replica stopped.`
+- **The setting-off rule.** With the setting off the hooks do nothing, so the Portal neither rebuilds nor applies an
+  entry. It still moves to `waiting` and clears the complete mark the first time it skips an account-level entry (and a
+  Portal that has no row yet creates it in `waiting` when it first saves Auth's cursor). That, with the owed flag below,
+  is all it records about accounts while the setting is off. Nothing is written to a Station then, so if the Stations had
+  been told the view was complete, the Portal remembers it (`accounts_incomplete_owed`) and, the next time it runs with the
+  setting on and is `waiting`, gives each of them one `accounts_incomplete` change at the end of a read. Turning the
+  setting off while the Portal is `live` and complete changes nothing by itself: the entries Auth writes meanwhile are the
+  ones that move it to `waiting`.
+- **Auth restored from a backup.** A restore that leaves the Portal's cursor beyond Auth's newest entry answers 409
+  `cursor_ahead`, and the Portal logs `Auth change feed cursor is ahead of Auth (restored from a backup?): reading the
+  feed again from the start.` and starts over. The rebuild comes from the restored feed, so an entry the restore lost no
+  longer has its effect: if it had disabled an account the Stations get an `account_enabled` for it, and if it had enabled
+  one an `account_disabled`, then `accounts_baseline` once the rebuild has caught up. A restore the Portal cannot see
+  (Auth wrote entries past the Portal's cursor before the Portal read again, so the cursor looks valid and the lost
+  entries keep their effect) needs the reset below, as Auth's restore runbook says.
+
+#### Resetting The Portal's Auth Cursor
+
+A reset makes the Portal read Auth's whole feed again from its first entry. Changes it already applied are recognised and
+skipped, so reading again is safe. With the setting on it also starts account availability over (a rebuild, above). Run
+this on the Portal's database:
+
+```sql
+UPDATE auth_change_feed SET cursor = NULL, accounts_epoch = accounts_epoch + 1;
+```
+
+- **No replica needs stopping.** Raising the epoch fences any read that began before it: it applies no account entry and
+  saves no cursor (`Auth change not applied: stale_pass.`), and the next read starts over. A plain
+  `UPDATE auth_change_feed SET cursor = NULL;` is safe only with every Portal replica stopped, because a read in flight
+  saves its cursor again, and the log's WAITING line says that. The statement above does both jobs, whatever the setting.
+- **The setting must be on for accounts.** A reset made while the setting is off re-reads the feed and does nothing for
+  account availability: the hooks do nothing then, so a Portal in `waiting` stays there. Reset again after the setting is on.
+- **When it is needed.**
+  - The log has the WAITING line.
+  - The first time the setting is turned on after migration 006: every Portal that had read Auth's feed before it starts
+    in `waiting` ("Turning On Delegated Host Work").
+  - After the setting has been off while Auth's was on, if the Portal then is in `waiting`.
+  - After any window with mixed Auth versions, and after a restore of Auth the Portal could not detect (above).
+- **To check it,** once the reader has caught up (the log has no `Auth change feed read failed` line):
+  `SELECT accounts_mode, accounts_epoch, accounts_incomplete_owed FROM auth_change_feed;` says `live`, a new epoch and `f`,
+  and `SELECT complete FROM account_baseline;` says `t` once the Portal has applied an Auth baseline. `f`, or no row, means
+  the view is incomplete (Auth's setting is off, or it has not started since): the right answer until Auth writes one.
 
 #### Rolling Out Admin Changes (Dev First)
 
@@ -781,7 +909,8 @@ approval.
 Alert on the reader's log lines `Auth change feed read failed`, `Auth change not applied` and, once Auth D26 runs,
 `Auth change feed not available yet`. While the reader is stalled an admin's change holds at Auth, which issues the
 integration no new token, but the Station is not told: an admin's pause is then enforced only by token expiry (at most
-300 seconds).
+300 seconds). With `DELEGATED_HOST_WORK=1` also alert on `Account availability waits for Auth's change feed…`: until an
+operator resets the cursor, the Portal follows no account change and the built-in Station's view is incomplete.
 
 Pauses an admin made through the D24 Portal's admin views, before Auth's migration 009, are not locks in the Portal
 either: Auth recorded nobody as their pauser, so `paused_by` is NULL and the owner may resume them. Pause again on the
@@ -789,9 +918,9 @@ admin site any that should stay locked (`SELECT id, owner_account FROM integrati
 IS NULL;` on the Portal lists them, with owners' pauses from before Auth recorded who paused).
 
 If Auth ever runs more than one node, upgrade all of them before the Portal's reader reads from it: an older node
-writes pause and revoke rows without the feed lock, so a reader could skip one. Then set the Portal's cursor back once
-(`UPDATE auth_change_feed SET cursor = NULL;` on the Portal database); changes it already applied are recognised and
-skipped, so reading again is safe. Do not use the admin site while any Auth node runs an image from before the change
+writes pause and revoke rows without the feed lock, so a reader could skip one. Then set the Portal's cursor back once (the
+statement in "Resetting The Portal's Auth Cursor"); changes it already applied are recognised and skipped, so reading
+again is safe. Do not use the admin site while any Auth node runs an image from before the change
 feed. If the Portal is deployed before Auth, its reader logs `Auth change feed not available yet: not_found.` and the
 built-in sync `Built-in Station sync failed: not_found.` each minute until Auth has both; Stations already in the
 Portal keep working.
@@ -817,10 +946,11 @@ Portal keep working.
   the Portal shows "Auth is unavailable". Until Auth rolls forward again an admin's pause cannot be lifted (revoking
   and the settings still work, and so does resuming any other pause). Auth's rollback does not undo that migration.
 - **After any window with mixed Auth versions, and after restoring Auth's database** from a backup, set the Portal's
-  cursor back with `UPDATE auth_change_feed SET cursor = NULL;`. Auth hands out cursors again from the backup's point.
-  A cursor beyond Auth's newest change answers 409 `cursor_ahead`, and the Portal then logs a warning, forgets its
-  cursor and reads the feed from the start by itself. A cursor that new changes have since passed looks valid and would
-  skip changes, so reset it by hand after every restore.
+  cursor back with the statement in "Resetting The Portal's Auth Cursor". Auth hands out cursors again from the backup's
+  point. A cursor beyond Auth's newest change answers 409 `cursor_ahead`, and the Portal then logs a warning, forgets its
+  cursor and reads the feed from the start by itself (with the setting on it rebuilds account availability too, and the
+  built-in Stations hear only what changed: "Account Availability"). A cursor that new changes have since passed looks
+  valid and would skip changes, so reset it by hand after every restore.
 - **After restoring the Portal's database** the Stations' own feed refuses an old cursor (see "Cursors"). The reader
   continues from the backup's cursor and applies again, by itself, the admin changes Auth made since the backup.
 
@@ -834,35 +964,45 @@ until then it describes behaviour nothing has yet. Turn the three settings on in
    `true` (an unticked revoke sends exactly what it sent before the setting, and Auth records a missing choice as
    `false`), and an Auth with its setting off refuses that unknown field with 400. So with the Portal's setting on and
    Auth's off, only a revoke that asks to interrupt fails, with Auth's 400; every other call works.
-2. **Then the Portal.** Stop it, set `DELEGATED_HOST_WORK=1`, empty its Auth cursor, and start it:
-   `UPDATE auth_change_feed SET cursor = NULL;` on the Portal database (the step already given for a restore; reading
-   again is safe, since changes it applied are recognised and skipped). Migration 004 runs when the server starts,
+2. **Then the Portal.** Set `DELEGATED_HOST_WORK=1` and restart it. Migrations 004 and 006 run when the server starts,
    whatever the setting. While the setting was off the reader skipped Auth's new entries (an admin's interrupt requests
-   and account changes) and moved past them, and an account entry read before a built-in Station existed was skipped
-   too; reading again brings them in. Do it with the Portal stopped: the reader saves each page's cursor without
-   compare-and-set, so a reset made while a read is in flight can be overwritten. To check it, once the reader has
-   caught up, count the account events each built-in Station holds:
-   `SELECT station_id, kind, count(*) FROM integration_events WHERE kind IN ('account_disabled', 'account_enabled') GROUP BY station_id, kind;`
-   After the reset that is every account entry Auth has written while its setting was on, on each built-in Station (no
-   rows, if Auth has written none).
+   and account changes) and moved past them, and migration 006 put the Portal's account availability in `waiting` (it had
+   read Auth's feed already), so with the setting on it follows no account entry yet and logs the WAITING line. Reset the
+   cursor once, now that the setting is on (the statement, and what it does, are in "Resetting The Portal's Auth
+   Cursor"):
+   `UPDATE auth_change_feed SET cursor = NULL, accounts_epoch = accounts_epoch + 1;` on the Portal database. Reading
+   again is safe, since changes it applied are recognised and skipped, and no replica needs stopping. The Portal then
+   rebuilds account availability from Auth's first entry, and each built-in Station hears only the differences from what
+   it was told before, then `accounts_baseline` once the rebuild has caught up with Auth's feed; the interrupt requests
+   skipped while the setting was off come in too. To check it, once the reader has caught up, read
+   `SELECT accounts_mode FROM auth_change_feed;` (`live`) and `SELECT complete FROM account_baseline;` (`t`, once Auth's
+   baseline has been applied), and count what each built-in Station holds:
+   `SELECT station_id, kind, count(*) FROM integration_events WHERE kind IN ('account_disabled', 'account_enabled', 'accounts_baseline', 'accounts_incomplete') GROUP BY station_id, kind;`
+   On the first turn-on that is, on each built-in Station, one `account_disabled` for each account that
+   `SELECT count(*) FROM account_availability WHERE disabled;` counts, and one `accounts_baseline` (no `account_disabled`
+   rows, if Auth has disabled none; no baseline, if Auth has written none).
 3. **Then the admin site's** `DELEGATED_HOST_WORK`.
 
 Turn them off in the reverse order, the admin site's first and Auth's last: the admin site's setting must be off
-whenever the Portal's is. Repeat step 2's cursor reset after every change of the Portal's setting from off to on while
-Auth's stays on: while the Portal's is off and Auth's is on, the Portal skips the account entries, and the built-in
-Station's view of disabled accounts goes stale.
+whenever the Portal's is. After every change of the Portal's setting from off to on while Auth's stays on, read
+`accounts_mode` as in step 2 and, if it says `waiting`, repeat step 2's reset: while the Portal's setting is off and
+Auth's is on, the Portal skips the account entries and moves to `waiting`, and the built-in Station's view of disabled
+accounts goes stale ("Account Availability").
 
 Phase B's revocation reports ("For Station Builders") need nothing beyond the Portal's own setting: it takes them whenever
 it is on, whatever Auth's and the admin site's are. Turn it on before a Station sends them. With the setting off the
 Portal refuses a body with a `reportId` as 400 `report`, which a Station treats as final: it alerts and never sends that
 report again. A final report refused that way leaves its integration `revoking`, because the Portal runs no clock; a
-legacy `revoked` report with no `reportId` ends it.
+legacy `revoked` report with no `reportId` ends it. The same holds for the Station directory, the checkpoint and the two
+binding reports: they need the Portal's own setting only. Account availability also needs Auth's baseline; without it the
+checkpoint says `accounts.complete` is `false` and a Station fails closed.
 
 Known Phase A limits:
 
-- The cursor-0 `disabledAccounts` (see "For Station Builders") lists only accounts whose disabling Auth recorded as an
-  account entry, with Auth's setting on. Accounts disabled before that are not listed. Closing this waits for the joint
-  service-suspension design (Atem's `designs/delegated-host-work.md`, III.5).
+- The cursor-0 `disabledAccounts` (see "For Station Builders") lists the accounts disabled now, as the Portal's
+  availability table has them, but carries no completeness mark: a Station that has to know whether an account missing
+  from it is enabled reads the checkpoint, whose `accounts.complete` says so. Accounts disabled before Auth recorded
+  account entries are covered by Auth's baseline, once the Portal has applied it ("Account Availability").
 - A `revoked` entry the Portal followed while its setting was off is not applied again, so an admin's revocation that
   asked to interrupt running tasks stays recorded in the Portal as not interrupting. This happens only if the order above
   is broken (the admin site's setting on while the Portal's is off). An admin's later Interrupt running tasks is no
@@ -873,12 +1013,15 @@ Known Phase A limits:
 
 If the setting is turned off again, what was recorded while it was on stays, and is served as recorded: the Station feed
 keeps its entries, but `interruptRunning` is no longer carried, neither on changes nor on `integration` objects, and
-`disabledAccounts` is not served. Account events and the `integration_interrupt_requested` kind are still served, since
-the feed reports what was recorded, as Auth's does. Readers skip kinds they don't know. The hosts, final outcomes and
-report ids recorded stay in the database, but no view shows `revocation` any more, and a body with a `reportId` is 400
-`report` again, a retry of a report already recorded included: the setting is read before the id is looked up. A final
-report refused then leaves its integration `revoking`, because the Portal runs no clock; a legacy `revoked` report with no
-`reportId` ends it.
+`disabledAccounts` is not served. Account events (the baseline and incomplete changes too) and the
+`integration_interrupt_requested` kind are still served, since the feed reports what was recorded, as Auth's does. Readers
+skip kinds they don't know. The hosts, final outcomes and report ids recorded stay in the database, but no view shows
+`revocation` any more, and a body with a `reportId` is 400 `report` again, a retry of a report already recorded included:
+the setting is read before the id is looked up. A final report refused then leaves its integration `revoking`, because the
+Portal runs no clock; a legacy `revoked` report with no `reportId` ends it. The account availability, bindings and binding
+attempts recorded stay in the database too, but nothing serves them: `?checkpoint=1` is ignored, `GET /api/v1/stations`
+answers 404, a binding report is 400 `report`, and the account page has no notices. While the setting is off, the first
+account-level entry the Portal reads moves it to `waiting` ("Account Availability").
 
 ### Routes
 
@@ -915,6 +1058,9 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
 | `POST /api/integrations/<id>/interrupt` | browser | interrupt those tasks later, within 24 hours of the revocation; by the integration's owner or the owner of its custom Station |
 | `POST /api/v1/integrations/<id>/revoke` `{ interruptRunning }` | token, `integrations:approve` | Astation revokes the token's account's own integration, with the same body |
 | `POST /api/v1/stations/reports` `{ integrationId, state: "revocation_applied", reportId, host, recordId }` or `{ integrationId, state: "revoked", reportId, outcome, pendingHosts }` | token, `station.report` | the Station's two revocation reports: one for each host that applied a revocation, and the final one (the forms below); with a `reportId` only |
+| `GET /api/v1/stations?limit=&cursor=` | token, `integrations:read` | the Station directory: the Stations the account can use and those it lost in the last 30 days, in pages (below) |
+| `GET /api/v1/stations/changes?checkpoint=1` | token, `station.report` | the Station's whole state at one exact cursor (below, and "For Station Builders") |
+| `POST /api/v1/stations/reports` `{ state: "binding_changed", reportId, account, accountId, genesisHash, bindingId, version, bindingState }` or `{ state: "binding_attempt", reportId, account, accountId, genesisHash, reason, attemptedAt }` | token, `station.report`, the built-in Station only | the built-in Station's two binding reports (below) |
 
 - The choice is kept on the integration and in the revoke event. It goes to Auth only when it is `true`: an unticked
   revoke sends Auth what it sent before the setting, and Auth, with its own setting on, records a missing choice as
@@ -1022,10 +1168,217 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
   names are never shown, in a view, the history or the Station's feed. The Station's feed and a report's answer carry no
   `revocation`.
 
+- **The Station directory** (D29, [issue 40](https://github.com/Agora-Build/Portal/issues/40)): `GET /api/v1/stations`, for
+  Astation's apps. A bearer access token whose audience is the Portal and whose scope includes `integrations:read`; the
+  account is its `sub`. A token without the scope is 403 `insufficient_scope`, and a Station's own report token is refused.
+  The cookie route is never needed: a token on the unversioned `/api/stations` is 404 "Access tokens use the versioned API:
+  /api/v1/stations.", and a cookie with no token on `/api/v1/stations` is answered with the browser's list, as it is on
+  `/api/v1/integrations`, so the directory needs a token. It is `GET` only.
+  - **Query.** `limit` is a whole number from 1 to 100, and 100 when it is not sent. `cursor` is the opaque `nextCursor` of
+    the page before. An empty `limit=` or `cursor=` is a mistake (400), not a missing parameter. Any other parameter is
+    ignored. Both are checked before Auth is asked, the limit first:
+
+    | Code | Refused when | Message |
+    | --- | --- | --- |
+    | `limit` | not a whole number from 1 to 100: `0`, `101`, `1.5`, `abc`, empty | "Choose a limit of 1 to 100." |
+    | `cursor` | not a cursor this list gave: any other text, or one that was changed | "Send the cursor this list gave you." |
+
+  - **The answer.** Each page asks Auth for the account's Stations first, as the browser's list does, so use the default
+    limit and page only when the list is longer than 100. The limit is 60 lists a minute for an account, shared with
+    `GET /api/stations`.
+
+    ```json example:directory
+    {
+      "stations": [
+        {
+          "id": "st01KB4K8W3Z5Q7R2T9X1C6D4FGH",
+          "origin": "https://station-dev.agora.build",
+          "name": "Agora Station",
+          "builtIn": true,
+          "access": "any_account",
+          "role": "built_in",
+          "status": "active",
+          "removedAt": null,
+          "membership": null,
+          "membershipEndedAt": null,
+          "integrationsEnabled": true,
+          "createdAt": "2026-10-31T18:20:41.512Z"
+        },
+        {
+          "id": "st01KB4MR0E2S8V3N6P5J7A1BDXZ",
+          "origin": "https://station.example.net",
+          "name": null,
+          "builtIn": false,
+          "access": "members",
+          "role": "owner",
+          "status": "active",
+          "removedAt": null,
+          "membership": null,
+          "membershipEndedAt": null,
+          "integrationsEnabled": true,
+          "createdAt": "2026-11-01T08:00:00.000Z"
+        },
+        {
+          "id": "st01KB4NS6F4T9W2Y8Z1B3C5DGJ7",
+          "origin": "https://shared.example.org",
+          "name": null,
+          "builtIn": false,
+          "access": "members",
+          "role": "member",
+          "status": "active",
+          "removedAt": null,
+          "membership": "ended",
+          "membershipEndedAt": "2026-11-20T09:15:00.000Z",
+          "integrationsEnabled": false,
+          "createdAt": "2026-11-02T08:00:00.000Z"
+        },
+        {
+          "id": "st01KB4P1H7V3X9C5M2R8T6Z4YQ0",
+          "origin": "https://old.example.net",
+          "name": null,
+          "builtIn": false,
+          "access": "members",
+          "role": "owner",
+          "status": "removed",
+          "removedAt": "2026-11-21T14:30:12.044Z",
+          "membership": null,
+          "membershipEndedAt": null,
+          "integrationsEnabled": false,
+          "createdAt": "2026-11-03T08:00:00.000Z"
+        }
+      ],
+      "nextCursor": null,
+      "stale": false,
+      "complete": true
+    }
+    ```
+
+    The same list with `?limit=1`, the first page (the cursor is the base64url of `[builtIn, createdAt, id]` of its
+    last Station, and means nothing else; send it back as it came):
+
+    ```json example:directory-page
+    {
+      "stations": [
+        {
+          "id": "st01KB4K8W3Z5Q7R2T9X1C6D4FGH",
+          "origin": "https://station-dev.agora.build",
+          "name": "Agora Station",
+          "builtIn": true,
+          "access": "any_account",
+          "role": "built_in",
+          "status": "active",
+          "removedAt": null,
+          "membership": null,
+          "membershipEndedAt": null,
+          "integrationsEnabled": true,
+          "createdAt": "2026-10-31T18:20:41.512Z"
+        }
+      ],
+      "nextCursor": "W3RydWUsIjIwMjYtMTAtMzFUMTg6MjA6NDEuNTEyWiIsInN0MDFLQjRLOFczWjVRN1IyVDlYMUM2RDRGR0giXQ",
+      "stale": false,
+      "complete": false
+    }
+    ```
+
+  - **Fields.**
+    - `id` is the Station's stable identity, and `origin` the normalized origin, the one Auth and the Portal compare.
+    - `name` is `null` for a custom Station. `access` is `any_account` (the built-in Station) or `members`.
+    - `role` is `built_in`, `owner` or `member`. `status` is `active` or `removed`, and `removedAt` is set when it is
+      `removed`.
+    - `membership` is `current` or `ended` for a member, and `null` for the owner and the built-in Station.
+      `membershipEndedAt` is set when it is `ended`.
+    - `integrationsEnabled` says whether an integration can be created there now. It is `false` on a removed Station and
+      for a member whose membership ended.
+    - It never carries the Station's report client, its owner, its members or anything of R9. There is no `suspended`
+      status: Agora.Build disabling an account is account-level, and such an account gets no token.
+  - **Which Stations.** Every Station the account can use now (the built-in Station, those it owns and those it is a
+    member of) and every one it lost in the last 30 days, the Station records' own retention, with the loss stated: a
+    Station it owned or belonged to that was removed is `status: "removed"` with `removedAt`, and one whose membership
+    ended (it was removed, or it left) is `membership: "ended"` with `membershipEndedAt`. A removed built-in Station is
+    listed the same way. The loss is dated when the account lost it: for a member, the earlier of its leaving and the
+    Station's removal. After the 30 days a Station may be omitted, and an omission never means "remove".
+  - **Order and pages.** Built-in Stations first, then `createdAt`, then `id`. `nextCursor` is `null` on the last page.
+  - **`stale` and `complete`.** `stale: true` means Auth was unreachable (503), so the list is the Portal's last copy.
+    `complete` is `true` only on the last page of a list that is not stale. Anything else, a failed page too, is
+    incomplete and must not remove a destination or a verifier you already reviewed. Any other refusal from Auth is the
+    error the browser's list gives.
+  - With the setting off the route is 404, as any `/api/v1` route that does not exist, and a token on `/api/stations` is
+    403, as before.
+- **The browser's list** `GET /api/stations` also answers `notices` with the setting on: the account's refused binding
+  attempts of the last 30 days, the 50 newest, newest first, each `{ kind: "binding_attempt", accountId, genesisHash,
+  reason, attemptedAt }` with `accountId` the R9 account, never the other Agora.Build account. The page shows each as a
+  line above the Stations. It ignores `limit` and `cursor`, which are the directory's.
+
+  ```json example:notices
+  {
+    "stations": [
+      {
+        "id": "st01KB4K8W3Z5Q7R2T9X1C6D4FGH",
+        "origin": "https://station-dev.agora.build",
+        "role": "built_in",
+        "ownerAccount": null,
+        "status": "active",
+        "createdAt": "2026-10-31T18:20:41.512Z",
+        "builtIn": true,
+        "name": "Agora Station",
+        "integrationsEnabled": true
+      }
+    ],
+    "stale": false,
+    "notices": [
+      {
+        "kind": "binding_attempt",
+        "accountId": "acct-7f3a2c91",
+        "genesisHash": "3c9a5e81b07d24f6c1a8e5d3b9f20476a1c8d5e29b3f7061c4a8e2d5b9f1037a",
+        "reason": "bound_elsewhere",
+        "attemptedAt": "2026-11-21T09:59:00.000Z"
+      }
+    ]
+  }
+  ```
+
+- **The checkpoint.** `GET /api/v1/stations/changes?checkpoint=1` with the Station's `station.report` token answers the
+  Station's whole state at one exact cursor, under the feed's own limit of 120 a minute. The answer and what it promises
+  are in "For Station Builders". A `cursor` sent beside it is checked and then ignored: a malformed one is still 400
+  `cursor` ("Send the cursor as a whole number of at least 0."), and 409 `cursor_ahead` does not apply, since a
+  checkpoint is at the Station's own newest change. With the setting off the parameter is ignored and the answer is
+  today's.
+- **The built-in Station's two binding reports.** With the setting on, `POST /api/v1/stations/reports` also takes these,
+  each with a `reportId`; what they mean and when to send them is in "For Station Builders". Neither names an
+  integration:
+  - `{ "state": "binding_changed", "reportId", "account", "accountId", "genesisHash", "bindingId", "version",
+    "bindingState" }`, with `bindingState` `bound`, `unbound` or `released`;
+  - `{ "state": "binding_attempt", "reportId", "account", "accountId", "genesisHash", "reason", "attemptedAt" }`, with
+    `reason` `bound_elsewhere` or `owner_disabled`.
+
+  Only the built-in Station may send them. A custom Station's well-formed binding report is 403 `forbidden`: "Only the
+  built-in Station reports bindings.", and nothing is recorded. The body is validated first, so a malformed one from
+  a custom Station is the 400 below, not the 403. With the setting off every binding field is an unknown field: 400
+  `report`, with today's message (and a `state` of `binding_changed` or `binding_attempt` with today's fields only is 400
+  `state`). Each report is validated in this order (400, with the code): its shape, `reportId`,
+  `account`, `accountId`, `genesisHash`, then the form's own fields in the order the form lists them.
+
+  | Code | Refused when | Message |
+  | --- | --- | --- |
+  | `report` | not an object; a field outside the form's own, so an `integrationId`, a field of the other binding form or of a revocation report | "Send a binding report as { state: "binding_changed", reportId, account, accountId, genesisHash, bindingId, version, bindingState } or { state: "binding_attempt", reportId, account, accountId, genesisHash, reason, attemptedAt }." |
+  | `report_id` | missing, or not 1 to 128 characters of `[A-Za-z0-9._:-]` | "Send the reportId as 1 to 128 characters of letters, digits, '.', '_', ':' or '-'." |
+  | `account` | missing, or not an Agora.Build account ID: `ab` and 26 upper-case Crockford base32 characters | "Name the account as ab and 26 letters or digits." |
+  | `account_id` | missing, or not 1 to 128 characters of `[A-Za-z0-9._:-]` | "Send the accountId as 1 to 128 characters of letters, digits, '.', '_', ':' or '-'." |
+  | `genesis_hash` | missing, or not 64 lowercase hex characters | "Send the genesisHash as 64 lowercase hex characters." |
+  | `binding_id` | missing, or not 1 to 128 characters of `[A-Za-z0-9._:-]` | "Send the bindingId as 1 to 128 characters of letters, digits, '.', '_', ':' or '-'." |
+  | `version` | not a positive whole number of at most 9007199254740991 (a JSON number) | "Send the version as a positive whole number." |
+  | `binding_state` | not `bound`, `unbound` or `released` | "Send the bindingState as bound, unbound or released." |
+  | `reason` | not exactly `bound_elsewhere` or `owner_disabled`. This is an exact code, not the free text of an `error` report's `reason` | "Send the reason as bound_elsewhere or owner_disabled." |
+  | `attempted_at` | not an ISO time as `toISOString` writes it (`2026-11-21T09:59:00.000Z`: a four-digit year, milliseconds and `Z`), or more than an hour after the Portal's clock | "Send attemptedAt as an ISO time." |
+
+  The other refusals are 409 `report_id_reused` ("This reportId was already used for another report.") and 409
+  `binding_version` ("This binding's version is not newer than the one recorded."), below.
+
 Apps and Stations that send an access token use `/api/v1/` only: a bearer
 token on the unversioned `/api/...` path gets 404 naming the `/api/v1` path.
 Browser routes use `/api/...` with the cookie and do not accept tokens, except
-that the browser may also read `GET /api/v1/integrations`.
+that the browser may also read `GET /api/v1/integrations` (and, with `DELEGATED_HOST_WORK=1`, `GET /api/v1/stations`,
+which with a cookie and no token answers the browser's list, not the directory).
 
 Create takes a name of 1 to 80 characters, scopes from `agent.view`,
 `agent.prompt`, `agent.approve`, `agent.interrupt`, `agent.terminal`,
@@ -1041,8 +1394,8 @@ integration's owner nor its Station's owner gets 404 for it; likewise an account
 that neither owns a Station nor is a current member of it gets 404 for every
 Station route, and a member gets 403 for the owner's changes (sharing, removing,
 unsharing someone else), all without the Portal asking Auth. Limits per minute
-per account: each list (`GET /api/stations`, `GET /api/integrations` and
-`/api/v1/integrations` together, and a Station's members) 60; all other changes
+per account: each list (`GET /api/stations` and, with `DELEGATED_HOST_WORK=1`, `GET /api/v1/stations` together,
+`GET /api/integrations` and `/api/v1/integrations` together, and a Station's members) 60; all other changes
 that call Auth (share, unshare, remove, pause, resume, revoke, renew, settings,
 keys, approval) 30 together (with `DELEGATED_HOST_WORK=1` the native revoke is
 one of them, and so is the interrupt, which calls no Auth but uses the same
@@ -1061,10 +1414,12 @@ account from using a large share of it. If Auth answers 429, it shows as 503
 Common error codes: `not_found` (404), `forbidden` (403), `invalid_state` and
 `expired` (409, the action does not fit the current state), `revoked` (409),
 `origin_taken` and `duplicate_key` (409, from Auth), `challenge` (400, expired or
-used), `proof` (422), `station` (403, the report client is not a registered Station), `exchange` (403, Auth refused the read token), `unavailable` (503, Auth unreachable), `built_in` (409, the built-in Station can't be removed, shared or left), `not_supported` (409, integrations are off on the built-in Station), `plan_limit` (403, the plan's limit on the built-in Station), `admin_paused` (409, Agora.Build paused the integration; only Agora.Build resumes it), `owner_disabled` (409, Agora.Build disabled the owner's account; the integration resumes when it is enabled again); with `DELEGATED_HOST_WORK=1`, `interrupt_running` (400, a revoke without a true or false `interruptRunning`), `too_late` (409, more than 24 hours since the revocation), `station_removed` (409, the integration's Station has been removed) and `report_id_reused` (409, a Station's `reportId` already used for another report); too many challenges or requests are 429. Field mistakes are
+used), `proof` (422), `station` (403, the report client is not a registered Station), `exchange` (403, Auth refused the read token), `unavailable` (503, Auth unreachable), `built_in` (409, the built-in Station can't be removed, shared or left), `not_supported` (409, integrations are off on the built-in Station), `plan_limit` (403, the plan's limit on the built-in Station), `admin_paused` (409, Agora.Build paused the integration; only Agora.Build resumes it), `owner_disabled` (409, Agora.Build disabled the owner's account; the integration resumes when it is enabled again); with `DELEGATED_HOST_WORK=1`, `interrupt_running` (400, a revoke without a true or false `interruptRunning`), `too_late` (409, more than 24 hours since the revocation), `station_removed` (409, the integration's Station has been removed), `report_id_reused` (409, a Station's `reportId` already used for another report) and `binding_version` (409, a binding report's version is not newer than the one recorded; `forbidden` is also 403 for a binding report from a custom Station); too many challenges or requests are 429. Field mistakes are
 400 with `name`, `scopes`, `quota`, `expiry`, `jwk`, `private_key`, `account`,
 `report_key`, `r9_svc`, `reason`, `state`, `report` or `cursor`; with `DELEGATED_HOST_WORK=1` also `report_id`, `host`,
-`record_id` and `outcome` (a Station's revocation reports, in "Routes").
+`record_id` and `outcome` (a Station's revocation reports, in "Routes"), `limit` (the Station directory), and
+`account_id`, `genesis_hash`, `binding_id`, `version`, `binding_state` and `attempted_at` (the binding reports, in
+"Routes"; their `account`, `reason` and `report_id` are the codes above).
 
 ### Lifecycle
 
@@ -1145,7 +1500,8 @@ Repeating the current state changes nothing and succeeds. Any other report is
 ([D29](integrations.md#311-delegated-host-work-d29), Phase B), so that the Portal can show how many hosts applied it. The
 two forms, their validation and the error codes are under "Routes"; this is when to send them and what to do with each
 answer, as agreed with Atem ([Atem PR #148](https://github.com/Agora-Build/Atem/pull/148), the acknowledgment ledger).
-With the setting off a body with a `reportId` is 400 `report`.
+With the setting off a body with a `reportId` is 400 `report`. The built-in Station also sends two binding reports,
+which are described after the change feed ("The built-in Station's binding reports").
 
 - **When to send each.**
   - `revocation_applied`: once for each covered host and revoked integration, when that host first has the revocation in
@@ -1228,7 +1584,8 @@ global and increase in commit order, so one Station's IDs have gaps; never
 treat them as a count. A cursor beyond this Station's latest event (for example
 after the Portal's database was restored from an older backup) is refused with
 409 `cursor_ahead`: read the feed again from `cursor=0`, whose snapshot is the
-current state, including pauses and revocations, and continue from there. The
+current state, including pauses and revocations, and continue from there (with `DELEGATED_HOST_WORK=1`, read the checkpoint
+instead: "The checkpoint", below). The
 cursor in a push nudge is only a hint; never store it. `kind` is one of `integration_created`,
 `integration_approved`, `integration_paused`, `integration_resumed`,
 `integration_revoked`, `integration_renewed`, `integration_settings_changed`,
@@ -1277,11 +1634,12 @@ as recorded.
   account. The change is `{ id, at, integrationId: null, kind, state: null, reason: "agora_build", account }` with
   `account` the `ab…` account ID, and has no `integration`. It comes with the `integration_paused` and
   `integration_resumed` changes for that account's integrations. A cursor-0 read of the built-in Station also has
-  `disabledAccounts`, the account IDs disabled now. A custom Station gets neither the changes nor `disabledAccounts`.
-  Known Phase A limit: `disabledAccounts` lists only accounts whose disabling Auth recorded as an account entry (with
-  Auth's setting on); accounts disabled before that are not listed. Provisional: Atem's design (III.5) defines these
-  feed entries jointly with Astation, so the shape of `account_disabled`, `account_enabled` and `disabledAccounts` may
-  change.
+  `disabledAccounts`, the account IDs disabled now, as the Portal's availability table has them. A custom Station gets
+  neither the changes nor `disabledAccounts`. `disabledAccounts` has no completeness mark: to know whether an account
+  missing from it is enabled, read the checkpoint and its `accounts.complete`. The built-in Station's feed has two more
+  account-level changes, `accounts_baseline` and `accounts_incomplete`, and the checkpoint gives its whole state at one
+  cursor: "The checkpoint" and "Account availability", below. Provisional: Atem's design (III.5) defines these feed
+  entries jointly with Astation, so the shape of the account changes and of `disabledAccounts` may change.
 - **Expiry never produces a control record.** Each integration's effective state counts only a pause (by the owner, a
   Station owner or an admin) and a disabled owner account. Expiry never produces a control record: the Station's current
   rule that "an expired integration is treated like a pause" applies to API access only. For delegated senders, work
@@ -1290,6 +1648,266 @@ as recorded.
 - A report's answer carries neither `revokedAt` nor `interruptRunning`: the Station learns the choice from the feed.
 - A reader skips a kind it doesn't know, still acts on the `integration` it carries, if any, and moves the cursor on. The
   account changes carry none, so a reader that ignores them has nothing to act on.
+
+**With `DELEGATED_HOST_WORK=1` (off by default):** a Station that has to recover, or start from a whole and exact picture,
+reads the checkpoint, and the built-in Station also gets account availability and reports its bindings
+([D29](integrations.md#311-delegated-host-work-d29); Portal issues
+[40](https://github.com/Agora-Build/Portal/issues/40) and [41](https://github.com/Agora-Build/Portal/issues/41)). They use
+the same authenticated feed and report route, the same scopes and the same limits; there is no other API. With the setting
+off none of this exists: `?checkpoint=1` is ignored and a binding report is 400 `report`.
+
+**The checkpoint.** `GET /api/v1/stations/changes?checkpoint=1` answers the Station's whole state at one exact cursor:
+
+```json example:checkpoint
+{
+  "changes": [],
+  "cursor": 4812,
+  "checkpoint": {
+    "at": "2026-11-22T10:00:00.000Z",
+    "integrations": [
+      {
+        "id": "i-01kb4t2m8x5q7r3w9z1c6d4fgh",
+        "ownerAccount": "ab01KB4M7Q2X9R5T3WJ8V6C0YNDA",
+        "state": "ready",
+        "scopes": ["agent.view", "agent.prompt"],
+        "r9Svc": "9d41c7a2e08b5f36d1a4c9e72b085f3ad6c1e49b7a02d8f5c3e61b9a4d70f2c8",
+        "expiresAt": "2026-12-21T10:00:00.000Z",
+        "quotaPerSecond": 200
+      },
+      {
+        "id": "i-01kb4t3n9y6r8s4x0a2d7e5gjk",
+        "ownerAccount": "ab01KB4N2F8D6H1G5Z3P7S9QAXEB",
+        "state": "revoking",
+        "scopes": ["agent.view"],
+        "r9Svc": "5b8e2d94a1c07f63e9d2b4a8c51f07e3d96a4b2c8e150f7a3d9c64b1e8a2f057",
+        "expiresAt": "2026-12-01T10:00:00.000Z",
+        "quotaPerSecond": 200,
+        "interruptRunning": true,
+        "revokedAt": "2026-11-22T09:30:00.000Z"
+      }
+    ],
+    "accounts": {
+      "complete": true,
+      "disabled": ["ab01KB4P9C3E7M2V5T8R1W6XBJFC"]
+    },
+    "bindings": [
+      {
+        "account": "ab01KB4M7Q2X9R5T3WJ8V6C0YNDA",
+        "accountId": "acct-7f3a2c91",
+        "genesisHash": "3c9a5e81b07d24f6c1a8e5d3b9f20476a1c8d5e29b3f7061c4a8e2d5b9f1037a",
+        "bindingId": "bind-5d1e",
+        "version": 3,
+        "bindingState": "bound"
+      }
+    ]
+  }
+}
+```
+
+A custom Station's checkpoint has `at` and `integrations` only:
+
+```json example:checkpoint-custom
+{
+  "changes": [],
+  "cursor": 37,
+  "checkpoint": {
+    "at": "2026-11-22T10:00:00.000Z",
+    "integrations": [
+      {
+        "id": "i-01kb4t4p0z7s9t5y1b3e8f6hkm",
+        "ownerAccount": "ab01KB4M7Q2X9R5T3WJ8V6C0YNDA",
+        "state": "paused",
+        "scopes": ["agent.view"],
+        "r9Svc": "e3a96d0b52c8f147a9d3e6b0c25f8a71d4e90b36c7a5f218e0d94b3a6c15f7e2",
+        "expiresAt": "2026-12-10T10:00:00.000Z",
+        "quotaPerSecond": 200
+      }
+    ]
+  }
+}
+```
+
+- **`cursor` is exact.** It is this Station's newest change in the same snapshot as everything else in the answer, and
+  every change committed later has a larger id. That holds because the Portal appends a Station's changes under one lock,
+  takes their ids in commit order, and commits a change together with the rows it changed. The checkpoint is the state
+  after applying every change up to `cursor`, and no later one. Resume with `?cursor=<cursor>`: the feed then delivers
+  every later change and no earlier one.
+- **One snapshot.** The Portal reads the whole answer in one `REPEATABLE READ`, read-only transaction. It takes no lock, so
+  it never waits for a writer, and `cursor`, `integrations`, `accounts` and `bindings` are as of one moment: a change is
+  in the answer with its event or in neither. `at` is the Portal's clock when it answered, and each `state` is the
+  effective one as of `at`, so an integration past its expiry reads `expired`.
+- **`integrations`** lists every integration on the Station in any state, revoked and stopped ones included, oldest
+  first, in the feed's integration shape (`ownerAccount`, `state`, `scopes`, `r9Svc`, `expiresAt`, `quotaPerSecond`) plus
+  its `id`. A stopped one (`revoking` or `revoked`) also has `interruptRunning` and `revokedAt`. `revokedAt` is `null` for
+  a revocation from before migration 004, which did not record when.
+- **`accounts` and `bindings` appear on the built-in Station only.** A custom Station gets neither, ever.
+  - `accounts.disabled` lists the Agora.Build account IDs disabled now, in account order. What it means depends on
+    `accounts.complete` (below).
+  - `bindings` is the built-in Station's own last reported binding for each R9 account and genesis hash, ordered by
+    `accountId` and then `genesisHash`, and empty until it reports some. A binding report writes no change to the feed, so a Station reads its bindings here.
+    A pending release is not carried: the release waits for D27 (below).
+- **No pages.** It is one answer, because pages could not share one exact snapshot. If sizes ever call for it, there will
+  be a snapshot export, not pages that can't agree.
+- **A cursor beside it.** The parameter is checked (a malformed one is still 400 `cursor`) and ignored, and 409
+  `cursor_ahead` does not apply.
+- **With the setting off** the parameter is ignored and the answer is today's, with no `checkpoint` key. Check for the
+  key; don't infer a checkpoint from its absence.
+- **When to read it.** To start, after 409 `cursor_ahead`, after a restore, and in any doubt. Your enforcement state
+  stays durable meanwhile.
+
+**Account availability.** The built-in Station learns which Agora.Build accounts are disabled, by the account IDs Auth
+uses as `sub`, never by a stored user field. The Portal gets them from Auth's feed ("Account Availability", under "Admin
+Changes From Auth") and keeps them in one durable table.
+
+- **`accounts.complete`** is `true` only while the Portal's view is complete: it has applied an Auth `accounts_baseline`
+  in order and has not started over, or moved to `waiting`, since. Then an account missing from `disabled` is enabled as of
+  `cursor`, or doesn't exist.
+- **`complete: false` means unknown.** An account missing from `disabled` must not count as enabled: fail closed, and read
+  the checkpoint again later. While it is `false`, `disabled` is what the Portal last applied. A disabled account is
+  listed, and an unknown one is not complete; never mix them up.
+- **It is `false`** on a Portal that has not caught up yet (a first start, a reset, or after Auth was restored: the
+  Portal rebuilds from Auth's first entry), while it waits for an operator's reset, and with Auth's setting off or a
+  baseline not yet written (Auth writes it when it starts with its setting on).
+- **Four changes on the built-in Station's feed.** Each is
+  `{ id, at, integrationId: null, kind, state: null, reason: "agora_build", account }`, has no `integration`, and a custom
+  Station never gets one:
+
+  | `kind` | `account` | Meaning |
+  | --- | --- | --- |
+  | `account_disabled` | the account | Agora.Build disabled it. Apply the latest change for each account. Live, it comes with the `integration_paused` changes for that account's integrations. |
+  | `account_enabled` | the account | Agora.Build enabled it again. Live, it comes with the `integration_resumed` changes. |
+  | `accounts_baseline` | `null` | The Portal's view became complete. From here an account missing from your disabled list is enabled. |
+  | `accounts_incomplete` | `null` | From here the Portal's view is not complete. Treat an account missing from your disabled list as unknown, and fail closed, until the next `accounts_baseline`. |
+
+  ```json example:account-changes
+  {
+    "changes": [
+      { "id": 4813, "at": "2026-11-22T10:01:00.000Z", "integrationId": null, "kind": "account_disabled", "state": null, "reason": "agora_build", "account": "ab01KB4Q5H1G9K3M7N2P4S6TCRGD" },
+      { "id": 4814, "at": "2026-11-22T10:02:30.000Z", "integrationId": null, "kind": "account_enabled", "state": null, "reason": "agora_build", "account": "ab01KB4P9C3E7M2V5T8R1W6XBJFC" },
+      { "id": 4815, "at": "2026-11-22T10:05:00.000Z", "integrationId": null, "kind": "accounts_incomplete", "state": null, "reason": "agora_build", "account": null },
+      { "id": 4816, "at": "2026-11-22T10:09:12.000Z", "integrationId": null, "kind": "account_disabled", "state": null, "reason": "agora_build", "account": "ab01KB4N2F8D6H1G5Z3P7S9QAXEB" },
+      { "id": 4817, "at": "2026-11-22T10:09:12.000Z", "integrationId": null, "kind": "accounts_baseline", "state": null, "reason": "agora_build", "account": null }
+    ],
+    "cursor": 4817
+  }
+  ```
+
+  That is a start-over and its rebuild: `accounts_incomplete` when the Portal started over, then the account whose state
+  differs from what it had told the Station, then `accounts_baseline` once the rebuild caught up.
+- **When they are sent.**
+  - `account_disabled` and `account_enabled`: once for each account entry the Portal applies live, in Auth's order. After
+    a rebuild they are sent for the accounts whose state differs from what the Portal held before, so a Station never
+    sees a state Auth has since replaced, and never sees the feed's history again.
+  - `accounts_baseline`: once each time the view becomes complete: at the end of a rebuild that applied an Auth baseline,
+    and when a baseline is applied live while the view is not complete. A baseline that arrives while the view is
+    complete changes nothing and tells nobody.
+  - `accounts_incomplete`: once each time the view goes from complete to not complete while the Portal's setting is on.
+    If that happened while the setting was off, it is sent once, when the Portal next runs with the setting on.
+- **Reconnect or reset.** After 409 `cursor_ahead`, a restore, or any doubt, read the checkpoint again.
+- **Turning the setting off.** If Auth's setting is turned off, Auth writes no account entries meanwhile. The next start
+  with it on writes the corrections and a new baseline. For the Portal's own setting, see "Account Availability".
+- Provisional: Atem's design (III.5) defines these entries jointly with Astation, so they may still change.
+
+**The built-in Station's binding reports.** The ownership rules stay the Station's, as Atem's design (III.5) says: the
+native-manager proof and challenge bytes, consent for transfers, refusals, and closing routes and channels. The Portal
+records and shows what the built-in Station reports. `POST /api/v1/stations/reports` takes two more forms from it, in the
+same `reportId` idempotency and answer classes as the revocation reports; the forms and their errors are under "Routes".
+
+`binding_changed`: a binding for an R9 account at a genesis changed.
+
+```json example:binding-changed-request
+{
+  "state": "binding_changed",
+  "reportId": "binding_changed:5e0c8a3f9d1b47264a8c0e5f3d91b72a64c80e5f1d3b9a7246c08e5f3d91b72a",
+  "account": "ab01KB4M7Q2X9R5T3WJ8V6C0YNDA",
+  "accountId": "acct-7f3a2c91",
+  "genesisHash": "3c9a5e81b07d24f6c1a8e5d3b9f20476a1c8d5e29b3f7061c4a8e2d5b9f1037a",
+  "bindingId": "bind-5d1e",
+  "version": 3,
+  "bindingState": "bound"
+}
+```
+
+The answer is the recorded binding:
+
+```json example:binding-changed-answer
+{
+  "accountId": "acct-7f3a2c91",
+  "genesisHash": "3c9a5e81b07d24f6c1a8e5d3b9f20476a1c8d5e29b3f7061c4a8e2d5b9f1037a",
+  "bindingId": "bind-5d1e",
+  "version": 3,
+  "bindingState": "bound"
+}
+```
+
+- `account` is the Agora.Build owner after the change. On `unbound` or `released` it is the owner that was let go.
+- `accountId` is the R9 account, `genesisHash` the 32 bytes as 64 lowercase hex characters, and `bindingId` and
+  `accountId` are opaque to the Portal: 1 to 128 characters of `[A-Za-z0-9._:-]`.
+- **Versions.** They are kept for each `(accountId, genesisHash)` of the Station:
+  - a higher `version` replaces the recorded binding, whatever the gap: the account, binding id and state are replaced;
+  - the same `version` with an identical binding (`account`, `bindingId` and `bindingState`) is 200 with the recorded
+    answer and changes nothing (the report is kept under its own `reportId`);
+  - a lower `version`, or the same one with a different binding, is 409 `binding_version` ("This binding's version is
+    not newer than the one recorded."), final with an alert:
+
+  ```json example:binding-version-error
+  {
+    "error": "This binding's version is not newer than the one recorded.",
+    "code": "binding_version"
+  }
+  ```
+
+  A refused report records nothing, not even its `reportId`.
+- **Order.** Send the reports for one `(accountId, genesisHash)` one at a time, in the order they were made, the next once
+  the last is settled. A report that arrives after a newer one is 409 `binding_version`, and the Portal does not reorder.
+- **Transfers.** The Portal learns of a transfer from A to B only through `binding_changed`, and shows the new owner.
+  Consent, and refusal (of a resolved owner C who is disabled, say), stay at the Station.
+
+`binding_attempt`: the Station refused a binding. It is reported to the Agora.Build account it protects.
+
+```json example:binding-attempt-request
+{
+  "state": "binding_attempt",
+  "reportId": "binding_attempt:a1d47c90e3b52f68d0a9c4e71b3f5826e0d94a7c15b3f860d2e9a4c7513b8f06",
+  "account": "ab01KB4M7Q2X9R5T3WJ8V6C0YNDA",
+  "accountId": "acct-7f3a2c91",
+  "genesisHash": "3c9a5e81b07d24f6c1a8e5d3b9f20476a1c8d5e29b3f7061c4a8e2d5b9f1037a",
+  "reason": "bound_elsewhere",
+  "attemptedAt": "2026-11-21T09:59:00.000Z"
+}
+```
+
+The answer:
+
+```json example:binding-attempt-answer
+{
+  "recorded": true
+}
+```
+
+- `account` is the Agora.Build account to alert, `accountId` its R9 account that was refused. `reason` is
+  `bound_elsewhere` (another Agora.Build account holds the binding) or `owner_disabled` (an owner account was disabled).
+- `attemptedAt` is when the Station made the attempt, as `toISOString` writes it. The Portal takes a Station's clock to
+  run ahead, but only by an hour: a later time is 400 `attempted_at`, so a far-future time can't keep a notice first on
+  the page.
+- **What the account sees.** The attempt is on `account`'s page for 30 days, among the 50 newest, in the browser list's
+  `notices` ("Routes"). It never names the other account. Every attempt is kept; the page shows 30 days.
+- It writes no change to the Station's feed and pushes nothing.
+
+Both reports have a `reportId` with the rules of Phase B's: the same id with the same body gets the recorded answer (200)
+and changes nothing, and with another body it is 409 `report_id_reused`. Ids are kept for each Station forever, with the
+body and the answer. The answers are classed as in the table above: 200 is done; a network error, a 5xx, 408, 429 and 401
+are retried (with a fresh token for a 401); 409 `binding_version`, 409 `report_id_reused`, 400 and any other 4xx are final,
+with an operator alert. A 403 is the stop class; for a binding report it can also mean that the sender is not the
+built-in Station (403 `forbidden`).
+
+**Releasing a binding is not built.** `binding_released` (the Portal telling the built-in Station to release a binding,
+which the Station applies only when `bindingId` and `version` match its record, so a delayed release can't remove a later
+binding) and the admin site's "Release R9 binding" wait for D27's Portal admin API, which is not built. Until then the
+Portal sends no `binding_released`, and the checkpoint carries no pending release. The two reports above do not wait for
+it.
+
+Provisional until Astation and Atem confirm: the grammar of `genesisHash`, `accountId`, `bindingId` and `version` above.
 
 **The push nudge.** After a committed change the Portal sends
 `POST <origin>/agora-build/v1/changes` with `{ "cursor": <n> }` to the Station,
@@ -1334,7 +1952,9 @@ never point it at production. The Stations and integrations tests
 the lifecycle states, proof of control and its address checks, the Auth
 management client, Station registration and sharing, integration changes,
 reports, the change feed and push, the reader of Auth's change feed, the nudge route and applying admin changes, the
-routes and the account page; the ones that need PostgreSQL use the same variable and run in throwaway schemas.
+routes and the account page; with `DELEGATED_HOST_WORK=1` also the Station directory, the exact-cursor checkpoint, account
+availability and its rebuild, and the binding reports. `tests/platform-docs.test.mjs` checks that the example answers in
+this document are what the Portal gives. The ones that need PostgreSQL use the same variable and run in throwaway schemas.
 
 `npm run test:e2e` runs the real Portal against the real auth.agora.build, loaded
 from an Agora-Build/Auth checkout (`AUTH_REPO`, default `../Auth`, with

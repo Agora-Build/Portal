@@ -1554,6 +1554,24 @@ test("with the setting on, a token on the unversioned /api/stations gets the ver
   assert.deepEqual(Object.keys(body.stations[1]).sort(), ["builtIn", "createdAt", "id", "integrationsEnabled", "name", "origin", "ownerAccount", "reportClientId", "role", "status"], "today's view, not the directory's");
 });
 
+test("with the setting on, a cookie with no token on /api/v1/stations gets the browser's list, as on /api/v1/integrations: the directory needs a token", async (t) => {
+  const integrations = await stack(t, { delegatedHostWork: true });
+  if (!integrations) return;
+  const built = integrations.manage.seedBuiltIn({ integrations: true });
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const ada = await signIn(app);
+  const { station } = await registerStation(app, integrations, ada.cookie);
+  const cookie = await call(app.base, "/api/v1/stations?limit=1", { cookie: ada.cookie });
+  assert.equal(cookie.status, 200);
+  const body = await cookie.json();
+  assert.deepEqual(Object.keys(body).sort(), ["notices", "stale", "stations"], "the browser's list: no nextCursor, no complete");
+  assert.deepEqual(body.stations.map((entry) => entry.id), [built.id, station.id], "and the limit is ignored");
+  assert.deepEqual(Object.keys(body.stations[1]).sort(), ["builtIn", "createdAt", "id", "integrationsEnabled", "name", "origin", "ownerAccount", "reportClientId", "role", "status"]);
+  const token = await (await directory(app, await directoryToken(app, ada.sub, "integrations:read"), "?limit=1")).json();
+  assert.deepEqual(Object.keys(token).sort(), ["complete", "nextCursor", "stale", "stations"], "with a token it is the directory");
+  assert.equal(token.stations.length, 1);
+});
+
 test("with the setting off, GET /api/v1/stations does not exist and the browser's list is as it was", async (t) => {
   const integrations = await stack(t);
   if (!integrations) return;
