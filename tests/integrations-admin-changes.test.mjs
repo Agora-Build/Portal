@@ -658,6 +658,8 @@ test("with the setting on, entries of the wrong shape for their kind are skipped
   // A person's own change is the Portal's own; Auth writes these two kinds for its admin or system only.
   assert.equal(await s.service.applyAuthChange({ ...account, admin: false, actorAccountId: OTHER }), "skipped");
   assert.equal((await s.accountEvents(s.built.id)).length, 0);
+  // Those skipped account-level entries left the accounts waiting for a replay; the reader's start-over (a reset) ends that.
+  await s.service.accountsStartingOver();
   assert.equal(await s.service.applyAuthChange({ ...account, admin: false, actorAccountId: null }), "applied", "Auth's own, with no actor");
   assert.deepEqual((await s.accountEvents(s.built.id)).map((event) => [event.actor, event.details.admin]), [["system", false]]);
 });
@@ -676,6 +678,7 @@ test("with the setting on, an accounts baseline is accepted only naming no integ
   for (const entry of bad) assert.equal(await s.service.applyAuthChange(entry), "skipped", JSON.stringify(entry));
   assert.deepEqual(await s.written(), before);
   assert.equal(await s.baselineRow(), null);
+  await s.service.accountsStartingOver(); // the skipped entries above left the accounts waiting for a replay
   assert.equal(await s.service.applyAuthChange(baseline), "applied");
   assert.deepEqual(await s.baselineRow(), { cursor: baseline.cursor, at: baseline.at, complete: false }, "recorded, and complete only once the Portal has caught up");
   assert.equal(await s.repository.baselineApplied(), false);
@@ -1080,9 +1083,108 @@ test("with the setting on, an account-level entry that is skipped (malformed, or
     const written = await s.written();
     assert.deepEqual([written.entries, written.baseline, written.availability], [0, 0, 1], "forgotten, availability as it was: " + JSON.stringify(skipped));
     assert.deepEqual(await s.repository.disabledAccountList(), [OWNER]);
-    // Read again, the entries apply again, and the Portal completes once it has caught up.
+    assert.equal(await s.repository.accountsNeedReplay(), true, "and waiting for the feed to be read again from the start");
+    // Read again from the start (the reader's start-over), the entries apply again, and the Portal completes once it has caught up.
+    await s.service.accountsStartingOver();
+    assert.equal(await s.repository.accountsNeedReplay(), false);
     await complete();
   }
+});
+
+const WAITING = "Account availability waits for Auth's change feed to be read again from the start (empty the Portal's Auth cursor).";
+
+// Applied account entries are always a prefix of Auth's feed: once the Portal has skipped one, a later account-level entry
+// is skipped too (not recorded) until the feed is read again from the start, so a replay never meets an entry that was
+// applied out of order.
+test("with the setting on, once an account entry was skipped, later account-level entries are skipped and not recorded until a reset; integration entries still apply; the reset replays everything in order", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const off = s.offService();
+  const id = await s.ready();
+  s.manage.accountChange(OWNER, true, { actor: ADMIN, reason: "Abuse" });
+  s.clock.now += 1000;
+  s.manage.accountChange(OWNER, false, { actor: ADMIN, reason: "Appeal" });
+  s.manage.adminChange(id, { status: "paused", actor: ADMIN, reason: "Spam" });
+  s.manage.accountChange(THIRD, true, { actor: ADMIN, reason: "Abuse" });
+  s.manage.baselineChange();
+  const [disabled, enabled, paused, third, baseline] = s.manage.feed;
+  const waiting = () => s.logs.filter((line) => line === WAITING).length;
+
+  // The first entry is skipped while the setting is off; the setting is then on again, with no reset.
+  assert.equal(await s.repository.accountsNeedReplay(), false);
+  assert.equal(await off.applyAuthChange(disabled), "skipped");
+  assert.equal(await s.repository.accountsNeedReplay(), true);
+  assert.equal(await s.service.applyAuthChange(enabled), "skipped", "the next one is skipped too, though it could be applied");
+  assert.deepEqual(await s.written(), { entries: 0, availability: 0, baseline: 0, events: 0 }, "and not recorded");
+  assert.equal(waiting(), 1);
+  assert.equal(await s.service.applyAuthChange(paused), "applied", "integration entries apply as usual");
+  assert.equal((await s.repository.integration(id)).state, "paused");
+  assert.equal(await s.service.applyAuthChange(third), "skipped");
+  assert.equal(await s.service.applyAuthChange(baseline), "skipped", "a baseline too");
+  assert.equal(waiting(), 1, "the line is logged once while the reader's pass lasts");
+  assert.equal(await s.baselineRow(), null);
+  assert.equal(await s.service.accountsCaughtUp(), false, "and the end of a pass completes nothing");
+  assert.equal(await s.repository.baselineApplied(), false);
+  assert.equal(await s.service.applyAuthChange(third), "skipped");
+  assert.equal(waiting(), 2, "the next pass says it again");
+  assert.deepEqual(await s.written(), { entries: 0, availability: 0, baseline: 0, events: 0 });
+  assert.deepEqual(s.notified.filter((stationId) => stationId !== s.built.id), []);
+
+  // A reset: the feed is read again from the start, and every account entry is applied in Auth's order.
+  await s.repository.saveAuthChangeCursor(null);
+  await s.readAll();
+  assert.equal(await s.repository.accountsNeedReplay(), false);
+  assert.deepEqual(await s.repository.disabledAccountList(), [THIRD], "OWNER was disabled, then enabled");
+  assert.deepEqual((await s.levelEvents(s.built.id)).map((event) => [event.kind, event.account_id]), [["account_disabled", OWNER], ["account_enabled", OWNER], ["account_disabled", THIRD], ["accounts_baseline", null]]);
+  assert.equal(await s.repository.baselineApplied(), true);
+});
+
+test("with the setting on, a baseline that arrives live after a skipped disable completes nothing until a reset, and then the disable is in place", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const off = s.offService();
+  s.manage.accountChange(OWNER, true, { actor: ADMIN, reason: "Abuse" });
+  s.manage.baselineChange();
+  const [disabled, baseline] = s.manage.feed;
+  assert.equal(await off.applyAuthChange(disabled), "skipped");
+  assert.equal(await s.service.applyAuthChange(baseline), "skipped");
+  assert.equal(await s.baselineRow(), null, "not recorded");
+  // The reader has read to the end of the feed, from a cursor it kept: caught up, but the accounts are still unknown.
+  await s.repository.saveAuthChangeCursor(baseline.cursor);
+  await s.readAll();
+  assert.equal(await s.repository.baselineApplied(), false);
+  assert.deepEqual(await s.repository.disabledAccountList(), [], "the skipped disable is not applied, so OWNER is not listed: the answer is 'not complete'");
+  assert.deepEqual((await s.levelEvents(s.built.id)).map((event) => event.kind), []);
+  // After a reset the feed is replayed: complete, with OWNER disabled.
+  await s.repository.saveAuthChangeCursor(null);
+  await s.readAll();
+  assert.equal(await s.repository.baselineApplied(), true);
+  assert.deepEqual(await s.repository.disabledAccountList(), [OWNER]);
+  assert.deepEqual((await s.levelEvents(s.built.id)).map((event) => event.kind), ["account_disabled", "accounts_baseline"]);
+});
+
+test("with the setting on, caught up does nothing while the accounts wait for a replay, even with a baseline recorded, and starting over ends the wait and makes the baseline incomplete", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  s.manage.accountChange(OWNER, true, { actor: ADMIN, reason: "Abuse" });
+  s.manage.baselineChange();
+  const [account, baseline] = s.manage.feed;
+  await s.service.applyAuthChange(account);
+  await s.service.applyAuthChange(baseline);
+  await s.repository.setAccountsNeedReplay();
+  s.notified.length = 0;
+  assert.equal(await s.service.accountsCaughtUp(), false);
+  assert.deepEqual(await s.baselineRow(), { cursor: baseline.cursor, at: baseline.at, complete: false });
+  assert.deepEqual((await s.levelEvents(s.built.id)).map((event) => event.kind), ["account_disabled"]);
+  assert.deepEqual(s.notified, []);
+  await s.repository.clearAccountsNeedReplay();
+  assert.equal(await s.service.accountsCaughtUp(), true);
+  // Starting over: the wait is over and the accounts are unknown until the next caught up.
+  await s.repository.setAccountsNeedReplay();
+  await s.service.accountsStartingOver();
+  assert.equal(await s.repository.accountsNeedReplay(), false);
+  assert.equal(await s.repository.baselineApplied(), false);
+  assert.deepEqual(await s.baselineRow(), { cursor: baseline.cursor, at: baseline.at, complete: false });
 });
 
 test("with the setting off, an account entry or a baseline clears the accounts baseline mark and forgets the applied entries, and is skipped; integration entries apply as before; the hooks do nothing", async (t) => {
@@ -1108,20 +1210,23 @@ test("with the setting off, an account entry or a baseline clears the accounts b
   const before = await s.written();
   assert.deepEqual(before, { entries: 2, availability: 1, baseline: 1, events: 2 });
 
-  // An account entry the Portal skips clears the mark and forgets the entries, and writes nothing else.
+  // An account entry the Portal skips clears the mark and forgets the entries, waits for a replay, and writes nothing else.
   s.notified.length = 0;
   assert.equal(await off.applyAuthChange(enabled), "skipped");
   assert.equal(await s.repository.baselineApplied(), false, "unknown again");
+  assert.equal(await s.repository.accountsNeedReplay(), true);
   assert.deepEqual(await s.written(), { entries: 0, availability: 1, baseline: 0, events: 2 });
   assert.deepEqual(await s.repository.disabledAccountList(), [OWNER], "availability is left as it was");
   assert.deepEqual(s.notified, []);
-  // A baseline entry the Portal skips does the same.
+  // A baseline entry the Portal skips does the same. (Each replay starts with the reader's start-over, which ends the wait.)
+  await s.service.accountsStartingOver();
   await complete(baselineTwo);
   assert.deepEqual(await s.written(), { entries: 1, availability: 1, baseline: 1, events: 3 });
   assert.equal(await off.applyAuthChange(baselineThree), "skipped");
   assert.equal(await s.repository.baselineApplied(), false);
   assert.deepEqual(await s.written(), { entries: 0, availability: 1, baseline: 0, events: 3 });
   // An integration's entry is followed as today and leaves the mark and the entries alone.
+  await s.service.accountsStartingOver();
   await complete(baselineFour);
   assert.equal(await off.applyAuthChange(paused), "applied");
   assert.equal((await s.repository.integration(id)).state, "paused");
@@ -1131,6 +1236,10 @@ test("with the setting off, an account entry or a baseline clears the accounts b
   assert.equal(await off.accountsCaughtUp(), false);
   assert.equal(await off.accountsStartingOver(), undefined);
   assert.equal(await s.repository.baselineApplied(), true, "starting over, with the setting off, leaves the mark");
+  await s.repository.setAccountsNeedReplay();
+  await off.accountsStartingOver();
+  assert.equal(await s.repository.accountsNeedReplay(), true, "and the wait: only a Portal with the setting on replays");
+  await s.repository.clearAccountsNeedReplay();
   // Clearing a mark that isn't there is fine, and so is an account entry of the wrong shape: it is an account entry all the same.
   assert.equal(await off.applyAuthChange({ kind: "account_enabled" }), "skipped");
   assert.equal(await s.repository.baselineApplied(), false);

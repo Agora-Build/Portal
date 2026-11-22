@@ -578,6 +578,37 @@ test("the accounts baseline is recorded when applied and marked complete once th
   assert.equal(await repo.baselineApplied(), true);
 });
 
+test("the wait for a replay of Auth's account entries is a flag on the feed's row: set, kept by cursor saves, and cleared", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  const rows = async () => (await db.pool.query("SELECT cursor, accounts_need_replay FROM auth_change_feed")).rows;
+  assert.deepEqual(await rows(), [{ cursor: null, accounts_need_replay: false }]);
+  assert.equal(await repo.accountsNeedReplay(), false);
+  await repo.clearAccountsNeedReplay();
+  await repo.setAccountsNeedReplay();
+  assert.equal(await repo.accountsNeedReplay(), true);
+  await repo.saveAuthChangeCursor("YzEy");
+  assert.deepEqual(await rows(), [{ cursor: "YzEy", accounts_need_replay: true }], "a cursor save leaves the flag");
+  await repo.setAccountsNeedReplay();
+  assert.equal(await repo.authChangeCursor(), "YzEy", "and setting it leaves the cursor");
+  await repo.saveAuthChangeCursor(null);
+  assert.equal(await repo.accountsNeedReplay(), true, "even a reset");
+  await repo.clearAccountsNeedReplay();
+  assert.deepEqual(await rows(), [{ cursor: null, accounts_need_replay: false }]);
+  await db.transaction(async (client) => {
+    await repo.setAccountsNeedReplay(client);
+    assert.equal(await repo.accountsNeedReplay(client), true, "inside a transaction");
+    throw new Error("stop");
+  }).catch((error) => assert.equal(error.message, "stop"));
+  assert.equal(await repo.accountsNeedReplay(), false, "rolled back with the transaction");
+  // With the row missing it is created by setting the flag.
+  await db.pool.query("DELETE FROM auth_change_feed");
+  assert.equal(await repo.accountsNeedReplay(), false);
+  await repo.setAccountsNeedReplay();
+  assert.deepEqual(await rows(), [{ cursor: null, accounts_need_replay: true }]);
+  assert.equal(await repo.authChangeCursor(), null);
+});
+
 test("the applied entries of Auth's account feed can all be forgotten, so the next read applies them again", async (t) => {
   const { repo, db } = await setup(t);
   if (!repo) return;

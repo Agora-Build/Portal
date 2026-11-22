@@ -77,6 +77,9 @@ const BASELINE_KIND = "accounts_baseline";
 const ACCOUNT_LEVEL_KINDS = [...ACCOUNT_KINDS, BASELINE_KIND];
 const DELEGATED_AUTH_KINDS = [...AUTH_KINDS, "interrupt_requested", ...ACCOUNT_LEVEL_KINDS];
 const AUTH_REASON_MAX = 500;
+// Logged (at most once per read pass) while the accounts wait for the feed to be read again from the start (D29).
+const WAITING_FOR_REPLAY = "Account availability waits for Auth's change feed to be read again from the start (empty the Portal's Auth cursor).";
+const WAITING = Symbol("waiting for a replay");
 // How the Station's feed and an integration's history name a change an Agora.Build admin made (spec §3.3.4): the admin
 // and the reason they gave stay in the Portal's event (actor, reason) and in Auth's audit.
 const AGORA_BUILD = "agora_build";
@@ -592,6 +595,9 @@ export function createIntegrationService({
     }
   }
 
+  // Whether the line saying the accounts wait for a replay was logged since the reader's last pass ended.
+  let waitingLogged = false;
+
   // An account-level entry of Auth's change feed (D29, the setting on): an admin disabled or enabled an account, or Auth
   // wrote its accounts baseline. Everything happens in one transaction: the entry is marked applied (once, whatever is
   // read again), and the account's availability is written, or the baseline recorded. A disable or enable is also
@@ -601,11 +607,14 @@ export function createIntegrationService({
   // Portal has caught up (accountsCaughtUp). The Stations are pushed after the commit, and a failure anywhere rolls all
   // of it back, so the reader's next read applies the entry once. With no built-in Station the tables are still
   // updated. Order is the feed's: the reader applies entries in Auth's order under the event lock, and availability is
-  // whatever the entry applied last says, never judged by Auth's clock. Returns "applied", or "skipped" when the entry
-  // was applied before.
+  // whatever the entry applied last says, never judged by Auth's clock. For that the applied entries must always be a
+  // prefix of the feed: while the Portal waits for a replay (it skipped an entry, forgetAccounts) every account-level
+  // entry is skipped and not recorded, with one line logged until the reader's next pass ends. Returns "applied", or
+  // "skipped" when the entry was applied before or the accounts wait for a replay.
   async function accountChange(entry, actor, reason) {
     const baseline = entry.kind === BASELINE_KIND;
     const stations = await appending(async (client) => {
+      if (await repository.accountsNeedReplay(client)) return WAITING;
       if (!(await repository.applyAccountEntry({ cursor: entry.cursor, at: entry.at, account: entry.owner, kind: entry.kind }, client))) return null;
       if (baseline) {
         await repository.setBaseline(entry.cursor, entry.at, client);
@@ -621,6 +630,11 @@ export function createIntegrationService({
       }
       return active;
     });
+    if (stations === WAITING) {
+      if (!waitingLogged) log(WAITING_FOR_REPLAY);
+      waitingLogged = true;
+      return "skipped";
+    }
     if (stations === null) return "skipped";
     if (!baseline && !stations.length) log("Auth account change skipped: no built-in Station.");
     for (const station of stations) changed(station.id);
@@ -628,11 +642,14 @@ export function createIntegrationService({
   }
 
   // The Portal skipped an account-level entry (its setting is off, or the entry is not one it can apply), so it no longer
-  // follows Auth's accounts: the baseline mark is cleared, and every applied entry is forgotten, so that reading the feed
-  // again from the start applies each in Auth's order, the baseline included. Availability is unknown until then.
+  // follows Auth's accounts: the baseline mark is cleared, every applied entry is forgotten, and the accounts wait for a
+  // replay. Until the reader starts the feed over from its first entry (accountsStartingOver), no account-level entry is
+  // applied or recorded, so the applied ones are always a prefix of the feed: the replay then applies each in Auth's
+  // order, the baseline included. Availability is unknown until then.
   const forgetAccounts = () => appending(async (client) => {
     await repository.clearBaseline(client);
     await repository.forgetAccountEntries(client);
+    await repository.setAccountsNeedReplay(client);
   });
 
   // Shown as paused while its own state is not: its owner's account is disabled.
@@ -1332,10 +1349,15 @@ export function createIntegrationService({
 
     // The reader of Auth's feed (auth-changes.mjs) starts it over from its first entry: a first start, or a reset (the
     // cursor was forgotten, or Auth was restored). Until the Portal has caught up again the accounts are unknown, so the
-    // baseline mark is made incomplete (D29, the setting on). Entries already applied are skipped as it reads them again.
+    // baseline mark is made incomplete (D29, the setting on), and the wait for a replay is over: the replay begins at the
+    // first entry. Entries already applied are skipped as it reads them again.
     async accountsStartingOver() {
       if (!delegatedHostWork) return;
-      await appending((client) => repository.markBaselineIncomplete(client));
+      waitingLogged = false;
+      await appending(async (client) => {
+        await repository.markBaselineIncomplete(client);
+        await repository.clearAccountsNeedReplay(client);
+      });
     },
 
     // A read of Auth's feed reached its end (its last page wasn't full). If a baseline is recorded and not yet complete,
@@ -1343,10 +1365,13 @@ export function createIntegrationService({
     // accounts_baseline change and is pushed after the commit. From that change on, a Station's view is complete too.
     // Called by every replica after every such read: only the first one that finds it incomplete completes it and
     // appends (the event lock serializes them). Returns whether this call did. A failure rolls all of it back, so the
-    // next read tries again.
+    // next read tries again. While the accounts wait for a replay it does nothing: what was applied is not a prefix of
+    // the feed.
     async accountsCaughtUp() {
       if (!delegatedHostWork) return false;
+      waitingLogged = false;
       const stations = await appending(async (client) => {
+        if (await repository.accountsNeedReplay(client)) return null;
         const baseline = await repository.markBaselineComplete(client);
         if (!baseline) return null;
         const active = await repository.builtInStations(client);

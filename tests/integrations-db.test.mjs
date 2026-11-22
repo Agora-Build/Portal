@@ -232,6 +232,10 @@ test("migration 006 adds the availability, applied-entry, baseline and binding t
   await entry("YzEz", "2026-11-10T10:00:00Z", null, "accounts_baseline");
   await assert.rejects(q("INSERT INTO auth_account_entries (auth_cursor, auth_at, kind) VALUES ('c', now(), NULL)"), { code: "23502" });
 
+  // The wait for a replay of the account entries sits on the feed's one row, off by default.
+  assert.deepEqual((await q("SELECT accounts_need_replay FROM auth_change_feed")).rows, [{ accounts_need_replay: false }]);
+  await assert.rejects(q("UPDATE auth_change_feed SET accounts_need_replay = NULL"), { code: "23502" });
+
   const availability = (account, disabled = true) => q("INSERT INTO account_availability (account_id, disabled, auth_cursor, auth_at) VALUES ($1, $2, 'YzEy', now())", [account, disabled]);
   await availability("ab1");
   await assert.rejects(availability("ab1", false), { code: "23505" }, "one row per account");

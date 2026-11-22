@@ -407,6 +407,23 @@ export function createRepository(db) {
       await run(client, "INSERT INTO auth_change_feed (id, cursor) VALUES (true, $1) ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = now()", [cursor]);
     },
 
+    // Whether the Portal skipped an account-level entry of Auth's feed and waits for the feed to be read again from the
+    // start (service.forgetAccounts, accountsStartingOver): until then no account-level entry is applied, so the applied
+    // ones are always a prefix of the feed. Kept on the feed's one row.
+    async accountsNeedReplay(client) {
+      const { rows } = await run(client, "SELECT accounts_need_replay FROM auth_change_feed WHERE id");
+      return rows[0]?.accounts_need_replay === true;
+    },
+
+    // The row is created when it is missing (the cursor stays null: nothing was read).
+    async setAccountsNeedReplay(client) {
+      await run(client, "INSERT INTO auth_change_feed (id, accounts_need_replay) VALUES (true, true) ON CONFLICT (id) DO UPDATE SET accounts_need_replay = true");
+    },
+
+    async clearAccountsNeedReplay(client) {
+      await run(client, "UPDATE auth_change_feed SET accounts_need_replay = false WHERE accounts_need_replay");
+    },
+
     // Whether an entry of Auth's change feed was already applied to this integration: its cursor and time are kept in
     // the details of the event it wrote (service.applyAuthChange). The time tells apart a cursor Auth hands out again
     // after its database was restored from a backup.

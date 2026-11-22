@@ -39,6 +39,12 @@ CREATE TABLE account_baseline (
   complete boolean NOT NULL DEFAULT false
 );
 
+-- Set when the Portal skips an account-level entry of Auth's feed (service.forgetAccounts): the applied account entries must
+-- always be a prefix of Auth's feed, so until the feed is read again from the start (the reader's start-over clears it)
+-- every account-level entry is skipped and not recorded, and the accounts never become complete. It is kept on the one-row
+-- table of the Portal's place in the feed.
+ALTER TABLE auth_change_feed ADD COLUMN accounts_need_replay boolean NOT NULL DEFAULT false;
+
 -- The built-in Station's last reported binding per R9 account.
 CREATE TABLE station_bindings (
   station_id text NOT NULL,
