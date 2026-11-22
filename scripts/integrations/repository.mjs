@@ -143,6 +143,19 @@ function bindingAttemptRow(row) {
 export function createRepository(db) {
   const run = (client, text, values) => (client || db.pool).query(text, values);
 
+  // The live account tables and a rebuild's share their shapes (D29, migration 006); the table names are fixed here.
+  async function recordEntry(table, { cursor, at, account = null, kind }, client) {
+    const { rowCount } = await run(client, "INSERT INTO " + table + " (auth_cursor, auth_at, account_id, kind) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING", [authCursorOf(cursor), timeOf(at, "at"), account, kind]);
+    return rowCount > 0;
+  }
+
+  async function upsertAvailability(table, account, disabled, cursor, at, client) {
+    if (typeof disabled !== "boolean") throw new TypeError("disabled must be true or false.");
+    await run(client,
+      "INSERT INTO " + table + " (account_id, disabled, auth_cursor, auth_at) VALUES ($1, $2, $3, $4) ON CONFLICT (account_id) DO UPDATE SET disabled = EXCLUDED.disabled, auth_cursor = EXCLUDED.auth_cursor, auth_at = EXCLUDED.auth_at, updated_at = now()",
+      [account, disabled, authCursorOf(cursor), timeOf(at, "at")]);
+  }
+
   return {
     async createChallenge({ id, accountId, origin, value, expiresAt, createdAt }, client) {
       await run(client, "INSERT INTO station_challenges (id, account_id, origin, value, expires_at, created_at) VALUES ($1, $2, $3, $4, $5, $6)", [id, accountId, origin, value, when(expiresAt), when(createdAt)]);
@@ -395,33 +408,68 @@ export function createRepository(db) {
       return Number(rows[0].cursor);
     },
 
-    // Where the Portal is in Auth's change feed (auth-changes.mjs): Auth's opaque cursor, or null before the first page.
-    async authChangeCursor(client) {
-      const { rows } = await run(client, "SELECT cursor FROM auth_change_feed WHERE id");
-      return rows[0]?.cursor ?? null;
+    // Where the Portal is in Auth's change feed (auth-changes.mjs): Auth's opaque cursor, or null before the first page,
+    // and the epoch of the Portal's following of Auth's accounts (D29), read together so a read pass begins in the epoch
+    // its cursor was saved in. A missing row reads as no cursor, in epoch 0.
+    async authChangePlace(client) {
+      const { rows } = await run(client, "SELECT cursor, accounts_epoch FROM auth_change_feed WHERE id");
+      return { cursor: rows[0]?.cursor ?? null, epoch: rows[0] ? Number(rows[0].accounts_epoch) : 0 };
     },
 
-    // null resets it, to read Auth's feed again from the start. The row is created when it is missing.
+    // null resets it, to read Auth's feed again from the start. The row is created when it is missing, waiting (D29): it
+    // knows nothing of what the Portal followed of Auth's accounts.
     async saveAuthChangeCursor(cursor, client) {
       if (cursor !== null && (typeof cursor !== "string" || !AUTH_CURSOR.test(cursor))) throw new TypeError("An Auth change cursor is 1 to 64 base64url characters, or null.");
-      await run(client, "INSERT INTO auth_change_feed (id, cursor) VALUES (true, $1) ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = now()", [cursor]);
+      await run(client, "INSERT INTO auth_change_feed (id, cursor, accounts_mode) VALUES (true, $1, 'waiting') ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = now()", [cursor]);
     },
 
-    // Whether the Portal skipped an account-level entry of Auth's feed and waits for the feed to be read again from the
-    // start (service.forgetAccounts, accountsStartingOver): until then no account-level entry is applied, so the applied
-    // ones are always a prefix of the feed. Kept on the feed's one row.
-    async accountsNeedReplay(client) {
-      const { rows } = await run(client, "SELECT accounts_need_replay FROM auth_change_feed WHERE id");
-      return rows[0]?.accounts_need_replay === true;
+    // The cursor a read pass reached, saved only while the epoch is still the one the pass began in: a start-over raises
+    // it, so a pass that began before one saves nothing (D29). Returns whether it was saved. A missing row is created as
+    // saveAuthChangeCursor creates it.
+    async moveAuthChangeCursor(cursor, epoch, client) {
+      if (!Number.isSafeInteger(epoch) || epoch < 0) throw new TypeError("An epoch is a non-negative integer.");
+      const { rowCount } = await run(client,
+        "INSERT INTO auth_change_feed (id, cursor, accounts_mode, accounts_epoch) VALUES (true, $1, 'waiting', $2) ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = now() WHERE auth_change_feed.accounts_epoch = EXCLUDED.accounts_epoch",
+        [authCursorOf(cursor), epoch]);
+      return rowCount > 0;
     },
 
-    // The row is created when it is missing (the cursor stays null: nothing was read).
-    async setAccountsNeedReplay(client) {
-      await run(client, "INSERT INTO auth_change_feed (id, accounts_need_replay) VALUES (true, true) ON CONFLICT (id) DO UPDATE SET accounts_need_replay = true");
+    // How the Portal follows Auth's accounts (D29, service.accountChange): { mode, epoch, incompleteOwed, rebuildBaseline }.
+    // mode is rebuilding, live or waiting; rebuildBaseline is the { cursor, at } of the accounts_baseline the current
+    // rebuild applied, or null. Its writers hold the event lock. A missing row reads as waiting.
+    async accountSync(client) {
+      const { rows: [row] } = await run(client, "SELECT accounts_mode, accounts_epoch, accounts_incomplete_owed, rebuild_baseline_cursor, rebuild_baseline_at FROM auth_change_feed WHERE id");
+      if (!row) return { mode: "waiting", epoch: 0, incompleteOwed: false, rebuildBaseline: null };
+      return {
+        mode: row.accounts_mode, epoch: Number(row.accounts_epoch), incompleteOwed: row.accounts_incomplete_owed,
+        rebuildBaseline: row.rebuild_baseline_cursor === null ? null : { cursor: row.rebuild_baseline_cursor, at: iso(row.rebuild_baseline_at) }
+      };
     },
 
-    async clearAccountsNeedReplay(client) {
-      await run(client, "UPDATE auth_change_feed SET accounts_need_replay = false WHERE accounts_need_replay");
+    // To live (a rebuild adopted) or waiting (an account-level entry skipped). Only startAccountsOver starts a rebuild.
+    async setAccountsMode(mode, client) {
+      if (mode !== "live" && mode !== "waiting") throw new TypeError("The accounts mode is set to live or waiting; a rebuild starts over.");
+      await run(client, "UPDATE auth_change_feed SET accounts_mode = $1 WHERE id", [mode]);
+    },
+
+    // Whether the built-in Stations are owed an accounts_incomplete change: the view stopped being complete while the
+    // setting was off, when nothing is written to them.
+    async setAccountsIncompleteOwed(owed, client) {
+      if (typeof owed !== "boolean") throw new TypeError("owed must be true or false.");
+      await run(client, "UPDATE auth_change_feed SET accounts_incomplete_owed = $1 WHERE id", [owed]);
+    },
+
+    // A start-over (service.accountsStartingOver): the epoch is raised, the mode set to rebuilding, the rebuild emptied
+    // (the baseline it saw too) and Auth's cursor emptied with them, so a read pass in the new epoch begins at the feed's
+    // first entry or at a cursor a pass in that epoch saved. Returns the new epoch. The live tables are left alone. In the
+    // caller's transaction; the row is created when it is missing.
+    async startAccountsOver(client) {
+      if (!client) throw new TypeError("startAccountsOver needs a transaction client.");
+      const { rows: [row] } = await client.query(
+        "INSERT INTO auth_change_feed (id, cursor, accounts_mode, accounts_epoch) VALUES (true, NULL, 'rebuilding', 1) ON CONFLICT (id) DO UPDATE SET cursor = NULL, accounts_mode = 'rebuilding', accounts_epoch = auth_change_feed.accounts_epoch + 1, rebuild_baseline_cursor = NULL, rebuild_baseline_at = NULL, updated_at = now() RETURNING accounts_epoch");
+      await client.query("DELETE FROM auth_account_entries_rebuild");
+      await client.query("DELETE FROM account_availability_rebuild");
+      return Number(row.accounts_epoch);
     },
 
     // Whether an entry of Auth's change feed was already applied to this integration: its cursor and time are kept in
@@ -455,20 +503,24 @@ export function createRepository(db) {
     // Records an account-level entry of Auth's feed as applied, once: its cursor and time are the key (the time tells
     // apart a cursor Auth hands out again after its database was restored). Returns false when it was already applied,
     // and then nothing is recorded; the caller (service.accountChange) applies the entry only on true, in the same
-    // transaction. `account` is null for an accounts_baseline.
-    async applyAccountEntry({ cursor, at, account = null, kind }, client) {
-      const { rowCount } = await run(client, "INSERT INTO auth_account_entries (auth_cursor, auth_at, account_id, kind) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING", [authCursorOf(cursor), timeOf(at, "at"), account, kind]);
-      return rowCount > 0;
+    // transaction. `account` is null for an accounts_baseline. applyRebuildEntry is the same for a rebuild's own log.
+    async applyAccountEntry(entry, client) {
+      return recordEntry("auth_account_entries", entry, client);
+    },
+
+    async applyRebuildEntry(entry, client) {
+      return recordEntry("auth_account_entries_rebuild", entry, client);
     },
 
     // An account's availability as the entry applied last says: one row per account, replaced by each entry. Order comes
     // from Auth's feed, which the reader applies in order under the event lock, not from the entries' times (Auth's
-    // nodes' clocks may disagree).
+    // nodes' clocks may disagree). setRebuildAvailability is the same for a rebuild's own table.
     async setAvailability(account, disabled, cursor, at, client) {
-      if (typeof disabled !== "boolean") throw new TypeError("disabled must be true or false.");
-      await run(client,
-        "INSERT INTO account_availability (account_id, disabled, auth_cursor, auth_at) VALUES ($1, $2, $3, $4) ON CONFLICT (account_id) DO UPDATE SET disabled = EXCLUDED.disabled, auth_cursor = EXCLUDED.auth_cursor, auth_at = EXCLUDED.auth_at, updated_at = now()",
-        [account, disabled, authCursorOf(cursor), timeOf(at, "at")]);
+      await upsertAvailability("account_availability", account, disabled, cursor, at, client);
+    },
+
+    async setRebuildAvailability(account, disabled, cursor, at, client) {
+      await upsertAvailability("account_availability_rebuild", account, disabled, cursor, at, client);
     },
 
     // The accounts that are disabled, in order: the "disabled" of a checkpoint and a built-in Station's cursor-0 snapshot.
@@ -477,43 +529,58 @@ export function createRepository(db) {
       return rows.map((row) => row.account_id);
     },
 
-    // Records that an accounts_baseline was applied: its cursor and time, replacing the one before. A new row starts
-    // incomplete; an existing one keeps its mark, since a baseline applied while the Portal is already complete (or
-    // replaying) says nothing about whether it has caught up.
+    // Records the accounts_baseline the current rebuild applied (the latest replaces an earlier one).
+    async setRebuildBaseline(cursor, at, client) {
+      await run(client, "UPDATE auth_change_feed SET rebuild_baseline_cursor = $1, rebuild_baseline_at = $2 WHERE id", [authCursorOf(cursor), timeOf(at, "at")]);
+    },
+
+    // How the rebuild differs from the live table: each account whose state differs, one in either table only included
+    // (an account with no row is enabled), as { account, disabled, cursor, at } with the rebuild's state and the entry that
+    // set it (cursor and at null when the rebuild has no row for it). In account order.
+    async availabilityDifferences(client) {
+      const { rows } = await run(client,
+        "SELECT COALESCE(r.account_id, l.account_id) AS account_id, COALESCE(r.disabled, false) AS disabled, r.auth_cursor, r.auth_at FROM account_availability_rebuild r FULL JOIN account_availability l ON l.account_id = r.account_id WHERE COALESCE(r.disabled, false) <> COALESCE(l.disabled, false) ORDER BY COALESCE(r.account_id, l.account_id) COLLATE \"C\"");
+      return rows.map((row) => ({ account: row.account_id, disabled: row.disabled, cursor: row.auth_cursor, at: iso(row.auth_at) }));
+    },
+
+    // Adopts the rebuild (service.accountsCaughtUp): the live availability and applied entries become the rebuild's, so
+    // the live mode dedupes exactly what the rebuild applied, and the rebuild is emptied, the baseline it saw too. In the
+    // caller's transaction.
+    async adoptRebuild(client) {
+      if (!client) throw new TypeError("adoptRebuild needs a transaction client.");
+      await client.query("DELETE FROM account_availability");
+      await client.query("INSERT INTO account_availability (account_id, disabled, auth_cursor, auth_at) SELECT account_id, disabled, auth_cursor, auth_at FROM account_availability_rebuild");
+      await client.query("DELETE FROM auth_account_entries");
+      await client.query("INSERT INTO auth_account_entries (auth_cursor, auth_at, account_id, kind, applied_at) SELECT auth_cursor, auth_at, account_id, kind, applied_at FROM auth_account_entries_rebuild");
+      await client.query("DELETE FROM account_availability_rebuild");
+      await client.query("DELETE FROM auth_account_entries_rebuild");
+      await client.query("UPDATE auth_change_feed SET rebuild_baseline_cursor = NULL, rebuild_baseline_at = NULL WHERE id");
+    },
+
+    // Records the accounts_baseline applied last: its cursor and time, replacing the one before. A new row starts
+    // incomplete; an existing one keeps its mark (markBaselineComplete sets it).
     async setBaseline(cursor, at, client) {
       await run(client,
         "INSERT INTO account_baseline (id, auth_cursor, auth_at) VALUES (true, $1, $2) ON CONFLICT (id) DO UPDATE SET auth_cursor = EXCLUDED.auth_cursor, auth_at = EXCLUDED.auth_at, applied_at = now()",
         [authCursorOf(cursor), timeOf(at, "at")]);
     },
 
-    // Marks the recorded baseline complete: the Portal has caught up with Auth's feed since it was applied, so Auth's
-    // feed alone is authoritative for every account. Returns the baseline's { cursor, at } when this call completed it,
-    // and null when none is recorded or it already was: of several replicas, only the first one gets an answer.
+    // Marks the view complete: Auth's feed alone is then authoritative for every account. Returns the recorded baseline's
+    // { cursor, at } when this call completed it, and null when none is recorded or it already was complete.
     async markBaselineComplete(client) {
       const { rows } = await run(client, "UPDATE account_baseline SET complete = true WHERE NOT complete RETURNING auth_cursor, auth_at");
       return rows[0] ? { cursor: rows[0].auth_cursor, at: iso(rows[0].auth_at) } : null;
     },
 
-    // The feed is read from its start again (a first start, or a reset): the accounts are unknown until the Portal has
-    // caught up. The baseline stays recorded.
+    // The view is no longer complete (a start-over, or a move to waiting). The baseline stays recorded. Returns whether
+    // it was complete.
     async markBaselineIncomplete(client) {
-      await run(client, "UPDATE account_baseline SET complete = false WHERE complete");
+      const { rowCount } = await run(client, "UPDATE account_baseline SET complete = false WHERE complete");
+      return rowCount > 0;
     },
 
-    // Clears the mark: the Portal skipped an account-level entry, so availability is unknown again and the baseline must
-    // be applied again.
-    async clearBaseline(client) {
-      await run(client, "DELETE FROM account_baseline");
-    },
-
-    // Forgets every applied account-level entry, so the next read of the feed applies each again, in Auth's order
-    // (service.applyAuthChange: an entry was skipped, so what was applied before it can no longer be trusted to be all).
-    async forgetAccountEntries(client) {
-      await run(client, "DELETE FROM auth_account_entries");
-    },
-
-    // Whether the accounts are complete: a baseline was applied and the Portal has caught up with the feed since. An
-    // account missing from disabledAccountList() is then enabled (or doesn't exist); until then it is unknown.
+    // Whether the view is complete: an account missing from disabledAccountList() is then enabled (or doesn't exist); until
+    // then it is unknown.
     async baselineApplied(client) {
       const { rows } = await run(client, "SELECT EXISTS (SELECT 1 FROM account_baseline WHERE complete) AS applied");
       return rows[0].applied === true;

@@ -16,23 +16,30 @@
 // lasts, and its end once. A cursor ahead of Auth's feed (409 cursor_ahead: Auth was restored from a backup) is
 // forgotten with a warning and the feed read again from the start in the same read: applying is idempotent.
 //
-// Account availability (D29) depends on the feed being read to its end. The reader says so through two hooks, both
-// optional: `startingOver` when a read begins from Auth's first entry (no saved cursor: a first start or a reset, or
-// the cursor was just forgotten because Auth's is behind it), and `caughtUp` when a read ends with nothing more waiting,
-// that is, its last page was not full. A read that stops for pagesPerPull pages, for stop() or for a failure says
-// neither, so the Portal's view of the accounts is complete only once a read has reached the end.
+// Account availability (D29) depends on the feed being read in order, to its end. The reader says so through two hooks,
+// both optional: `startingOver` when a read begins from Auth's first entry (no saved cursor: a first start or a reset,
+// or the cursor was just forgotten because Auth's is behind it), and `caughtUp` when a read ends with nothing more
+// waiting, that is, its last page was not full. A read that stops for pagesPerPull pages, for stop() or for a failure
+// says neither. Each start-over raises an epoch (repository.authChangePlace, read with the cursor). A read pass begins in
+// the epoch of its saved cursor, or in the one its start-over made, and hands that pass, { epoch }, to `apply` with
+// every change and to `caughtUp`; the service refuses an account-level change from a pass whose epoch is no longer
+// current (stale_pass), and the pass saves its cursor only while its epoch is current (moveAuthChangeCursor). Either way
+// it stops there, logged like any change not applied, and the next read goes on from the saved cursor in the new epoch.
+// So no pass in flight when another replica started over can apply or skip anything on the new epoch's behalf.
 import { ManageError } from "./auth-manage.mjs";
 
 export const AUTH_CHANGES = Object.freeze({ pollMs: 30000, minGapMs: 1000, pageSize: 100, pagesPerPull: 10 });
 // A failure that lasts is logged again this long after it last was.
 const REPORT_AGAIN_MS = 3600000;
 
-// A change `apply` refused (a database failure): the read stops before its page's cursor is saved.
+// A change `apply` refused (a database failure, or a stale pass): the read stops before its page's cursor is saved.
 class NotApplied extends Error {
   constructor(cause) {
     super("Auth change not applied", { cause });
   }
 }
+// A page's cursor not saved because another replica started the feed over since this pass began (D29).
+const stalePass = () => new NotApplied(Object.assign(new Error("The read pass's epoch is no longer current."), { code: "stale_pass" }));
 const codeOf = (error) => error?.code || "error";
 // The fixed message for what stopped a read: a reason code, never a cursor or a reason.
 function failure(error) {
@@ -90,8 +97,13 @@ export function createAuthChanges({ repository, manage, apply, startingOver = as
   // One read: pages from the saved cursor until a short page, or pagesPerPull of them. Returns whether more may wait;
   // throws what stopped it. After stop() it returns before the next page: the cursor of every page applied is saved.
   async function read() {
-    let cursor = await repository.authChangeCursor();
-    if (cursor === null) await startingOver();
+    let { cursor, epoch } = await repository.authChangePlace();
+    // The pass this read is: the epoch it began in, which a start-over replaces with the one it made.
+    const beginAgain = async () => {
+      await startingOver();
+      return { epoch: (await repository.authChangePlace()).epoch };
+    };
+    let pass = cursor === null ? await beginAgain() : { epoch };
     let reset = false;
     let pages = 0;
     while (pages < pagesPerPull) {
@@ -106,7 +118,7 @@ export function createAuthChanges({ repository, manage, apply, startingOver = as
         await repository.saveAuthChangeCursor(null);
         cursor = null;
         reset = true;
-        await startingOver();
+        pass = await beginAgain();
         continue;
       }
       pages += 1;
@@ -115,20 +127,20 @@ export function createAuthChanges({ repository, manage, apply, startingOver = as
       if (changes.length && (nextCursor === null || nextCursor === cursor)) throw new ManageError(200, "bad_response");
       for (const change of changes) {
         try {
-          await apply(change);
+          await apply(change, pass);
         } catch (error) {
           throw new NotApplied(error);
         }
       }
-      // Saved only once the whole page is applied: a failure or a crash before reads the page again. There is no
-      // compare-and-set, so two Portal replicas may save their cursors out of order and move it back; that is harmless
-      // because applying is idempotent (repository.authChangeApplied): the worst case is reading a page again.
+      // Saved only once the whole page is applied: a failure or a crash before reads the page again. Only the epoch is
+      // compared, so two Portal replicas in one epoch may save their cursors out of order and move it back; that is
+      // harmless because applying is idempotent (repository.authChangeApplied): the worst case is reading a page again.
       if (nextCursor !== null && nextCursor !== cursor) {
-        await repository.saveAuthChangeCursor(nextCursor);
+        if (!(await repository.moveAuthChangeCursor(nextCursor, pass.epoch))) throw stalePass();
         cursor = nextCursor;
       }
       if (changes.length < pageSize) {
-        await caughtUp();
+        await caughtUp(pass);
         return false;
       }
     }

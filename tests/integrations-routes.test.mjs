@@ -932,8 +932,9 @@ test("the stack reads Auth's change feed once it is ready and again on each nudg
   await integrations.close();
 });
 
-// The stack wires the reader's hooks to the service (D29): the first read starts the feed over and, when it reaches the end,
-// the accounts are complete and each built-in Station is told; with the setting off the same feed completes nothing.
+// The stack wires the reader's hooks and its read pass to the service (D29): the first read starts the feed over and
+// rebuilds the accounts, every change in the pass's epoch, and when it reaches the end the rebuild is adopted: the view is
+// complete and each built-in Station is told the end state. With the setting off the same feed completes nothing.
 async function readAccountsThroughTheStack(t, delegatedHostWork) {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }

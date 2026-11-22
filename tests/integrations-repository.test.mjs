@@ -264,19 +264,21 @@ test("the owner-disabled time is set only on purpose: undefined is refused, null
 test("Auth's change feed cursor starts empty and is saved as given; an applied change is found by its cursor and time", async (t) => {
   const { repo, db } = await setup(t);
   if (!repo) return;
-  assert.equal(await repo.authChangeCursor(), null);
+  const cursor = async () => (await repo.authChangePlace()).cursor;
+  assert.deepEqual(await repo.authChangePlace(), { cursor: null, epoch: 0 });
   await repo.saveAuthChangeCursor("YzEy");
-  assert.equal(await repo.authChangeCursor(), "YzEy");
+  assert.equal(await cursor(), "YzEy");
   for (const bad of ["", "has space", "x".repeat(65), 12, undefined, {}]) await assert.rejects(repo.saveAuthChangeCursor(bad), TypeError, JSON.stringify(bad));
-  assert.equal(await repo.authChangeCursor(), "YzEy");
+  assert.equal(await cursor(), "YzEy");
   await repo.saveAuthChangeCursor(null);
-  assert.equal(await repo.authChangeCursor(), null, "null resets the cursor to re-read Auth's feed from the start");
+  assert.equal(await cursor(), null, "null resets the cursor to re-read Auth's feed from the start");
   await repo.saveAuthChangeCursor("YzEy");
   await db.pool.query("DELETE FROM auth_change_feed");
-  assert.equal(await repo.authChangeCursor(), null, "a missing row reads as no cursor");
+  assert.deepEqual(await repo.authChangePlace(), { cursor: null, epoch: 0 }, "a missing row reads as no cursor");
   await repo.saveAuthChangeCursor("YzEz");
-  assert.equal(await repo.authChangeCursor(), "YzEz", "saving heals a missing row");
+  assert.equal(await cursor(), "YzEz", "saving heals a missing row");
   assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM auth_change_feed")).rows[0].n, 1);
+  assert.equal((await repo.accountSync()).mode, "waiting", "and the row it makes knows nothing of the accounts the Portal followed");
   await repo.saveAuthChangeCursor("YzEy");
   await station(repo, "st1");
   const at = "2026-10-31T10:00:00.000Z";
@@ -535,13 +537,13 @@ test("an account's availability is the entry applied last, whatever Auth's time 
   assert.deepEqual(await repo.disabledAccountList(), []);
 });
 
-test("the accounts baseline is recorded when applied and marked complete once the Portal has caught up; a skipped account entry clears it and starting over makes it incomplete", async (t) => {
+test("the accounts baseline is recorded when applied and marked complete; marking it incomplete keeps it recorded and says whether it was complete", async (t) => {
   const { repo, db } = await setup(t);
   if (!repo) return;
   const row = async () => (await db.pool.query("SELECT id, auth_cursor, auth_at, complete FROM account_baseline")).rows.map((entry) => [entry.id, entry.auth_cursor, entry.auth_at.toISOString(), entry.complete]);
   assert.equal(await repo.baselineApplied(), false, "no mark before the first baseline");
   assert.equal(await repo.markBaselineComplete(), null, "nothing recorded: nothing to complete");
-  await repo.markBaselineIncomplete();
+  assert.equal(await repo.markBaselineIncomplete(), false);
   assert.deepEqual(await row(), []);
   await repo.setBaseline("YzEy", "2026-11-10T10:00:00.000Z");
   assert.deepEqual(await row(), [[true, "YzEy", "2026-11-10T10:00:00.000Z", false]], "recorded, not complete");
@@ -551,85 +553,139 @@ test("the accounts baseline is recorded when applied and marked complete once th
   assert.equal(await repo.markBaselineComplete(), null, "the second finds it complete");
   await repo.setBaseline("YzEz", "2026-11-11T10:00:00.000Z");
   assert.deepEqual(await row(), [[true, "YzEz", "2026-11-11T10:00:00.000Z", true]], "one row, the newest baseline; a baseline leaves complete as it is");
-  await repo.markBaselineIncomplete();
+  assert.equal(await repo.markBaselineIncomplete(), true, "it was complete");
   assert.equal(await repo.baselineApplied(), false);
   assert.deepEqual(await row(), [[true, "YzEz", "2026-11-11T10:00:00.000Z", false]], "the baseline stays recorded");
-  await repo.markBaselineIncomplete();
-  assert.deepEqual(await repo.markBaselineComplete(), { cursor: "YzEz", at: "2026-11-11T10:00:00.000Z" });
-  await repo.clearBaseline();
-  assert.equal(await repo.baselineApplied(), false);
-  assert.deepEqual(await row(), []);
-  await repo.clearBaseline();
-  assert.equal(await repo.baselineApplied(), false, "clearing a mark that isn't there is fine");
-  await repo.setBaseline("YzE0", "2026-11-12T10:00:00.000Z");
-  assert.deepEqual(await row(), [[true, "YzE0", "2026-11-12T10:00:00.000Z", false]], "a new baseline after a clear starts incomplete");
-  await repo.markBaselineComplete();
+  assert.equal(await repo.markBaselineIncomplete(), false, "it wasn't any more");
   await db.transaction(async (client) => {
+    assert.deepEqual(await repo.markBaselineComplete(client), { cursor: "YzEz", at: "2026-11-11T10:00:00.000Z" });
     assert.equal(await repo.baselineApplied(client), true, "inside a transaction");
-    await repo.clearBaseline(client);
-    assert.equal(await repo.baselineApplied(client), false);
     await repo.setBaseline("YzE1", "2026-11-13T10:00:00.000Z", client);
+    assert.equal(await repo.markBaselineIncomplete(client), true);
     assert.equal(await repo.baselineApplied(client), false);
-    assert.deepEqual(await repo.markBaselineComplete(client), { cursor: "YzE1", at: "2026-11-13T10:00:00.000Z" });
-    assert.equal(await repo.baselineApplied(client), true);
   });
+  assert.deepEqual(await row(), [[true, "YzE1", "2026-11-13T10:00:00.000Z", false]]);
   await assert.rejects(repo.setBaseline("YzE6", undefined), TypeError);
   await assert.rejects(repo.setBaseline("bad cursor", "2026-11-13T10:00:00.000Z"), TypeError);
-  assert.equal(await repo.baselineApplied(), true);
 });
 
-test("the wait for a replay of Auth's account entries is a flag on the feed's row: set, kept by cursor saves, and cleared", async (t) => {
+// The Portal's following of Auth's accounts sits on the feed's one row (D29): its mode, the epoch every start-over raises,
+// the baseline the current rebuild applied, and whether the built-in Stations are owed the news that it is incomplete.
+test("the accounts' sync state starts rebuilding in epoch 0; a start-over raises the epoch, empties the cursor and the rebuild, and the mode and the owed news are set as given", async (t) => {
   const { repo, db } = await setup(t);
   if (!repo) return;
-  const rows = async () => (await db.pool.query("SELECT cursor, accounts_need_replay FROM auth_change_feed")).rows;
-  assert.deepEqual(await rows(), [{ cursor: null, accounts_need_replay: false }]);
-  assert.equal(await repo.accountsNeedReplay(), false);
-  await repo.clearAccountsNeedReplay();
-  await repo.setAccountsNeedReplay();
-  assert.equal(await repo.accountsNeedReplay(), true);
+  const fresh = { mode: "rebuilding", epoch: 0, incompleteOwed: false, rebuildBaseline: null };
+  assert.deepEqual(await repo.accountSync(), fresh);
   await repo.saveAuthChangeCursor("YzEy");
-  assert.deepEqual(await rows(), [{ cursor: "YzEy", accounts_need_replay: true }], "a cursor save leaves the flag");
-  await repo.setAccountsNeedReplay();
-  assert.equal(await repo.authChangeCursor(), "YzEy", "and setting it leaves the cursor");
-  await repo.saveAuthChangeCursor(null);
-  assert.equal(await repo.accountsNeedReplay(), true, "even a reset");
-  await repo.clearAccountsNeedReplay();
-  assert.deepEqual(await rows(), [{ cursor: null, accounts_need_replay: false }]);
-  await db.transaction(async (client) => {
-    await repo.setAccountsNeedReplay(client);
-    assert.equal(await repo.accountsNeedReplay(client), true, "inside a transaction");
-    throw new Error("stop");
-  }).catch((error) => assert.equal(error.message, "stop"));
-  assert.equal(await repo.accountsNeedReplay(), false, "rolled back with the transaction");
-  // With the row missing it is created by setting the flag.
-  await db.pool.query("DELETE FROM auth_change_feed");
-  assert.equal(await repo.accountsNeedReplay(), false);
-  await repo.setAccountsNeedReplay();
-  assert.deepEqual(await rows(), [{ cursor: null, accounts_need_replay: true }]);
-  assert.equal(await repo.authChangeCursor(), null);
-});
-
-test("the applied entries of Auth's account feed can all be forgotten, so the next read applies them again", async (t) => {
-  const { repo, db } = await setup(t);
-  if (!repo) return;
-  const at = "2026-11-10T10:00:00.000Z";
-  const entry = { cursor: "YzEy", at, account: "ab1", kind: "account_disabled" };
-  const count = async () => (await db.pool.query("SELECT count(*)::int AS n FROM auth_account_entries")).rows[0].n;
-  await repo.forgetAccountEntries();
-  assert.equal(await count(), 0, "forgetting nothing is fine");
-  assert.equal(await repo.applyAccountEntry(entry), true);
-  assert.equal(await repo.applyAccountEntry({ ...entry, cursor: "YzEz", account: null, kind: "accounts_baseline" }), true);
-  assert.equal(await repo.applyAccountEntry(entry), false);
-  assert.equal(await repo.forgetAccountEntries(), undefined);
-  assert.equal(await count(), 0);
-  assert.equal(await repo.applyAccountEntry(entry), true, "applied again");
+  await repo.applyRebuildEntry({ cursor: "YzEy", at: "2026-11-10T10:00:00.000Z", account: "ab1", kind: "account_disabled" });
+  await repo.setRebuildAvailability("ab1", true, "YzEy", "2026-11-10T10:00:00.000Z");
+  await repo.setRebuildBaseline("YzEz", "2026-11-10T10:01:00.000Z");
+  assert.deepEqual(await repo.accountSync(), { ...fresh, rebuildBaseline: { cursor: "YzEz", at: "2026-11-10T10:01:00.000Z" } });
+  const counts = async () => (await db.pool.query("SELECT (SELECT count(*)::int FROM auth_account_entries_rebuild) AS entries, (SELECT count(*)::int FROM account_availability_rebuild) AS availability")).rows[0];
+  assert.deepEqual(await counts(), { entries: 1, availability: 1 });
+  await assert.rejects(repo.startAccountsOver(), TypeError, "a start-over is one transaction");
+  assert.equal(await db.transaction((client) => repo.startAccountsOver(client)), 1);
+  assert.deepEqual(await repo.accountSync(), { ...fresh, epoch: 1 });
+  assert.deepEqual(await repo.authChangePlace(), { cursor: null, epoch: 1 }, "the cursor is emptied with the epoch");
+  assert.deepEqual(await counts(), { entries: 0, availability: 0 }, "and the rebuild");
+  for (const mode of ["live", "waiting"]) {
+    await repo.setAccountsMode(mode);
+    assert.equal((await repo.accountSync()).mode, mode);
+  }
+  for (const bad of ["rebuilding", "off", undefined]) await assert.rejects(repo.setAccountsMode(bad), TypeError, String(bad));
+  await repo.setAccountsIncompleteOwed(true);
+  assert.equal((await repo.accountSync()).incompleteOwed, true);
+  await assert.rejects(repo.setAccountsIncompleteOwed("yes"), TypeError);
+  assert.equal(await db.transaction((client) => repo.startAccountsOver(client)), 2);
+  assert.deepEqual(await repo.accountSync(), { mode: "rebuilding", epoch: 2, incompleteOwed: true, rebuildBaseline: null }, "the owed news is the service's to send");
+  // Rolled back with its transaction.
   await assert.rejects(db.transaction(async (client) => {
-    await repo.forgetAccountEntries(client);
-    assert.equal(await repo.applyAccountEntry(entry, client), true, "inside a transaction");
+    await repo.startAccountsOver(client);
     throw new Error("stop");
   }), /stop/);
-  assert.equal(await count(), 1, "rolled back with the transaction");
-  assert.equal(await repo.applyAccountEntry(entry), false);
+  assert.equal((await repo.accountSync()).epoch, 2);
+  // A missing row reads as waiting, and a start-over makes it again.
+  await db.pool.query("DELETE FROM auth_change_feed");
+  assert.deepEqual(await repo.accountSync(), { mode: "waiting", epoch: 0, incompleteOwed: false, rebuildBaseline: null });
+  assert.equal(await db.transaction((client) => repo.startAccountsOver(client)), 1);
+  assert.deepEqual(await repo.accountSync(), { ...fresh, epoch: 1 });
+});
+
+test("a read pass's cursor is saved only in the epoch it began in", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  assert.equal(await repo.moveAuthChangeCursor("YzEy", 0), true);
+  assert.deepEqual(await repo.authChangePlace(), { cursor: "YzEy", epoch: 0 });
+  await db.transaction((client) => repo.startAccountsOver(client));
+  assert.equal(await repo.moveAuthChangeCursor("YzEz", 0), false, "a pass that began before the start-over");
+  assert.deepEqual(await repo.authChangePlace(), { cursor: null, epoch: 1 });
+  assert.equal(await repo.moveAuthChangeCursor("YzEz", 1), true);
+  assert.deepEqual(await repo.authChangePlace(), { cursor: "YzEz", epoch: 1 });
+  for (const bad of [null, "", "has space"]) await assert.rejects(repo.moveAuthChangeCursor(bad, 1), TypeError, String(bad));
+  for (const bad of [undefined, -1, 1.5, "1"]) await assert.rejects(repo.moveAuthChangeCursor("YzE0", bad), TypeError, String(bad));
+  // A save that waits for a start-over in flight (the row's lock) is decided on the epoch the start-over commits.
+  const client = await db.pool.connect();
+  try {
+    await client.query("BEGIN");
+    assert.equal(await repo.startAccountsOver(client), 2);
+    const saving = repo.moveAuthChangeCursor("YzE0", 1);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await client.query("COMMIT");
+    assert.equal(await saving, false);
+  } finally {
+    client.release();
+  }
+  assert.deepEqual(await repo.authChangePlace(), { cursor: null, epoch: 2 });
+  await db.pool.query("DELETE FROM auth_change_feed");
+  assert.equal(await repo.moveAuthChangeCursor("YzE2", 5), true, "a missing row is made");
+  assert.deepEqual([await repo.authChangePlace(), (await repo.accountSync()).mode], [{ cursor: "YzE2", epoch: 5 }, "waiting"]);
+});
+
+// A rebuild applies Auth's feed to tables of its own; at its end the Portal compares them with the live table and adopts
+// them (service.accountsCaughtUp).
+test("a rebuild's entries and availability are kept apart from the live ones; its differences from the live table are listed, and adopting it replaces the live tables and empties it", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  const at = (minute) => "2026-11-10T10:0" + minute + ":00.000Z";
+  // Live: ab1 disabled, ab2 disabled, ab3 enabled, ab5 enabled.
+  for (const [account, disabled, cursor, minute] of [["ab1", true, "YzE1", 1], ["ab2", true, "YzE2", 2], ["ab3", false, "YzE3", 3], ["ab5", false, "YzE5", 5]]) {
+    assert.equal(await repo.applyAccountEntry({ cursor, at: at(minute), account, kind: disabled ? "account_disabled" : "account_enabled" }), true);
+    await repo.setAvailability(account, disabled, cursor, at(minute));
+  }
+  // The rebuild: ab1 disabled, ab2 enabled, ab3 disabled, ab4 disabled, ab6 enabled (and no ab5).
+  assert.deepEqual(await repo.availabilityDifferences(), [
+    { account: "ab1", disabled: false, cursor: null, at: null }, { account: "ab2", disabled: false, cursor: null, at: null }
+  ], "an empty rebuild: every disabled account differs");
+  for (const [account, disabled, cursor, minute] of [["ab1", true, "YzE1", 1], ["ab2", false, "YzE6", 6], ["ab3", true, "YzE7", 7], ["ab4", true, "YzE8", 8], ["ab6", false, "YzE9", 9]]) {
+    assert.equal(await repo.applyRebuildEntry({ cursor, at: at(minute), account, kind: disabled ? "account_disabled" : "account_enabled" }), true);
+    await repo.setRebuildAvailability(account, disabled, cursor, at(minute));
+  }
+  assert.equal(await repo.applyRebuildEntry({ cursor: "YzE1", at: at(1), account: "ab1", kind: "account_disabled" }), false, "the rebuild's own log dedupes");
+  assert.equal(await repo.applyRebuildEntry({ cursor: "YzFh", at: at(9), account: null, kind: "accounts_baseline" }), true);
+  await repo.setRebuildBaseline("YzFh", at(9));
+  assert.deepEqual(await repo.disabledAccountList(), ["ab1", "ab2"], "the live table is untouched");
+  assert.deepEqual(await repo.availabilityDifferences(), [
+    { account: "ab2", disabled: false, cursor: "YzE6", at: at(6) },
+    { account: "ab3", disabled: true, cursor: "YzE7", at: at(7) },
+    { account: "ab4", disabled: true, cursor: "YzE8", at: at(8) }
+  ], "the same state is no difference, and an account with no row is enabled on either side");
+  await assert.rejects(repo.adoptRebuild(), TypeError, "adopting is one transaction");
+  await db.transaction((client) => repo.adoptRebuild(client));
+  assert.deepEqual(await repo.disabledAccountList(), ["ab1", "ab3", "ab4"]);
+  const live = (await db.pool.query("SELECT account_id, disabled, auth_cursor FROM account_availability ORDER BY account_id")).rows.map((row) => [row.account_id, row.disabled, row.auth_cursor]);
+  assert.deepEqual(live, [["ab1", true, "YzE1"], ["ab2", false, "YzE6"], ["ab3", true, "YzE7"], ["ab4", true, "YzE8"], ["ab6", false, "YzE9"]], "the rebuild's rows, ab5's gone");
+  const entries = (await db.pool.query("SELECT auth_cursor, kind FROM auth_account_entries ORDER BY auth_cursor")).rows.map((row) => [row.auth_cursor, row.kind]);
+  assert.deepEqual(entries, [["YzE1", "account_disabled"], ["YzE6", "account_enabled"], ["YzE7", "account_disabled"], ["YzE8", "account_disabled"], ["YzE9", "account_enabled"], ["YzFh", "accounts_baseline"]], "the live log is the rebuild's");
+  assert.equal(await repo.applyAccountEntry({ cursor: "YzE6", at: at(6), account: "ab2", kind: "account_enabled" }), false, "so the live mode dedupes what the rebuild applied");
+  assert.equal(await repo.applyAccountEntry({ cursor: "YzE2", at: at(2), account: "ab2", kind: "account_disabled" }), true, "and nothing else");
+  const left = (await db.pool.query("SELECT (SELECT count(*)::int FROM auth_account_entries_rebuild) AS entries, (SELECT count(*)::int FROM account_availability_rebuild) AS availability")).rows[0];
+  assert.deepEqual(left, { entries: 0, availability: 0 });
+  assert.equal((await repo.accountSync()).rebuildBaseline, null, "the baseline it saw is cleared too");
+  assert.deepEqual(await repo.availabilityDifferences(), [{ account: "ab1", disabled: false, cursor: null, at: null }, { account: "ab3", disabled: false, cursor: null, at: null }, { account: "ab4", disabled: false, cursor: null, at: null }]);
+  await assert.rejects(repo.setRebuildAvailability("ab1", "yes", "YzFi", at(9)), TypeError, "disabled is a boolean");
+  await assert.rejects(repo.setRebuildAvailability("ab1", true, "bad cursor", at(9)), TypeError);
+  await assert.rejects(repo.applyRebuildEntry({ cursor: "YzFi", at: undefined, kind: "account_disabled" }), TypeError);
+  await assert.rejects(repo.setRebuildBaseline("YzFi", "not a time"), TypeError);
 });
 
 const bindingFields = (extra = {}) => ({ stationId: "st1", r9AccountId: "r9-1", genesisHash: "a".repeat(64), accountId: "ab1", bindingId: "b-1", version: 1, bindingState: "bound", reportId: "rep-1", ...extra });

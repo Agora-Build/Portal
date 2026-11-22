@@ -215,33 +215,47 @@ test("migration 006 makes an event's account optional on the table and on every 
   assert.ok((await nullability(db)).every((row) => row.attnotnull === false), "a partition made after 006 is nullable too");
 });
 
-test("migration 006 adds the availability, applied-entry, baseline and binding tables, with the keys and checks the Portal relies on", async (t) => {
+test("migration 006 adds the availability, applied-entry, rebuild, baseline and binding tables and the accounts' sync state, with the keys and checks the Portal relies on", async (t) => {
   const db = await testDatabase(t);
   if (!db) return t.skip("PORTAL_TEST_DATABASE_URL is not set");
-  const tables = (await db.pool.query("SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ANY($1) ORDER BY table_name",
-    [["account_availability", "account_baseline", "auth_account_entries", "binding_attempts", "station_bindings"]])).rows.map((row) => row.table_name);
-  assert.deepEqual(tables, ["account_availability", "account_baseline", "auth_account_entries", "binding_attempts", "station_bindings"]);
+  const names = ["account_availability", "account_availability_rebuild", "account_baseline", "auth_account_entries", "auth_account_entries_rebuild", "binding_attempts", "station_bindings"];
+  const tables = (await db.pool.query("SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ANY($1) ORDER BY table_name", [names])).rows.map((row) => row.table_name);
+  assert.deepEqual(tables, names);
   const q = (text, values) => db.pool.query(text, values);
 
   // An entry of Auth's feed is applied once: its cursor and time are the key, and a cursor at another time (a restored
-  // Auth) is another entry. A baseline entry names no account.
-  const entry = (cursor, at, account, kind = "account_disabled") => q("INSERT INTO auth_account_entries (auth_cursor, auth_at, account_id, kind) VALUES ($1, $2, $3, $4)", [cursor, at, account, kind]);
-  await entry("YzEy", "2026-11-10T10:00:00Z", "ab1");
-  await assert.rejects(entry("YzEy", "2026-11-10T10:00:00Z", "ab2"), { code: "23505" });
-  await entry("YzEy", "2026-11-10T11:00:00Z", "ab1");
-  await entry("YzEz", "2026-11-10T10:00:00Z", null, "accounts_baseline");
-  await assert.rejects(q("INSERT INTO auth_account_entries (auth_cursor, auth_at, kind) VALUES ('c', now(), NULL)"), { code: "23502" });
+  // Auth) is another entry. A baseline entry names no account. A rebuild's own log has the same shape and key.
+  for (const table of ["auth_account_entries", "auth_account_entries_rebuild"]) {
+    const entry = (cursor, at, account, kind = "account_disabled") => q("INSERT INTO " + table + " (auth_cursor, auth_at, account_id, kind) VALUES ($1, $2, $3, $4)", [cursor, at, account, kind]);
+    await entry("YzEy", "2026-11-10T10:00:00Z", "ab1");
+    await assert.rejects(entry("YzEy", "2026-11-10T10:00:00Z", "ab2"), { code: "23505" }, table);
+    await entry("YzEy", "2026-11-10T11:00:00Z", "ab1");
+    await entry("YzEz", "2026-11-10T10:00:00Z", null, "accounts_baseline");
+    await assert.rejects(q("INSERT INTO " + table + " (auth_cursor, auth_at, kind) VALUES ('c', now(), NULL)"), { code: "23502" }, table);
+    assert.ok((await q("SELECT applied_at FROM " + table + " LIMIT 1")).rows[0].applied_at instanceof Date, table);
+  }
 
-  // The wait for a replay of the account entries sits on the feed's one row, off by default.
-  assert.deepEqual((await q("SELECT accounts_need_replay FROM auth_change_feed")).rows, [{ accounts_need_replay: false }]);
-  await assert.rejects(q("UPDATE auth_change_feed SET accounts_need_replay = NULL"), { code: "23502" });
+  // How the Portal follows Auth's accounts sits on the feed's one row: a fresh Portal starts rebuilding, in epoch 0.
+  assert.deepEqual((await q("SELECT accounts_mode, accounts_epoch, rebuild_baseline_cursor, rebuild_baseline_at, accounts_incomplete_owed FROM auth_change_feed")).rows,
+    [{ accounts_mode: "rebuilding", accounts_epoch: "0", rebuild_baseline_cursor: null, rebuild_baseline_at: null, accounts_incomplete_owed: false }]);
+  for (const mode of ["live", "waiting", "rebuilding"]) await q("UPDATE auth_change_feed SET accounts_mode = $1", [mode]);
+  await assert.rejects(q("UPDATE auth_change_feed SET accounts_mode = 'off'"), { code: "23514" });
+  await assert.rejects(q("UPDATE auth_change_feed SET accounts_mode = NULL"), { code: "23502" });
+  await assert.rejects(q("UPDATE auth_change_feed SET accounts_epoch = -1"), { code: "23514" });
+  await assert.rejects(q("UPDATE auth_change_feed SET accounts_incomplete_owed = NULL"), { code: "23502" });
+  await q("UPDATE auth_change_feed SET rebuild_baseline_cursor = 'YzEz', rebuild_baseline_at = now()");
+  await assert.rejects(q("UPDATE auth_change_feed SET rebuild_baseline_cursor = 'not a cursor!'"), { code: "23514" });
+  await assert.rejects(q("UPDATE auth_change_feed SET rebuild_baseline_at = NULL"), { code: "23514" }, "a baseline seen has its cursor and its time");
+  await assert.rejects(q("UPDATE auth_change_feed SET rebuild_baseline_cursor = NULL"), { code: "23514" });
 
-  const availability = (account, disabled = true) => q("INSERT INTO account_availability (account_id, disabled, auth_cursor, auth_at) VALUES ($1, $2, 'YzEy', now())", [account, disabled]);
-  await availability("ab1");
-  await assert.rejects(availability("ab1", false), { code: "23505" }, "one row per account");
-  await assert.rejects(q("INSERT INTO account_availability (account_id, disabled, auth_cursor, auth_at) VALUES ('ab2', NULL, 'YzEy', now())"), { code: "23502" });
+  for (const table of ["account_availability", "account_availability_rebuild"]) {
+    const availability = (account, disabled = true) => q("INSERT INTO " + table + " (account_id, disabled, auth_cursor, auth_at) VALUES ($1, $2, 'YzEy', now())", [account, disabled]);
+    await availability("ab1");
+    await assert.rejects(availability("ab1", false), { code: "23505" }, "one row per account: " + table);
+    await assert.rejects(q("INSERT INTO " + table + " (account_id, disabled, auth_cursor, auth_at) VALUES ('ab2', NULL, 'YzEy', now())"), { code: "23502" }, table);
+  }
 
-  // The mark is one row, incomplete until the Portal has caught up with the feed.
+  // The baseline is one row, and the view complete only once it is marked so.
   await q("INSERT INTO account_baseline (auth_cursor, auth_at) VALUES ('YzEz', now())");
   assert.equal((await q("SELECT complete FROM account_baseline")).rows[0].complete, false, "complete is false by default");
   await assert.rejects(q("UPDATE account_baseline SET complete = NULL"), { code: "23502" });
@@ -280,6 +294,26 @@ test("migration 006 adds the availability, applied-entry, baseline and binding t
   const named = Object.fromEntries((await q("SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'station_members'")).rows.map((row) => [row.indexname, row.indexdef]));
   assert.match(named.station_members_account_all_idx, /\(account_id\)$/, "every membership of an account, ended ones included");
   assert.match(named.station_members_account_idx, /WHERE \(removed_at IS NULL\)$/, "001's index for current members is still there");
+});
+
+// No Portal before 006 applied an account-level entry of Auth's feed: one that had read some of the feed skipped those in
+// it unrecorded, so it waits for an operator to empty its cursor; one that had read nothing starts by rebuilding.
+test("migration 006 makes a Portal that had already read Auth's feed wait for a reset, and one that had read nothing rebuild", async (t) => {
+  for (const [cursor, mode] of [["YzEy", "waiting"], [null, "rebuilding"]]) {
+    const open = await emptySchema(t);
+    if (!open) return t.skip("PORTAL_TEST_DATABASE_URL is not set");
+    const db = open();
+    await db.transaction(async (client) => {
+      await client.query("CREATE TABLE portal_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())");
+      for (const file of ["001_integrations.sql", "002_built_in_stations.sql", "003_auth_changes.sql", "004_delegated_host_work.sql", "005_station_reports.sql"]) {
+        await client.query(await readFile(new URL("../migrations/" + file, import.meta.url), "utf8"));
+        await client.query("INSERT INTO portal_migrations (version) VALUES ($1)", [file]);
+      }
+    });
+    await db.pool.query("UPDATE auth_change_feed SET cursor = $1", [cursor]);
+    assert.deepEqual(await db.migrate(), ["006_availability_bindings.sql"]);
+    assert.deepEqual((await db.pool.query("SELECT cursor, accounts_mode, accounts_epoch FROM auth_change_feed")).rows, [{ cursor, accounts_mode: mode, accounts_epoch: "0" }], String(cursor));
+  }
 });
 
 // A binding report names no integration (Portal #41), but is kept by its report id like the revocation reports are.
