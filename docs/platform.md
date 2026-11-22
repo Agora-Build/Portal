@@ -1799,8 +1799,8 @@ A custom Station's checkpoint has `at` and `integrations` only:
   - `accounts.disabled` lists the Agora.Build account IDs disabled now, in account order. What it means depends on
     `accounts.complete` (below).
   - `bindings` is the built-in Station's own last reported binding for each R9 account and genesis hash, ordered by
-    `accountId` and then `genesisHash`, and empty until it reports some. A binding report writes no change to the feed, so a Station reads its bindings here.
-    A pending release is not carried: the release waits for D27 (below).
+    `accountId` and then `genesisHash`, and empty until it reports some. A binding report writes no change to the feed,
+    so a Station reads its bindings here. A pending release is not carried: the release waits for D27 (below).
 - **No pages.** It is one answer, because pages could not share one exact snapshot. If sizes ever call for it, there will
   be a snapshot export, not pages that can't agree.
 - **A cursor beside it.** The parameter is checked (a malformed one is still 400 `cursor`) and ignored, and 409
