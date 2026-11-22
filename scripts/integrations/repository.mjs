@@ -195,7 +195,8 @@ export function createRepository(db) {
     // them, and the ones it lost at or after `lostSince`, each saying so. Rows are in the directory's order, the
     // built-in Stations first, then by createdAt and id, and carry stationRow's fields with `role`, `membership` and
     // `membershipEndedAt` added:
-    //   - the built-in Station: role built_in, no membership (it has no members);
+    //   - the built-in Station: role built_in, no membership (it has no members), and for every account: a removed one is
+    //     listed as lost too, with status removed, for the window;
     //   - a Station the account owns: role owner, no membership (an owner is not a member), even with a stray member row;
     //   - any other Station it has a member row on: role member; membership "current" while a row of it is current,
     //     and "ended" with the latest end otherwise.
@@ -203,7 +204,7 @@ export function createRepository(db) {
     // not) or its membership ended (status active, membership ended). The loss is dated when the account lost it: the
     // removal, or for a member whose membership ended, the earlier of the end and the removal. A Station removed after a
     // member left it is still listed as removed, for as long as that departure is inside the window; for one with both,
-    // the removal is the status and the end is still given. A removed built-in Station is no one's loss.
+    // the removal is the status and the end is still given.
     //
     // Paging is a keyset on (built_in DESC, createdAt, id): `after` is { builtIn, createdAt, id } of the last row of the
     // page before (as that row gave them), or absent for the first page. The order and the keyset use createdAt as the
@@ -227,7 +228,7 @@ export function createRepository(db) {
         "CASE WHEN s.built_in OR s.owner_account = $1 THEN NULL WHEN m.is_current THEN 'current' ELSE 'ended' END AS membership, " +
         "CASE WHEN s.built_in OR s.owner_account = $1 OR m.is_current THEN NULL ELSE m.ended_at END AS membership_ended_at " +
         "FROM stations s LEFT JOIN mine m ON m.station_id = s.id WHERE CASE " +
-        "WHEN s.built_in THEN s.status = 'active' " +
+        "WHEN s.built_in THEN (s.status = 'active' OR (s.status = 'removed' AND s.removed_at >= $2)) " +
         "WHEN s.owner_account = $1 THEN (s.status = 'active' OR (s.status = 'removed' AND s.removed_at >= $2)) " +
         "WHEN m.station_id IS NULL THEN false " +
         "WHEN s.status = 'active' THEN (m.is_current OR m.ended_at >= $2) " +

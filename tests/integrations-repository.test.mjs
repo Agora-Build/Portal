@@ -794,6 +794,80 @@ test("directoryFor says a lost Station was lost for 30 days: a removed one, an e
   assert.deepEqual((await repo.directoryFor("ab1", { lostSince: daysAgo(1), limit: 100 })).map((row) => row.id), [], "nothing was lost in the last day");
 });
 
+test("directoryFor lists a removed built-in Station for 30 days, as built_in with removedAt", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  await dated(repo, db, "st-b-live", 100, { builtIn: true });
+  await dated(repo, db, "st-b-removed", 90, { builtIn: true });
+  await dated(repo, db, "st-b-gone", 80, { builtIn: true });
+  await dated(repo, db, "st-own", 70, { owner: "ab1" });
+  await repo.markStationRemoved("st-b-removed", daysAgo(5));
+  await repo.markStationRemoved("st-b-gone", daysAgo(31));
+  for (const account of ["ab1", "ab9"]) {
+    const rows = await repo.directoryFor(account, { lostSince: CUTOFF, limit: 100 });
+    assert.deepEqual(shape(rows).filter(([id]) => id.startsWith("st-b")), [["st-b-live", "built_in", "active", null], ["st-b-removed", "built_in", "removed", null]], "every account is told, within 30 days; not after, and never as a member");
+    const removed = rows.find((row) => row.id === "st-b-removed");
+    assert.deepEqual([removed.builtIn, removed.removedAt, removed.membership, removed.membershipEndedAt], [true, daysAgo(5).toISOString(), null, null]);
+  }
+  assert.deepEqual((await repo.directoryFor("ab1", { lostSince: CUTOFF, limit: 100 })).map((row) => row.id), ["st-b-live", "st-b-removed", "st-own"], "built-in Stations first, removed or not");
+  assert.deepEqual((await repo.directoryFor("ab1", { lostSince: daysAgo(32), limit: 100 })).map((row) => row.id), ["st-b-live", "st-b-removed", "st-b-gone", "st-own"], "the window follows lostSince");
+  // A stray member row on a removed built-in Station changes nothing: it has no members.
+  await repo.addMember("st-b-removed", "ab1", "ab9", daysAgo(50));
+  assert.deepEqual(shape(await repo.directoryFor("ab1", { lostSince: CUTOFF, limit: 100 })).filter(([id]) => id === "st-b-removed"), [["st-b-removed", "built_in", "removed", null]]);
+});
+
+test("directoryFor reads a re-added member by its current membership, and by the latest end when it ended again", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  for (const id of ["st-again", "st-again-ended", "st-again-removed"]) {
+    await dated(repo, db, id, id === "st-again" ? 90 : id === "st-again-ended" ? 80 : 70);
+    await repo.addMember(id, "ab1", "ab2", daysAgo(60));
+    await repo.removeMember(id, "ab1", "ab2", daysAgo(50));
+    await repo.addMember(id, "ab1", "ab2", daysAgo(40));
+  }
+  // st-again: an ended row and a current one.
+  // st-again-ended: ended again, 3 days ago, after an earlier end 50 days ago.
+  await repo.removeMember("st-again-ended", "ab1", "ab2", daysAgo(3));
+  // st-again-removed: current, then the Station removed.
+  await repo.markStationRemoved("st-again-removed", daysAgo(2));
+  const rows = await repo.directoryFor("ab1", { lostSince: CUTOFF, limit: 100 });
+  assert.deepEqual(shape(rows), [["st-again", "member", "active", "current"], ["st-again-ended", "member", "active", "ended"], ["st-again-removed", "member", "removed", "current"]]);
+  assert.deepEqual(rows.map((row) => row.membershipEndedAt), [null, daysAgo(3).toISOString(), null], "a current membership has no end; an ended one gives the latest, not the first");
+  // The earlier end alone is more than 30 days ago: only the later one keeps it listed. Ended again 40 days ago, it is gone.
+  await db.pool.query("UPDATE station_members SET removed_at = $2 WHERE station_id = $1 AND removed_at IS NOT NULL AND removed_at > $3", ["st-again-ended", daysAgo(40), daysAgo(10)]);
+  assert.deepEqual((await repo.directoryFor("ab1", { lostSince: CUTOFF, limit: 100 })).map((row) => row.id), ["st-again", "st-again-removed"]);
+  assert.deepEqual((await repo.directoryFor("ab1", { lostSince: daysAgo(45), limit: 100 })).map((row) => [row.id, row.membershipEndedAt]).filter(([id]) => id === "st-again-ended"), [["st-again-ended", daysAgo(40).toISOString()]]);
+});
+
+test("directoryFor dates a member's loss by the earlier of leaving and the Station's removal, at the boundary too", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  const before = (time) => new Date(time.getTime() - 1);
+  const after = (time) => new Date(time.getTime() + 86400000);
+  const member = async (id, createdDaysAgo, left, removed) => {
+    await dated(repo, db, id, createdDaysAgo);
+    await repo.addMember(id, "ab1", "ab2", daysAgo(createdDaysAgo - 1));
+    await repo.removeMember(id, "ab1", "ab2", left);
+    await repo.markStationRemoved(id, removed);
+  };
+  await member("st-left-at-cutoff-then-removed", 100, CUTOFF, after(CUTOFF));
+  await member("st-removed-at-cutoff-then-left", 99, after(CUTOFF), CUTOFF);
+  await member("st-left-before-cutoff-then-removed", 98, before(CUTOFF), after(CUTOFF));
+  await member("st-removed-before-cutoff-then-left", 97, after(CUTOFF), before(CUTOFF));
+  await member("st-left-and-removed-at-cutoff", 96, CUTOFF, CUTOFF);
+  const rows = await repo.directoryFor("ab1", { lostSince: CUTOFF, limit: 100 });
+  assert.deepEqual(shape(rows), [
+    ["st-left-at-cutoff-then-removed", "member", "removed", "ended"],
+    ["st-removed-at-cutoff-then-left", "member", "removed", "ended"],
+    ["st-left-and-removed-at-cutoff", "member", "removed", "ended"]
+  ], "lost at the cutoff counts, whichever of leaving and removal came first; lost a moment before does not, although the other came later");
+  assert.deepEqual(rows.map((row) => [row.removedAt, row.membershipEndedAt]), [
+    [after(CUTOFF).toISOString(), CUTOFF.toISOString()],
+    [CUTOFF.toISOString(), after(CUTOFF).toISOString()],
+    [CUTOFF.toISOString(), CUTOFF.toISOString()]
+  ], "the removal is the status, and when the membership ended is still given");
+});
+
 test("directoryFor counts a loss at exactly lostSince, and not a moment earlier", async (t) => {
   const { repo, db } = await setup(t);
   if (!repo) return;

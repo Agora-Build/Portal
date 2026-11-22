@@ -308,3 +308,41 @@ test("migration 006 keeps the reports a database had, each with its integration"
   await db.pool.query("INSERT INTO station_reports (station_id, report_id, body, answer) VALUES ('st1', 'r-2', '{}', '{}')");
   assert.deepEqual((await db.pool.query("SELECT report_id, integration_id FROM station_reports ORDER BY report_id")).rows, [{ report_id: "r-1", integration_id: "i-1" }, { report_id: "r-2", integration_id: null }], "after 006 a report may name no integration");
 });
+
+// 006 alters integration_events (a table lock) and then indexes station_members. An appender holds the event lock first,
+// then writes its own rows, so a migration that took table locks before the event lock could wait for a row the appender
+// holds while the appender waits for the table the migration has locked: a cycle. The migration takes the event lock
+// first, as ensureEventPartitions does, and so waits for the whole append.
+test("migration 006 waits for the event lock before it locks any table, so it can't deadlock with an appender", async (t) => {
+  const open = await emptySchema(t);
+  if (!open) return t.skip("PORTAL_TEST_DATABASE_URL is not set");
+  const db = open();
+  await db.transaction(async (client) => {
+    await client.query("CREATE TABLE portal_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())");
+    for (const file of ["001_integrations.sql", "002_built_in_stations.sql", "003_auth_changes.sql", "004_delegated_host_work.sql", "005_station_reports.sql"]) {
+      await client.query(await readFile(new URL("../migrations/" + file, import.meta.url), "utf8"));
+      await client.query("INSERT INTO portal_migrations (version) VALUES ($1)", [file]);
+    }
+  });
+  const appender = await db.pool.connect();
+  try {
+    // An append in flight: the event lock, then a member row of its own (a lock the migration's index wants).
+    await appender.query("BEGIN");
+    await appender.query("SELECT pg_advisory_xact_lock(hashtext('portal_integration_events'))");
+    await appender.query("INSERT INTO stations (id, origin, owner_account, report_client_id, status, verified_at) VALUES ('st1', 'https://a.example', 'ab1', 's-st1', 'active', now())");
+    await appender.query("INSERT INTO station_members (station_id, account_id, added_by) VALUES ('st1', 'ab2', 'ab1')");
+    let settled = false;
+    const migrating = db.migrate().finally(() => { settled = true; });
+    await new Promise((done) => setTimeout(done, 300));
+    assert.equal(settled, false, "the migration waits for the append in flight");
+    // The append goes on to write its event. With the migration already holding integration_events this would deadlock.
+    await appender.query("INSERT INTO integration_events (station_id, account_id, actor, kind) VALUES ('st1', 'ab2', 'ab1', 'member_added')");
+    await appender.query("COMMIT");
+    assert.deepEqual(await migrating, ["006_availability_bindings.sql"]);
+    assert.deepEqual((await db.pool.query("SELECT account_id FROM station_members")).rows, [{ account_id: "ab2" }], "the appender's rows are there");
+    assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM integration_events")).rows[0].n, 1);
+  } finally {
+    await appender.query("ROLLBACK").catch(() => {});
+    appender.release();
+  }
+});

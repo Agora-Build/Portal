@@ -3,6 +3,8 @@
 -- feed once, keeps each account's availability and whether Auth's accounts baseline was applied, and records the
 -- bindings and refused binding attempts the built-in Station reports.
 SET LOCAL lock_timeout = '5s';
+-- Wait for any append in flight before locking a table, as ensureEventPartitions does: an appender holds this lock first.
+SELECT pg_advisory_xact_lock(hashtext('portal_integration_events'));
 
 -- Account-level events (accounts_baseline) name no account.
 ALTER TABLE integration_events ALTER COLUMN account_id DROP NOT NULL;
