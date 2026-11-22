@@ -1005,13 +1005,13 @@ revocations, the later interrupt, the native revoke and the page copy belong to 
 in the design below). The account-level feed entries (`account_disabled`, `account_enabled`) belong to its step 10 (III.5,
 disabled accounts): they are built ahead of it, behind the setting, and their shape is final from Auth/Portal's side
 (platform.md, "For Station Builders"). Only the grammar of the binding reports' `genesisHash`, `accountId`, `bindingId`
-and `version` waits for Astation and Atem to confirm it. Phase B is the next slice, built in the Portal behind the same setting: the Station's
-`revocation_applied` and final `revoked` reports and the counts of hosts that applied a revocation (platform.md, "For
-Station Builders"). The availability slice is built after it, in the Portal behind the same setting: the native Station
-directory (`GET /api/v1/stations`), the exact-cursor checkpoint, account availability with its completeness mark (it
-relies on the accounts baseline Auth writes with its own setting on) and the built-in Station's `binding_changed` and
-`binding_attempt` reports (platform.md, "Routes" and "For Station Builders"). Phase C (which includes releasing a binding,
-waiting for D27) is a later slice, not started.
+and `version` waits for Astation and Atem to confirm it. Phase B is the next slice, built in the Portal behind the same
+setting: the Station's `revocation_applied` and final `revoked` reports and the counts of hosts that applied a revocation
+(platform.md, "For Station Builders"). The availability slice is built after it, in the Portal behind the same setting:
+the native Station directory (`GET /api/v1/stations`), the exact-cursor checkpoint, account availability with its
+completeness mark (it relies on the accounts baseline Auth writes with its own setting on) and the built-in Station's
+`binding_changed` and `binding_attempt` reports (platform.md, "Routes" and "For Station Builders"). Phase C (which
+includes releasing a binding, waiting for D27) is a later slice, not started.
 
 **The decision.** Atem owns accepted tasks of delegated senders: integrations a Station's control feed covers, native members, and host senders with project grants. Natural expiry and renewal don't touch accepted tasks, and each task's deadline (at most 24 h) bounds it, running turns included. A revocation cancels unstarted tasks and interrupts running ones only when the owner chooses it. An integration's pause holds its unstarted tasks; host senders have no pause, only revoke and readmit. Stops reach hosts as signed control records (from the Station for integrations, from native managers for host senders) or as device-list entries, and a host reconciles its feeds and mailbox before it starts queued remote work. R9 authorization stays with native managers, outside Agora.Build's kill switch. Agora.Build's service availability is separate: disabling an Agora.Build account suspends the built-in Station's relay and mailbox service for that account's hosts, and revokes nothing.
 

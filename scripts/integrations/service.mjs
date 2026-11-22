@@ -1682,9 +1682,9 @@ export function createIntegrationService({
     //   logged unless this pass said it, at most once an hour (stillWaiting).
     // * live, there is nothing to do.
     // The Stations are pushed after the commit, and a failure rolls all of it back, so the next read does it. Several
-    // replicas may call it at once: the event lock serializes them, and only the first finds anything to do. Adopting
-    // logs the number of accounts that changed, never which. Returns whether this call did something; a stale pass, or
-    // the setting off, does nothing.
+    // replicas may call it at once: the event lock serializes them, and only the first finds anything to do. Adopting a
+    // rebuild that changed an account or completed the view logs how many accounts changed, never which. Returns whether
+    // this call did something; a stale pass, or the setting off, does nothing.
     async accountsCaughtUp(pass) {
       if (!delegatedHostWork) return false;
       const done = await appending(async (client) => {
@@ -1721,7 +1721,8 @@ export function createIntegrationService({
         stillWaiting(pass);
         return done.told !== null;
       }
-      log("Account availability rebuilt: " + accountsCount(done.changed) + " changed" + (done.completed ? "; complete." : "."));
+      // Only news is said: a rebuild that changed no account and completed nothing (an empty feed's, every read) is not.
+      if (done.changed || done.completed) log("Account availability rebuilt: " + accountsCount(done.changed) + " changed" + (done.completed ? "; complete." : "."));
       for (const station of done.stations) changed(station.id);
       return true;
     },

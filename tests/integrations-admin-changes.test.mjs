@@ -1454,6 +1454,30 @@ test("I1: the documented reset of the Portal's Auth cursor is not taken for an o
   assert.deepEqual(await s.view(), { mode: "live", complete: true });
 });
 
+// A read with no saved cursor starts over each time (an empty feed, or one with no account entry yet), and its rebuild
+// changes nothing and completes nothing: there is nothing to say, so the rebuilt line is not logged on every read.
+test("with the setting on, adopting a rebuild that changed no account and completed nothing logs no line: an empty feed, or one with integration entries only, read again and again", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true, fresh: true });
+  if (!s) return;
+  const rebuilt = () => s.logs.filter((line) => line.startsWith("Account availability rebuilt"));
+  for (let read = 0; read < 3; read += 1) await s.readAll();
+  assert.equal(await s.savedCursor(), null, "an empty feed: every read starts over");
+  assert.deepEqual(await s.view(), { mode: "live", complete: false });
+  assert.deepEqual(rebuilt(), []);
+  const id = await s.ready();
+  s.manage.adminChange(id, { status: "paused", actor: ADMIN, reason: "Spam" });
+  await s.readAll();
+  await s.repository.saveAuthChangeCursor(null);
+  await s.readAll();
+  assert.equal((await s.repository.integration(id)).state, "paused");
+  assert.deepEqual(rebuilt(), [], "integration entries only: nothing changed for an account");
+  // One that changes an account says so.
+  s.manage.accountChange(OWNER, true, { actor: ADMIN, reason: "Abuse" });
+  await s.repository.saveAuthChangeCursor(null);
+  await s.readAll();
+  assert.deepEqual(rebuilt(), ["Account availability rebuilt: 1 account changed."]);
+});
+
 // I3. While the Portal waits, a read that skips an account-level entry logs the WAITING line, as before; a read that skips
 // none (nothing new in Auth's feed) logs it at its end at most once an hour, so a Portal that waits says so however quiet
 // Auth's feed is.
