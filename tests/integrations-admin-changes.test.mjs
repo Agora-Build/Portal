@@ -1517,9 +1517,11 @@ test("with the setting on, account availability logs counts only: a rebuild adop
   s.manage.baselineChange();
   await s.readAll();
   assert.deepEqual(lines(), [], "already complete");
+  // Auth disables OTHER, and a reset comes before the live read: the rebuild differs from the live table by one account.
+  s.manage.accountChange(OTHER, true, { actor: ADMIN, reason: "Abuse" });
   await s.repository.saveAuthChangeCursor(null);
   await s.readAll();
-  assert.deepEqual(lines(), ["Account availability incomplete: rebuilding.", "Account availability rebuilt: 0 accounts changed; complete."]);
+  assert.deepEqual(lines(), ["Account availability incomplete: rebuilding.", "Account availability rebuilt: 1 account changed; complete."], "one account, singular");
   s.manage.rawChange({ kind: "account_disabled", clientId: null, stationId: null, owner: "not an account", status: null, pausedBy: null, actorAccountId: null, reason: null, admin: true });
   await s.readAll();
   assert.deepEqual(lines(), ["Account availability incomplete: waiting.", WAITING]);

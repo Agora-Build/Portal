@@ -859,11 +859,11 @@ checkpoint whether its view is complete. The one row of `auth_change_feed` says 
   entry makes it (the setting-off rule, above), takes the cursor as it is and logs nothing new; it then needs the reset
   below. Never run such an image next to this one while the setting is on ("Rolling Back, And After Restoring Auth").
 - **Log lines.** Besides the WAITING line, the older-image line and the superseded line, the Portal says how its view
-  changes in counts only, never naming an account: `Account availability rebuilt: <n> accounts changed.` when it adopts
-  a rebuild (`Account availability rebuilt: <n> accounts changed; complete.` when that completes the view),
-  `Account availability complete.` when a baseline applied live completes it, and `Account availability incomplete:
-  rebuilding.` or `Account availability incomplete: waiting.` when the built-in Stations are told the view is no longer
-  complete.
+  changes in counts only, never naming an account: `Account availability rebuilt: <n> accounts changed.` (`1 account`
+  for one) when it adopts a rebuild (`Account availability rebuilt: <n> accounts changed; complete.` when that completes
+  the view), `Account availability complete.` when a baseline applied live completes it, and `Account availability
+  incomplete: rebuilding.` or `Account availability incomplete: waiting.` when the built-in Stations are told the view is
+  no longer complete.
 - **Auth's setting off, the Portal's on.** The Portal can't tell that Auth's own `AUTH_DELEGATED_HOST_WORK` is off. Auth
   then writes no account entry when an admin disables an account (only the per-integration entries, which the Portal
   follows as pauses), so the Portal stays complete with that account missing from the disabled list, and a Station

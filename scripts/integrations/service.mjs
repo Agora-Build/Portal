@@ -119,6 +119,8 @@ const AUTH_REASON_MAX = 500;
 // from its first entry. Once by each read pass that skips one, and otherwise at the end of a read at most once an hour.
 const WAITING_LINE = "Account availability waits for Auth's change feed to be read again from the start: reset the Portal's Auth cursor (docs/platform.md, \"Resetting The Portal's Auth Cursor\").";
 const WAITING_AGAIN_MS = 3600000;
+// "1 account", "2 accounts": the count in a counts-only line.
+const accountsCount = (count) => count + (count === 1 ? " account" : " accounts");
 const WAITING = Symbol("waiting");
 // How the Station's feed and an integration's history name a change an Agora.Build admin made (spec §3.3.4): the admin
 // and the reason they gave stay in the Portal's event (actor, reason) and in Auth's audit.
@@ -1719,7 +1721,7 @@ export function createIntegrationService({
         stillWaiting(pass);
         return done.told !== null;
       }
-      log("Account availability rebuilt: " + done.changed + " accounts changed" + (done.completed ? "; complete." : "."));
+      log("Account availability rebuilt: " + accountsCount(done.changed) + " changed" + (done.completed ? "; complete." : "."));
       for (const station of done.stations) changed(station.id);
       return true;
     },

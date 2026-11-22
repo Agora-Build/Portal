@@ -1003,8 +1003,9 @@ Agreed by Atem, Astation and Auth/Portal on 2026-11-08; Atem's build has started
 **Phases.** Phase A is the first slice of Auth/Portal's part (below), built behind the settings. `interruptRunning` on
 revocations, the later interrupt, the native revoke and the page copy belong to step 6 of the design's order of work (V.2
 in the design below). The account-level feed entries (`account_disabled`, `account_enabled`) belong to its step 10 (III.5,
-disabled accounts): they are built ahead of it, behind the setting, and their shape is provisional until Auth/Portal and
-Astation define III.5 jointly. Phase B is the next slice, built in the Portal behind the same setting: the Station's
+disabled accounts): they are built ahead of it, behind the setting, and their shape is final from Auth/Portal's side
+(platform.md, "For Station Builders"). Only the grammar of the binding reports' `genesisHash`, `accountId`, `bindingId`
+and `version` waits for Astation and Atem to confirm it. Phase B is the next slice, built in the Portal behind the same setting: the Station's
 `revocation_applied` and final `revoked` reports and the counts of hosts that applied a revocation (platform.md, "For
 Station Builders"). The availability slice is built after it, in the Portal behind the same setting: the native Station
 directory (`GET /api/v1/stations`), the exact-cursor checkpoint, account availability with its completeness mark (it
