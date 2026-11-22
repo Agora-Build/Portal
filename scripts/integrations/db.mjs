@@ -15,6 +15,17 @@ function partitionName(start) {
   return "integration_events_y" + start.getUTCFullYear() + "m" + String(start.getUTCMonth() + 1).padStart(2, "0");
 }
 
+const ISOLATION_LEVELS = { "read committed": "READ COMMITTED", "repeatable read": "REPEATABLE READ", serializable: "SERIALIZABLE" };
+
+// The BEGIN a transaction starts with: plain BEGIN unless an isolation level or read-only is asked for.
+function beginStatement({ isolation, readOnly } = {}) {
+  if (isolation !== undefined && !Object.hasOwn(ISOLATION_LEVELS, isolation)) throw new TypeError("Unknown transaction isolation level.");
+  const parts = [];
+  if (isolation !== undefined) parts.push("ISOLATION LEVEL " + ISOLATION_LEVELS[isolation]);
+  if (readOnly) parts.push("READ ONLY");
+  return parts.length ? "BEGIN " + parts.join(" ") : "BEGIN";
+}
+
 export function createDatabase(connectionString, { schema, max = 10, log = () => {} } = {}) {
   if (schema !== undefined && !/^[a-z_][a-z0-9_]{0,62}$/.test(schema)) throw new Error("Invalid schema name.");
   const options = "-c statement_timeout=30000" + (schema ? " -c search_path=" + schema : "");
@@ -22,14 +33,19 @@ export function createDatabase(connectionString, { schema, max = 10, log = () =>
   // An idle client lost its connection; the next query opens a new one.
   pool.on("error", () => log("Portal database pool error."));
 
-  async function transaction(work) {
+  // Runs `work(client)` in one transaction: committed when it returns, rolled back when it throws. With no options it is a
+  // plain BEGIN (read committed, writable). `isolation` ("read committed", "repeatable read" or "serializable") and
+  // `readOnly` ask for more; the checkpoint (D29) reads its whole answer in one repeatable read, read-only transaction.
+  async function transaction(work, options = {}) {
+    // Checked before a connection is taken: the statement is built from these words only, never from the caller's text.
+    const begin = beginStatement(options);
     const client = await pool.connect();
     // A connection that drops mid-transaction must fail the query, not crash the process.
     const onError = () => log("Portal database connection lost during a transaction.");
     client.on("error", onError);
     let releaseError;
     try {
-      await client.query("BEGIN");
+      await client.query(begin);
       const result = await work(client);
       await client.query("COMMIT");
       return result;

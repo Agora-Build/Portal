@@ -716,6 +716,51 @@ test("Station reports and the change feed take only the Station's station.report
   assert.equal(unversionedFeed.status, 404);
 });
 
+// The exact-cursor checkpoint (D29): ?checkpoint=1 on the change feed, with the same token and limits, and only with the
+// setting on.
+test("with the setting on, ?checkpoint=1 answers the Station's checkpoint; with it off the parameter is ignored", async (t) => {
+  const on = await stack(t, { delegatedHostWork: true });
+  if (!on) return;
+  const app = await start(t, { integrations: on.service, delegatedHostWork: "1" });
+  const owner = await signIn(app);
+  const { station } = await registerStation(app, on, owner.cookie);
+  const integration = await createIntegration(app, owner.cookie, station.id);
+  await on.service.approve(owner.sub, integration.id, { r9Svc: R9 });
+  const token = await app.fake.issueAccessToken({ sub: owner.sub, client_id: station.reportClientId, scope: "station.report" });
+  const feed = await (await call(app.base, "/api/v1/stations/changes?cursor=0", { bearer: token })).json();
+
+  const asked = await call(app.base, "/api/v1/stations/changes?checkpoint=1", { bearer: token });
+  assert.equal(asked.status, 200);
+  const checkpoint = await asked.json();
+  assert.deepEqual(Object.keys(checkpoint), ["changes", "cursor", "checkpoint"]);
+  assert.deepEqual([checkpoint.changes, checkpoint.cursor], [[], feed.cursor]);
+  assert.deepEqual(Object.keys(checkpoint.checkpoint), ["at", "integrations"]);
+  assert.deepEqual(checkpoint.checkpoint.integrations.map((entry) => [entry.id, entry.ownerAccount, entry.state]), [[integration.id, owner.sub, "provisioning"]]);
+  // A cursor beside it is not checked against the history; anything but "1" is the ordinary feed.
+  assert.equal((await (await call(app.base, "/api/v1/stations/changes?checkpoint=1&cursor=" + (feed.cursor + 5), { bearer: token })).json()).cursor, feed.cursor);
+  for (const value of ["0", "true", "", "1 "]) {
+    const ordinary = await call(app.base, "/api/v1/stations/changes?checkpoint=" + encodeURIComponent(value) + "&cursor=" + feed.cursor, { bearer: token });
+    assert.deepEqual([ordinary.status, Object.hasOwn(await ordinary.json(), "checkpoint")], [200, false], JSON.stringify(value));
+  }
+  // The same token and scope as the feed.
+  assertScope(await call(app.base, "/api/v1/stations/changes?checkpoint=1", { bearer: await app.fake.issueAccessToken({ sub: owner.sub, client_id: station.reportClientId, scope: "credits" }) }), "station.report");
+  assert.equal((await call(app.base, "/api/v1/stations/changes?checkpoint=1", { cookie: owner.cookie })).status, 401, "a browser session cannot read it");
+
+  const integrations = await stack(t);
+  if (!integrations) return;
+  const off = await start(t, { integrations: integrations.service });
+  const person = await signIn(off);
+  const registered = await registerStation(off, integrations, person.cookie);
+  await createIntegration(off, person.cookie, registered.station.id);
+  const offToken = await off.fake.issueAccessToken({ sub: person.sub, client_id: registered.station.reportClientId, scope: "station.report" });
+  const today = await (await call(off.base, "/api/v1/stations/changes?cursor=0", { bearer: offToken })).json();
+  const ignored = await call(off.base, "/api/v1/stations/changes?checkpoint=1", { bearer: offToken });
+  assert.equal(ignored.status, 200);
+  assert.deepEqual(await ignored.json(), today, "today's cursor-0 answer, with no checkpoint key");
+  assert.equal(Object.hasOwn(today, "checkpoint"), false);
+  assert.equal(Array.isArray(today.integrations), true);
+});
+
 const STATION_CLIENT = "s-" + "0".repeat(24) + "bs";
 const REPORT_TOKEN_ONLY = "A Station's own report token can only send reports and read the change feed.";
 

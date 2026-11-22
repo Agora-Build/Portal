@@ -767,3 +767,329 @@ test("with the setting on, today's reports behave as before, and a legacy report
   await assert.rejects(s.service.report(client, { integrationId: id, state: "error", reason: "later" }), refused(409, "invalid_state"));
   assert.deepEqual(await savedReports(s), []);
 });
+
+// The exact-cursor checkpoint (D29), GET /api/v1/stations/changes?checkpoint=1: the Station's newest event id, every
+// integration on it in any state and, for the built-in Station, the account availability and the bindings, read in one
+// repeatable read transaction. service.changes(client, cursor, { checkpoint: true }) is what the route calls with the
+// setting on.
+const CHECKPOINT = { checkpoint: true };
+const ADMIN = "ab" + "0".repeat(25) + "4";
+const DISABLED = "ab" + "0".repeat(25) + "5";
+const DISABLED_TOO = "ab" + "0".repeat(25) + "6";
+const GENESIS = "b".repeat(64);
+const ISO = (ms) => new Date(ms).toISOString();
+
+// The built-in Station as Auth seeds it, followed by the Portal; returns Auth's record (id, reportClientId).
+async function builtIn(s) {
+  const seeded = s.manage.seedBuiltIn({ integrations: true, admins: [ADMIN] });
+  await s.service.syncBuiltIn();
+  return seeded;
+}
+
+// What the reader of Auth's feed does with the entries Auth has: starts over (a first start), applies each in the pass's
+// epoch, and says it reached the end. Returns the pass, for entries applied live afterwards.
+async function readAuthFeed(s) {
+  await s.service.accountsStartingOver();
+  const pass = { epoch: Number((await s.db.pool.query("SELECT accounts_epoch FROM auth_change_feed")).rows[0].accounts_epoch) };
+  for (const entry of s.manage.feed) assert.equal(await s.service.applyAuthChange(entry, pass), "applied");
+  await s.service.accountsCaughtUp(pass);
+  return pass;
+}
+
+const newestEvent = async (s, stationId) => Number((await s.db.pool.query("SELECT max(id) AS id FROM integration_events WHERE station_id = $1", [stationId])).rows[0].id);
+
+test("the checkpoint's cursor is the Station's newest event, it lists every integration in any state with revokedAt on the stopped ones, and resuming at the cursor delivers only later changes", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const live = await s.approved();
+  await s.service.report(client, { integrationId: live, state: "ready" });
+  const pending = await s.create();
+  const revoking = await s.approved();
+  await s.service.revoke(OWNER, revoking, { interruptRunning: true });
+  const revoked = await s.approved();
+  await s.service.revoke(OWNER, revoked, { interruptRunning: false });
+  await s.service.report(client, { integrationId: revoked, state: "revoked" });
+  const never = await s.create(OWNER);
+  await s.service.revoke(OWNER, never, { interruptRunning: false });
+  // Another Station's events come later: event ids are global, and the cursor is this Station's.
+  const other = await s.register(OTHER, "https://two.example");
+  await s.approved(OTHER, other.id);
+  assert.ok((await newestEvent(s, other.id)) > (await newestEvent(s, s.station.id)));
+
+  const checkpoint = await s.service.changes(client, "0", CHECKPOINT);
+  assert.deepEqual(Object.keys(checkpoint), ["changes", "cursor", "checkpoint"]);
+  assert.deepEqual(checkpoint.changes, []);
+  assert.equal(checkpoint.cursor, await newestEvent(s, s.station.id));
+  assert.equal(checkpoint.cursor, await s.repository.latestCursor(s.station.id));
+  assert.deepEqual(Object.keys(checkpoint.checkpoint), ["at", "integrations"], "a custom Station's has no accounts and no bindings");
+  assert.equal(checkpoint.checkpoint.at, ISO(s.clock.now));
+
+  const row = async (id) => s.repository.integration(id);
+  const open = async (id, state) => ({ id, ownerAccount: OWNER, state, scopes: ["agent.view"], r9Svc: (await row(id)).r9Svc, expiresAt: (await row(id)).expiresAt, quotaPerSecond: 200 });
+  const stopped = async (id, state, interruptRunning) => ({ ...await open(id, state), interruptRunning, revokedAt: (await row(id)).revokedAt });
+  assert.deepEqual(checkpoint.checkpoint.integrations, [
+    await open(live, "ready"), await open(pending, "awaiting_approval"), await stopped(revoking, "revoking", true), await stopped(revoked, "revoked", false), await stopped(never, "revoked", false)
+  ]);
+  for (const id of [revoking, revoked, never]) assert.match((await row(id)).revokedAt, /^\d{4}-\d\d-\d\dT.*Z$/);
+  assert.equal(Object.hasOwn(checkpoint.checkpoint.integrations[0], "revokedAt"), false, "a live one has none");
+  assert.equal(Object.hasOwn(checkpoint.checkpoint.integrations[0], "interruptRunning"), false);
+
+  // The feed from cursor 0 ends at the same cursor, with the same integrations (its own snapshot shape, without revokedAt).
+  const feed = await s.service.changes(client, "0");
+  assert.equal(feed.cursor, checkpoint.cursor);
+  assert.deepEqual(feed.integrations.map((entry) => entry.id), checkpoint.checkpoint.integrations.map((entry) => entry.id));
+
+  // Resuming at the cursor delivers nothing now, and then only what came after.
+  const resumed = await s.service.changes(client, checkpoint.cursor);
+  assert.deepEqual([resumed.changes, resumed.cursor, Object.hasOwn(resumed, "checkpoint")], [[], checkpoint.cursor, false]);
+  await s.service.report(client, { integrationId: live, state: "error", reason: "R9 host unreachable" });
+  const later = await s.service.changes(client, checkpoint.cursor);
+  assert.deepEqual(later.changes.map((change) => [change.kind, change.integrationId]), [["integration_reported", live]]);
+  assert.ok(later.changes[0].id > checkpoint.cursor);
+  assert.equal(later.cursor, later.changes[0].id);
+  assert.equal((await s.service.changes(client, "0", CHECKPOINT)).cursor, later.cursor, "a new checkpoint is at the new cursor");
+
+  // The cursor check doesn't apply to a checkpoint (it is at the Station's newest event itself); a malformed one is still refused.
+  assert.equal((await s.service.changes(client, String(later.cursor + 1000), CHECKPOINT)).cursor, later.cursor);
+  await assert.rejects(s.service.changes(client, "abc", CHECKPOINT), refused(400, "cursor"));
+  await assert.rejects(s.service.changes("s-unknown", "0", CHECKPOINT), refused(403, "station"));
+  // A checkpoint is of this Station only.
+  assert.deepEqual((await s.service.changes(other.reportClientId, "0", CHECKPOINT)).checkpoint.integrations.map((entry) => entry.ownerAccount), [OTHER]);
+});
+
+test("a Station with nothing yet, and a checkpoint that is not asked for, answer as they should", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const empty = await s.register(OTHER, "https://two.example");
+  const first = await s.service.changes(empty.reportClientId, "0", CHECKPOINT);
+  assert.deepEqual(first, { changes: [], cursor: await s.repository.latestCursor(empty.id), checkpoint: { at: ISO(s.clock.now), integrations: [] } });
+  assert.ok(first.cursor > 0, "its registration is its first event");
+  // Not asked for (or asked for as false): the feed as it was, with the setting on.
+  const id = await s.approved();
+  for (const options of [undefined, {}, { checkpoint: false }]) {
+    const feed = await s.service.changes(s.station.reportClientId, "0", options);
+    assert.equal(Object.hasOwn(feed, "checkpoint"), false);
+    assert.deepEqual(feed.integrations.map((entry) => entry.id), [id]);
+  }
+});
+
+test("the built-in Station's checkpoint has the accounts and the bindings: complete follows the baseline, disabled follows availability", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const built = await builtIn(s);
+  const client = built.reportClientId;
+  const checkpoint = async () => (await s.service.changes(client, "0", CHECKPOINT));
+  const id = await s.service.createIntegration(OWNER, { stationId: built.id, name: "Hosted", scopes: [], publicJwk: publicJwk() });
+
+  // A fresh Portal is rebuilding: nothing is known, so it isn't complete, and nobody is disabled.
+  let answer = await checkpoint();
+  assert.deepEqual(Object.keys(answer.checkpoint), ["at", "integrations", "accounts", "bindings"]);
+  assert.deepEqual([answer.checkpoint.accounts, answer.checkpoint.bindings], [{ complete: false, disabled: [] }, []]);
+  assert.deepEqual(answer.checkpoint.integrations.map((entry) => [entry.id, entry.ownerAccount, entry.state]), [[id.id, OWNER, "awaiting_approval"]]);
+  assert.equal(answer.cursor, await newestEvent(s, built.id));
+
+  // Auth has disabled an account and not yet written its baseline: the rebuild is adopted, but the view isn't complete.
+  s.manage.accountChange(DISABLED, true, { actor: ADMIN, reason: "Abuse" });
+  const pass = await readAuthFeed(s);
+  answer = await checkpoint();
+  assert.deepEqual(answer.checkpoint.accounts, { complete: false, disabled: [DISABLED] });
+  assert.equal(answer.cursor, await newestEvent(s, built.id));
+  assert.equal(answer.cursor, (await s.service.changes(client, "0")).cursor);
+
+  // The baseline, applied live in order, completes it, and the Station's cursor is its change.
+  s.manage.baselineChange();
+  assert.equal(await s.service.applyAuthChange(s.manage.feed.at(-1), pass), "applied");
+  answer = await checkpoint();
+  assert.deepEqual(answer.checkpoint.accounts, { complete: true, disabled: [DISABLED] });
+  assert.equal(answer.cursor, await newestEvent(s, built.id));
+  assert.equal((await s.service.changes(client, String(answer.cursor - 1))).changes[0].kind, "accounts_baseline");
+
+  // Disabled follows availability, in account order, an enabled account leaving the list.
+  s.manage.accountChange(DISABLED_TOO, true, { actor: ADMIN, reason: "Abuse" });
+  assert.equal(await s.service.applyAuthChange(s.manage.feed.at(-1), pass), "applied");
+  assert.deepEqual((await checkpoint()).checkpoint.accounts, { complete: true, disabled: [DISABLED, DISABLED_TOO] });
+  s.manage.accountChange(DISABLED, false, { actor: ADMIN, reason: "Mistake" });
+  assert.equal(await s.service.applyAuthChange(s.manage.feed.at(-1), pass), "applied");
+  answer = await checkpoint();
+  assert.deepEqual(answer.checkpoint.accounts, { complete: true, disabled: [DISABLED_TOO] });
+  assert.equal(answer.cursor, await newestEvent(s, built.id));
+  // The custom Station sees none of it, whatever the Portal knows of the accounts.
+  const custom = await s.service.changes(s.station.reportClientId, "0", CHECKPOINT);
+  assert.deepEqual(Object.keys(custom.checkpoint), ["at", "integrations"]);
+});
+
+test("the built-in Station's bindings are its own last reported ones, in the contract's shape and in R9 account order", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const built = await builtIn(s);
+  const save = (stationId, fields) => s.db.transaction((client) => s.repository.saveBinding({
+    stationId, r9AccountId: "r9-b", genesisHash: GENESIS, accountId: OWNER, bindingId: "bind-1", version: 1, bindingState: "bound", reportId: "rep-1", ...fields
+  }, client));
+  await save(built.id, {});
+  await save(built.id, { r9AccountId: "r9-a", genesisHash: "c".repeat(64), accountId: MEMBER, bindingId: "bind-2", version: 3, bindingState: "released", reportId: "rep-2" });
+  await save(built.id, { r9AccountId: "r9-a", genesisHash: "a".repeat(64), accountId: OTHER, bindingId: "bind-3", version: 2, bindingState: "unbound", reportId: "rep-3" });
+  await save(built.id, { r9AccountId: "r9-B", genesisHash: GENESIS, bindingId: "bind-4", reportId: "rep-4" });
+  await save(s.station.id, { r9AccountId: "r9-0", bindingId: "elsewhere", reportId: "rep-5" });
+  await save(built.id, { version: 2, bindingId: "bind-5", reportId: "rep-6" });
+  const { checkpoint } = await s.service.changes(built.reportClientId, "0", CHECKPOINT);
+  // By R9 account in byte order (upper case before lower), then by genesis.
+  assert.deepEqual(checkpoint.bindings, [
+    { account: OWNER, accountId: "r9-B", genesisHash: GENESIS, bindingId: "bind-4", version: 1, bindingState: "bound" },
+    { account: OTHER, accountId: "r9-a", genesisHash: "a".repeat(64), bindingId: "bind-3", version: 2, bindingState: "unbound" },
+    { account: MEMBER, accountId: "r9-a", genesisHash: "c".repeat(64), bindingId: "bind-2", version: 3, bindingState: "released" },
+    { account: OWNER, accountId: "r9-b", genesisHash: GENESIS, bindingId: "bind-5", version: 2, bindingState: "bound" }
+  ]);
+  for (const binding of checkpoint.bindings) assert.deepEqual(Object.keys(binding), ["account", "accountId", "genesisHash", "bindingId", "version", "bindingState"]);
+  assert.equal(typeof checkpoint.bindings[0].version, "number");
+});
+
+test("during a rebuild the checkpoint says not complete and its disabled accounts are the live table, not the rebuild", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const built = await builtIn(s);
+  const checkpoint = async () => s.service.changes(built.reportClientId, "0", CHECKPOINT);
+  s.manage.accountChange(DISABLED, true, { actor: ADMIN, reason: "Abuse" });
+  s.manage.baselineChange();
+  await readAuthFeed(s);
+  let answer = await checkpoint();
+  assert.deepEqual(answer.checkpoint.accounts, { complete: true, disabled: [DISABLED] });
+
+  // Auth enables that account and disables another; the Portal starts over (a reset) and rebuilds from the first entry.
+  s.manage.accountChange(DISABLED, false, { actor: ADMIN, reason: "Mistake" });
+  s.manage.accountChange(DISABLED_TOO, true, { actor: ADMIN, reason: "Abuse" });
+  const epoch = await s.service.accountsStartingOver();
+  const pass = { epoch };
+  answer = await checkpoint();
+  assert.deepEqual(answer.checkpoint.accounts, { complete: false, disabled: [DISABLED] }, "the live table, as it was");
+  assert.equal((await s.service.changes(built.reportClientId, String(answer.cursor - 1))).changes[0].kind, "accounts_incomplete");
+  assert.equal(answer.cursor, await newestEvent(s, built.id), "the signal is in the cursor");
+  for (const entry of s.manage.feed) await s.service.applyAuthChange(entry, pass);
+  answer = await checkpoint();
+  assert.deepEqual(answer.checkpoint.accounts, { complete: false, disabled: [DISABLED] }, "the rebuild is not shown while it runs");
+
+  // Caught up, the rebuild is the table: the differences are told, and the baseline it saw completes the view again.
+  assert.equal(await s.service.accountsCaughtUp(pass), true);
+  answer = await checkpoint();
+  assert.deepEqual(answer.checkpoint.accounts, { complete: true, disabled: [DISABLED_TOO] });
+  assert.equal(answer.cursor, await newestEvent(s, built.id));
+});
+
+test("the checkpoint is one snapshot: a writer inside its transaction shows in neither the cursor nor the rows, and its event comes after the cursor", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const id = await s.approved();
+  await s.service.report(client, { integrationId: id, state: "ready" });
+  const before = await s.service.changes(client, "0", CHECKPOINT);
+  assert.equal(before.checkpoint.integrations[0].state, "ready");
+
+  // A second Portal replica whose repository holds the writer's transaction (and with it the event lock) once its event
+  // and its row change are written, until released.
+  let release;
+  let arrived;
+  const released = new Promise((resolve) => { release = resolve; });
+  const reached = new Promise((resolve) => { arrived = resolve; });
+  t.after(() => release());
+  const holding = {
+    ...s.repository,
+    async appendEvent(event, transaction) {
+      const written = await s.repository.appendEvent(event, transaction);
+      arrived();
+      await released;
+      return written;
+    }
+  };
+  const writer = createIntegrationService({
+    repository: holding, db: s.db, manage: s.manage, stationFetch: { async get() { return { status: 404, body: "" }; } }, pushFetch: s.pushFetch,
+    exchange: async () => ({}), now: () => s.clock.now, log: () => {}, delegatedHostWork: true
+  });
+  let settled = false;
+  const writing = writer.revoke(OWNER, id, { interruptRunning: true });
+  writing.then(() => { settled = true; }, () => { settled = true; });
+  await Promise.race([reached, writing]);
+  assert.equal(settled, false, "the writer is inside its transaction");
+  assert.equal(await s.db.transaction(async (client) => (await client.query("SELECT pg_try_advisory_xact_lock(hashtext('portal_integration_events')) AS got")).rows[0].got), false, "and holds the event lock");
+
+  // The checkpoint doesn't wait for the writer, and reflects neither its event nor its row change.
+  let timer;
+  const during = await Promise.race([s.service.changes(client, "0", CHECKPOINT), new Promise((resolve) => { timer = setTimeout(() => resolve("waited"), 5000); })]);
+  clearTimeout(timer);
+  assert.notEqual(during, "waited", "a checkpoint takes no lock");
+  assert.equal(during.cursor, before.cursor);
+  assert.deepEqual(during.checkpoint.integrations, before.checkpoint.integrations);
+  assert.equal((await s.service.changes(client, String(before.cursor))).changes.length, 0, "the feed doesn't have the writer's event either");
+
+  release();
+  await writing;
+  const after = await s.service.changes(client, "0", CHECKPOINT);
+  assert.ok(after.cursor > during.cursor, "the writer's event is after the checkpoint's cursor");
+  assert.equal(after.checkpoint.integrations[0].state, "revoking");
+  assert.equal(after.checkpoint.integrations[0].interruptRunning, true);
+  // Resuming at the earlier checkpoint's cursor delivers exactly that event, carrying the row change.
+  const resumed = await s.service.changes(client, String(during.cursor));
+  assert.deepEqual(resumed.changes.map((change) => [change.id, change.kind, change.integration.state]), [[after.cursor, "integration_revoked", "revoking"]]);
+  await writer._pushesIdle();
+});
+
+test("commits made between the checkpoint's own reads show in none of them", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const built = await builtIn(s);
+  const created = await s.service.createIntegration(OWNER, { stationId: built.id, name: "Hosted", scopes: [], publicJwk: publicJwk() });
+  s.manage.accountChange(DISABLED, true, { actor: ADMIN, reason: "Abuse" });
+  s.manage.baselineChange();
+  const pass = await readAuthFeed(s);
+  const before = await s.service.changes(built.reportClientId, "0", CHECKPOINT);
+  assert.deepEqual([before.checkpoint.accounts, before.checkpoint.bindings, before.checkpoint.integrations.map((entry) => entry.state)], [{ complete: true, disabled: [DISABLED] }, [], ["awaiting_approval"]]);
+
+  // After each of the checkpoint's reads, something it could have read commits: a revocation (row and event), another
+  // account disabled, a binding.
+  const afterRead = {
+    latestCursor: () => s.db.transaction(async (client) => {
+      await s.repository.lockEvents(client);
+      await s.repository.updateIntegration(created.id, { state: "revoked", revokedAt: s.clock.now }, client);
+      await s.repository.appendEvent({ stationId: built.id, integrationId: created.id, accountId: OWNER, actor: OWNER, kind: "integration_revoked", state: "revoked", reason: "owner" }, client);
+    }),
+    integrationsOnStation: async () => {
+      s.manage.accountChange(DISABLED_TOO, true, { actor: ADMIN, reason: "Abuse" });
+      assert.equal(await s.service.applyAuthChange(s.manage.feed.at(-1), pass), "applied");
+    },
+    disabledAccountList: () => s.db.transaction((client) => s.repository.saveBinding({ stationId: built.id, r9AccountId: "r9-a", genesisHash: GENESIS, accountId: OWNER, bindingId: "bind-1", version: 1, bindingState: "bound", reportId: "rep-1" }, client))
+  };
+  const ran = [];
+  const reading = Object.fromEntries(Object.keys(s.repository).map((name) => [name, s.repository[name]]));
+  for (const [name, hook] of Object.entries(afterRead)) {
+    reading[name] = async (...args) => {
+      const result = await s.repository[name](...args);
+      if (!ran.includes(name)) { ran.push(name); await hook(); }
+      return result;
+    };
+  }
+  const reader = createIntegrationService({
+    repository: reading, db: s.db, manage: s.manage, stationFetch: { async get() { return { status: 404, body: "" }; } }, pushFetch: s.pushFetch,
+    exchange: async () => ({}), now: () => s.clock.now, log: () => {}, delegatedHostWork: true
+  });
+  const answer = await reader.changes(built.reportClientId, "0", CHECKPOINT);
+  assert.deepEqual(ran, ["latestCursor", "integrationsOnStation", "disabledAccountList"], "each of the writers ran between the reads");
+  assert.deepEqual(answer, before, "the checkpoint is as it was when it began");
+  // They all happened: the next checkpoint has them, at a later cursor, and the feed from the first has the revocation.
+  const after = await s.service.changes(built.reportClientId, "0", CHECKPOINT);
+  assert.ok(after.cursor > before.cursor);
+  assert.deepEqual([after.checkpoint.accounts, after.checkpoint.bindings.length, after.checkpoint.integrations.map((entry) => entry.state)], [{ complete: true, disabled: [DISABLED, DISABLED_TOO] }, 1, ["revoked"]]);
+  assert.ok((await s.service.changes(built.reportClientId, String(before.cursor))).changes.some((change) => change.kind === "integration_revoked"));
+  await reader._pushesIdle();
+});
+
+test("with the setting off, asking for a checkpoint is ignored: the answer is today's cursor-0 answer", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const id = await s.approved();
+  await s.service.report(client, { integrationId: id, state: "ready" });
+  const today = await s.service.changes(client, "0");
+  assert.equal(Object.hasOwn(today, "checkpoint"), false);
+  assert.deepEqual(await s.service.changes(client, "0", CHECKPOINT), today);
+  assert.deepEqual(await s.service.changes(client, String(today.cursor), CHECKPOINT), await s.service.changes(client, String(today.cursor)));
+  await assert.rejects(s.service.changes(client, String(today.cursor + 1), CHECKPOINT), refused(409, "cursor_ahead"), "the cursor check stays");
+});

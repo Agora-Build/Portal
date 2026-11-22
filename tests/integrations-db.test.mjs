@@ -104,6 +104,39 @@ test("transaction rolls back when the work throws", async (t) => {
   assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM station_challenges")).rows[0].n, 0);
 });
 
+// The checkpoint (D29) reads in one REPEATABLE READ read-only transaction; every other caller gets today's transaction.
+test("transaction with isolation and readOnly runs repeatable read and read only: two reads don't see a commit between them, and a write is refused", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) return t.skip("PORTAL_TEST_DATABASE_URL is not set");
+  const insert = (runner) => runner.query("INSERT INTO station_challenges (id, account_id, origin, value, expires_at) VALUES (gen_random_uuid(), 'ab1', 'https://a.example', 'v', now())");
+  const count = async (client) => (await client.query("SELECT count(*)::int AS n FROM station_challenges")).rows[0].n;
+  const mode = async (client) => [(await client.query("SHOW transaction_isolation")).rows[0].transaction_isolation, (await client.query("SHOW transaction_read_only")).rows[0].transaction_read_only];
+  // Without options: as it always was, a read committed transaction that may write, and each read sees what committed before it.
+  assert.deepEqual(await db.transaction(async (client) => {
+    const first = await count(client);
+    await insert(db.pool);
+    return [first, await count(client), ...await mode(client)];
+  }), [0, 1, "read committed", "off"]);
+  // With them, the first read fixes the snapshot.
+  assert.deepEqual(await db.transaction(async (client) => {
+    const first = await count(client);
+    await insert(db.pool);
+    return [first, await count(client), ...await mode(client)];
+  }, { isolation: "repeatable read", readOnly: true }), [1, 1, "repeatable read", "on"]);
+  assert.equal(await count(db.pool), 2, "the commit made between the reads happened");
+  await assert.rejects(db.transaction((client) => insert(client), { isolation: "repeatable read", readOnly: true }), { code: "25006" });
+  assert.equal(await count(db.pool), 2, "a refused write left nothing");
+  // Each option alone, and nothing else is let into the statement.
+  assert.deepEqual(await db.transaction((client) => mode(client), { readOnly: true }), ["read committed", "on"]);
+  assert.deepEqual(await db.transaction((client) => mode(client), { isolation: "repeatable read" }), ["repeatable read", "off"]);
+  assert.deepEqual(await db.transaction((client) => mode(client), { isolation: undefined, readOnly: false }), ["read committed", "off"]);
+  for (const isolation of ["snapshot", "repeatable read; DROP TABLE stations", "", 3]) await assert.rejects(db.transaction(async () => {}, { isolation }), TypeError, JSON.stringify(isolation));
+  assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM stations")).rows[0].n, 0, "the table is still there");
+  // The pool still has its connections: the refusals above took none.
+  assert.equal(db.pool.waitingCount, 0);
+  assert.equal(db.pool.totalCount, db.pool.idleCount);
+});
+
 test("integration check constraints refuse unknown states and malformed keys", async (t) => {
   const db = await testDatabase(t);
   if (!db) return t.skip("PORTAL_TEST_DATABASE_URL is not set");

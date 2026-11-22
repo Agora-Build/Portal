@@ -141,7 +141,8 @@ export async function handleIntegrations({ path, method, url, read, service, cal
   }
   if (path === "/api/stations/changes" && method === "GET") {
     const clientId = reporter(); limit("changes:" + clientId, 120, 60000);
-    return ok(await service.changes(clientId, url.searchParams.get("cursor") ?? "0"));
+    // ?checkpoint=1 (D29): the Station's state at one exact cursor. Ignored with the setting off.
+    return ok(await service.changes(clientId, url.searchParams.get("cursor") ?? "0", { checkpoint: delegatedHostWork && url.searchParams.get("checkpoint") === "1" }));
   }
   if (path === "/api/integrations" && method === "GET") {
     return ok(await service.integrations(listing("integrations", caller ? scoped("integrations:read") : await portalUser())));

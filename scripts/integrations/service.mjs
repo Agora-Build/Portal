@@ -313,6 +313,35 @@ export function createIntegrationService({
   challengeValue = () => randomBytes(32).toString("base64url"), pushFetch = createStationFetch({ timeoutMs: 3000 }), notify, authChanged = () => {},
   delegatedHostWork = false
 }) {
+  // The Station's checkpoint (D29), all read in one repeatable read, read-only transaction, so it is one snapshot: the
+  // newest event id is the cursor, and everything else is the state those events (and no later one) left. A writer that
+  // appends under the event lock commits its event and its rows together, so a change is in the snapshot with its
+  // event or in neither, and every change committed later has a larger id (ids are taken in commit order, appendEvent).
+  // It takes no lock, so it never waits for a writer. Each integration is in the feed's shape (the effective state as of
+  // `at`) with its id, and a stopped one says when it was revoked. Only the built-in Station has the accounts (whether
+  // the Portal's view is complete, and the disabled ones) and the bindings it last reported.
+  async function checkpointOf(station) {
+    const snapshot = await db.transaction(async (client) => ({
+      cursor: await repository.latestCursor(station.id, client),
+      rows: await repository.integrationsOnStation(station.id, client),
+      ...(station.builtIn ? {
+        complete: await repository.baselineApplied(client),
+        disabled: await repository.disabledAccountList(client),
+        bindings: await repository.bindingsOn(station.id, client)
+      } : {})
+    }), { isolation: "repeatable read", readOnly: true });
+    const at = now();
+    const checkpoint = {
+      at: new Date(at).toISOString(),
+      integrations: snapshot.rows.map((row) => ({ id: row.id, ...feedIntegration(row, at, true), ...(STOPPED.includes(row.state) ? { revokedAt: row.revokedAt } : {}) }))
+    };
+    if (station.builtIn) {
+      checkpoint.accounts = { complete: snapshot.complete, disabled: snapshot.disabled };
+      checkpoint.bindings = snapshot.bindings.map((row) => ({ account: row.accountId, accountId: row.r9AccountId, genesisHash: row.genesisHash, bindingId: row.bindingId, version: row.version, bindingState: row.bindingState }));
+    }
+    return { changes: [], cursor: snapshot.cursor, checkpoint };
+  }
+
   // Every transaction here appends events, so each takes the event lock before any row lock (see lockEvents).
   const appending = (work) => db.transaction(async (client) => {
     await repository.lockEvents(client);
@@ -1291,9 +1320,15 @@ export function createIntegrationService({
 
     // This Station's changes after `cursor`, oldest first, each with its integration's current settings. From cursor 0
     // the answer also lists every integration on the Station, so a Station starting fresh has a snapshot.
-    async changes(clientId, cursorInput) {
+    //
+    // With the setting on and `checkpoint` (D29, ?checkpoint=1) the answer is the Station's state at one exact cursor
+    // instead, whatever cursor was sent (its shape is still checked, and "ahead" doesn't apply: the cursor is the Station's
+    // own newest event). Resuming at it with the feed delivers every later change and no earlier one. With the setting
+    // off the parameter is ignored: the answer is today's.
+    async changes(clientId, cursorInput, { checkpoint = false } = {}) {
       const station = await reportingStation(clientId);
       const cursor = feedCursor(cursorInput);
+      if (delegatedHostWork && checkpoint) return checkpointOf(station);
       // A cursor this Station's history never reached (the Portal's database was restored from an older backup) can't
       // be served from: the Station must start again from cursor 0, whose snapshot is the current state.
       if (cursor > 0 && cursor > await repository.latestCursor(station.id)) throw failure(409, "This cursor is ahead of the Portal's history. Read the feed again from cursor 0.", "cursor_ahead");
