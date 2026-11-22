@@ -13,7 +13,8 @@ export const BUILT_IN_REPORT_CLIENT = "s-" + "0".repeat(24) + "bs";
 // Auth nudges the Portal (Auth D26 Task 13). `failNext` makes the next call of that name fail with the given status and
 // code (after the gate, so the call is still recorded). `delegated` is Auth with delegated host work on (D29): disabling
 // or enabling an account then writes its own entry (no integration, no Station) ahead of the per-integration ones;
-// interruptChange and accountChange stand in for the admin site's interrupt and account calls. A delegated Auth also
+// interruptChange, accountChange and baselineChange stand in for the admin site's interrupt and account calls and for
+// Auth's own accounts baseline. A delegated Auth also
 // takes `interruptRunning` on a revocation and records it as `=== true` (false when it is left out); an Auth without
 // the setting refuses the key with 400 invalid_request. `sent` keeps each changeIntegration body as it went over the wire.
 export function fakeManage({ now = Date.now, delegated = false } = {}) {
@@ -278,6 +279,15 @@ export function fakeManage({ now = Date.now, delegated = false } = {}) {
     // `delegated`): for an account that owns no integration, say.
     accountChange(account, disabled, { actor = null, reason = null } = {}) {
       recordAccount(account, disabled, { actor, reason });
+      auth.onNudge?.();
+    },
+    // Auth's accounts_baseline entry (D29): written once Auth has written the corrections for every account whose state
+    // differed from its latest account entry. It names no integration, Station or account, and has no actor or reason.
+    baselineChange() {
+      feed.push({
+        cursor: feedCursor(feed.length + 1), at: new Date(now()).toISOString(), kind: "accounts_baseline", clientId: null, stationId: null,
+        owner: null, status: null, pausedBy: null, actorAccountId: null, reason: null, admin: false
+      });
       auth.onNudge?.();
     },
     // Auth's own change (no actor): a built-in Station retired by its clients file revokes its integrations.

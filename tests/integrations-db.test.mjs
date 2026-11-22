@@ -44,8 +44,8 @@ test("migration 002 leaves an existing database's custom Stations, integrations 
   assert.deepEqual(row, { owner_account: "ab1", status: "active", built_in: false, access: "members", integrations_enabled: true, name: null });
 });
 
-// accountChangeApplied (inside the global event lock) and disabledAccounts read a built-in Station's account-level events
-// by Station and account; without this index they scan every event of the Station.
+// Migration 004's index of a Station's account-level events by Station and account. Phase A's accountChangeApplied and
+// disabledAccounts read them by it; the availability tables (006) replaced those reads, and the index stays.
 test("migration 004 indexes the account-level events by Station and account, on the table and on its partitions, beside 001's account index", async (t) => {
   const db = await testDatabase(t);
   if (!db) return t.skip("PORTAL_TEST_DATABASE_URL is not set");

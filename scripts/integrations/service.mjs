@@ -68,11 +68,14 @@ const ownerDisabled = () => failure(409, OWNER_DISABLED, "owner_disabled");
 // AUTH_CURSOR, shared with the repository).
 const AUTH_KINDS = ["paused", "resumed", "revoked", "owner_disabled", "owner_enabled"];
 const OWNER_KINDS = ["owner_disabled", "owner_enabled"];
-// With the setting on (D29) Auth's feed also has an admin's later interrupt of a revoked integration's running tasks and
-// an admin's disabling or enabling of an account: the account entries name no integration (clientId null) and are for
-// the built-in Stations only.
-const DELEGATED_AUTH_KINDS = [...AUTH_KINDS, "interrupt_requested", "account_disabled", "account_enabled"];
+// With the setting on (D29) Auth's feed also has an admin's later interrupt of a revoked integration's running tasks, an
+// admin's disabling or enabling of an account, and Auth's accounts baseline (written once Auth has corrected every
+// account that differed from its latest entry): the account-level entries name no integration (clientId null) and are
+// for the built-in Stations only. A baseline names no account either (owner null).
 const ACCOUNT_KINDS = ["account_disabled", "account_enabled"];
+const BASELINE_KIND = "accounts_baseline";
+const ACCOUNT_LEVEL_KINDS = [...ACCOUNT_KINDS, BASELINE_KIND];
+const DELEGATED_AUTH_KINDS = [...AUTH_KINDS, "interrupt_requested", ...ACCOUNT_LEVEL_KINDS];
 const AUTH_REASON_MAX = 500;
 // How the Station's feed and an integration's history name a change an Agora.Build admin made (spec §3.3.4): the admin
 // and the reason they gave stay in the Portal's event (actor, reason) and in Auth's audit.
@@ -255,10 +258,11 @@ function authTime(value) {
 
 // Whether an entry of Auth's change feed is one this Portal follows: a kind it knows, a cursor and a time as Auth writes
 // them, and the subject the kind has. An integration's entry names its integration (clientId); an account entry (the
-// setting on, D29) names no integration (clientId null) and an account (owner).
+// setting on, D29) names no integration (clientId null) and an account (owner), and the accounts baseline names neither.
 function changeEntry(entry, delegated) {
   if (!plainObject(entry) || !(delegated ? DELEGATED_AUTH_KINDS : AUTH_KINDS).includes(entry.kind)) return false;
   if (typeof entry.cursor !== "string" || !AUTH_CURSOR.test(entry.cursor) || !authTime(entry.at)) return false;
+  if (entry.kind === BASELINE_KIND) return entry.clientId === null && entry.owner === null;
   if (ACCOUNT_KINDS.includes(entry.kind)) return entry.clientId === null && typeof entry.owner === "string" && ACCOUNT_ID.test(entry.owner);
   return typeof entry.clientId === "string";
 }
@@ -588,33 +592,39 @@ export function createIntegrationService({
     }
   }
 
-  // An entry of Auth's change feed about an account, not an integration (D29, the setting on): an admin disabled or
-  // enabled it. Each built-in Station records it, once, so its feed can tell the Station (a cursor-0 read lists the
-  // accounts disabled now); a custom Station never gets one, since an admin's action against a person isn't disclosed
-  // to a third-party operator (design III.5). Each Station is pushed as its own write commits, so one whose write fails
-  // (the reader then reads the entry again) doesn't hold back the others. Returns "applied" when any Station recorded
-  // it, else "skipped".
+  // An account-level entry of Auth's change feed (D29, the setting on): an admin disabled or enabled an account, or Auth
+  // wrote its accounts baseline. Everything happens in one transaction: the entry is marked applied (once, whatever is
+  // read again), the account's availability or the baseline mark is written, and each active built-in Station records
+  // the entry as an event of its feed, so a cursor-0 read lists the accounts disabled now (from availability) and a
+  // Station learns of each change. A custom Station never gets one: an admin's action against a person isn't disclosed
+  // to a third-party operator (design III.5). The Stations are pushed after the commit, and a failure anywhere rolls
+  // all of it back, so the reader's next read applies the entry once. With no built-in Station the tables are still
+  // updated. An entry older than the one the account's availability already has (an entry read late) is recorded as
+  // applied but changes nothing and reaches no Station: its event would tell a Station the account was in a state the
+  // table says it isn't. Returns "applied", or "skipped" when the entry was applied before or lost to a newer one.
   async function accountChange(entry, actor, reason) {
-    const stations = await repository.builtInStations();
-    if (!stations.length) {
-      log("Auth account change skipped: no built-in Station.");
-      return "skipped";
-    }
-    let applied = false;
-    for (const station of stations) {
-      const written = await appending(async (client) => {
-        if (await repository.accountChangeApplied(station.id, entry.cursor, entry.at, entry.owner, client)) return false;
+    const baseline = entry.kind === BASELINE_KIND;
+    const result = await appending(async (client) => {
+      if (!(await repository.applyAccountEntry({ cursor: entry.cursor, at: entry.at, account: entry.owner, kind: entry.kind }, client))) return { done: true };
+      if (baseline) await repository.setBaseline(entry.cursor, entry.at, client);
+      else if (!(await repository.setAvailability(entry.owner, entry.kind === "account_disabled", entry.cursor, entry.at, client))) return { superseded: true };
+      const stations = await repository.builtInStations(client);
+      for (const station of stations) {
         await repository.appendEvent({
-          stationId: station.id, integrationId: null, accountId: entry.owner, actor, kind: entry.kind, state: null, reason,
+          stationId: station.id, integrationId: null, accountId: baseline ? null : entry.owner, actor, kind: entry.kind, state: null, reason,
           details: { authCursor: entry.cursor, authAt: entry.at, admin: entry.admin === true }
         }, client);
-        return true;
-      });
-      if (!written) continue;
-      applied = true;
-      changed(station.id);
+      }
+      return { stations };
+    });
+    if (result.done) return "skipped";
+    if (result.superseded) {
+      log("Auth account change recorded without its state change: the Portal has a newer one.");
+      return "skipped";
     }
-    return applied ? "applied" : "skipped";
+    if (!result.stations.length) log("Auth account change skipped: no built-in Station.");
+    for (const station of result.stations) changed(station.id);
+    return "applied";
   }
 
   // Shown as paused while its own state is not: its owner's account is disabled.
@@ -1199,8 +1209,8 @@ export function createIntegrationService({
       const current = new Map(rows.map((row) => [row.id, row]));
       const changes = events.map(({ id, at: when, integrationId, accountId, kind, state, reason, details }) => {
         // An admin's disabling or enabling of an account: the admin and their reason stay in the Portal's event. Served as
-        // recorded, as Auth does, even if the setting has been turned off since.
-        if (ACCOUNT_KINDS.includes(kind)) return { id, at: when, integrationId: null, kind, state: null, reason: AGORA_BUILD, account: accountId };
+        // recorded, as Auth does, even if the setting has been turned off since. The baseline names no account.
+        if (ACCOUNT_LEVEL_KINDS.includes(kind)) return { id, at: when, integrationId: null, kind, state: null, reason: AGORA_BUILD, account: kind === BASELINE_KIND ? null : accountId };
         // Agora.Build's changes say only that: the admin and their reason stay in the Portal's event (spec §3.3.4).
         const masked = Object.hasOwn(OWNER_EVENTS, kind);
         const change = { id, at: when, integrationId, kind: masked ? OWNER_EVENTS[kind] : kind, state, reason: masked || details?.admin === true ? AGORA_BUILD : reason };
@@ -1214,8 +1224,8 @@ export function createIntegrationService({
       const answer = { changes, cursor: events.length ? events.at(-1).id : cursor };
       if (cursor === 0) {
         answer.integrations = rows.map((row) => ({ id: row.id, ...feedIntegration(row, at, delegatedHostWork) }));
-        // A built-in Station's snapshot includes every account disabled now (design III.5).
-        if (delegatedHostWork && station.builtIn) answer.disabledAccounts = await repository.disabledAccounts(station.id);
+        // A built-in Station's snapshot includes every account disabled now (design III.5), as the availability table has it.
+        if (delegatedHostWork && station.builtIn) answer.disabledAccounts = await repository.disabledAccountList();
       }
       return answer;
     },
@@ -1247,8 +1257,10 @@ export function createIntegrationService({
     // owner's next listing brings them in). Each entry is applied once: its cursor and time are kept in the event's
     // details. Returns "applied" or "skipped"; only a database failure throws, so the reader reads it again.
     //
-    // With the setting on (D29) an admin's interrupt_requested entry is followed the same way, and an account entry
-    // (account_disabled, account_enabled; no integration) is recorded once on each built-in Station (accountChange).
+    // With the setting on (D29) an admin's interrupt_requested entry is followed the same way, and an account-level entry
+    // (account_disabled, account_enabled or accounts_baseline; no integration) is applied once to the availability
+    // tables and recorded on every built-in Station (accountChange). With it off, such an entry is skipped like any
+    // other kind this Portal does not follow, and clears the baseline mark first.
     //
     // The feed may be read after the Portal already followed a newer change (an owner's listing, the owner's own call,
     // or a revocation). Such an entry is still recorded, and a pause or revocation still applies: a pause that is out
@@ -1257,6 +1269,10 @@ export function createIntegrationService({
     // keeps its state and the event says so (details.superseded), so a resume read late never undoes a newer pause
     // (Ruling R-A). Auth's clock and the Portal's are compared here, so they are kept in sync.
     async applyAuthChange(entry) {
+      // With the setting off the Portal skips an account-level entry, so it no longer follows Auth's accounts: the
+      // baseline mark is cleared, and availability is unknown until a baseline is applied again (D29). Whatever the
+      // entry's shape: a kind of this sort is one, and the mark errs on the side of unknown.
+      if (!delegatedHostWork && plainObject(entry) && ACCOUNT_LEVEL_KINDS.includes(entry.kind)) await appending((client) => repository.clearBaseline(client));
       if (!changeEntry(entry, delegatedHostWork)) {
         log("Auth change skipped: not a change entry.");
         return "skipped";
@@ -1265,7 +1281,7 @@ export function createIntegrationService({
       if (ours) return "skipped";
       const actor = typeof entry.actorAccountId === "string" && ACCOUNT_ID.test(entry.actorAccountId) ? entry.actorAccountId : SYSTEM;
       const reason = typeof entry.reason === "string" && entry.reason ? [...entry.reason].slice(0, AUTH_REASON_MAX).join("") : null;
-      if (ACCOUNT_KINDS.includes(entry.kind)) return accountChange(entry, actor, reason);
+      if (ACCOUNT_LEVEL_KINDS.includes(entry.kind)) return accountChange(entry, actor, reason);
       if (!(await repository.integration(entry.clientId))) {
         log("Auth change skipped: the integration is unknown to Portal.");
         return "skipped";

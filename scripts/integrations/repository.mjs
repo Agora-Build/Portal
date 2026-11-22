@@ -415,19 +415,6 @@ export function createRepository(db) {
       return rows.length > 0;
     },
 
-    // Whether an account-level entry of Auth's change feed, about this account, was already recorded for this Station
-    // (service.applyAuthChange). By Station and account, so integration_events_station_account_idx serves it.
-    async accountChangeApplied(stationId, cursor, at, accountId, client) {
-      const { rows } = await run(client, "SELECT 1 FROM integration_events WHERE station_id = $1 AND integration_id IS NULL AND kind IN ('account_disabled', 'account_enabled') AND details->>'authCursor' = $2 AND details->>'authAt' = $3 AND account_id = $4 LIMIT 1", [stationId, cursor, at, accountId]);
-      return rows.length > 0;
-    },
-
-    // The accounts whose latest account-level event on this Station is account_disabled: the cursor-0 snapshot.
-    async disabledAccounts(stationId, client) {
-      const { rows } = await run(client, "SELECT account_id FROM (SELECT DISTINCT ON (account_id) account_id, kind FROM integration_events WHERE station_id = $1 AND integration_id IS NULL AND kind IN ('account_disabled', 'account_enabled') ORDER BY account_id, id DESC) latest WHERE kind = 'account_disabled' ORDER BY account_id", [stationId]);
-      return rows.map((row) => row.account_id);
-    },
-
     // The pauses, resumes and revocations recorded for the integration: { at, id }, both null when there is none.
     // `at` is the newest time of one, as an ISO string (service.applyAuthChange, Ruling R-A): an entry of Auth's change
     // feed counts at Auth's time (details.authAt); a change the Portal saw through its own call or an owner's listing
@@ -457,12 +444,16 @@ export function createRepository(db) {
       return rowCount > 0;
     },
 
-    // An account's availability as the latest applied entry says: one row per account, replaced by each entry.
+    // An account's availability as the latest applied entry says: one row per account, replaced by each entry, but never
+    // by an older one: Auth's time orders the entries, and at the same time the entry applied last says. An entry
+    // skipped while the Portal's setting was off, or applied late by another reader, can arrive after a newer one.
+    // Returns whether the entry took effect: false when a newer entry already stands.
     async setAvailability(account, disabled, cursor, at, client) {
       if (typeof disabled !== "boolean") throw new TypeError("disabled must be true or false.");
-      await run(client,
-        "INSERT INTO account_availability (account_id, disabled, auth_cursor, auth_at) VALUES ($1, $2, $3, $4) ON CONFLICT (account_id) DO UPDATE SET disabled = EXCLUDED.disabled, auth_cursor = EXCLUDED.auth_cursor, auth_at = EXCLUDED.auth_at, updated_at = now()",
+      const { rowCount } = await run(client,
+        "INSERT INTO account_availability (account_id, disabled, auth_cursor, auth_at) VALUES ($1, $2, $3, $4) ON CONFLICT (account_id) DO UPDATE SET disabled = EXCLUDED.disabled, auth_cursor = EXCLUDED.auth_cursor, auth_at = EXCLUDED.auth_at, updated_at = now() WHERE account_availability.auth_at <= EXCLUDED.auth_at",
         [account, disabled, authCursorOf(cursor), timeOf(at, "at")]);
+      return rowCount > 0;
     },
 
     // The accounts that are disabled, in order: the "disabled" of a checkpoint and a built-in Station's cursor-0 snapshot.
