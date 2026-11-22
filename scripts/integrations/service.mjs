@@ -34,6 +34,13 @@ const RECORD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a
 const PRINTABLE_REASON = /^[^\p{Cc}]{1,200}$/u;
 const CURSOR = /^\d{1,15}$/;
 const FEED_LIMIT = 500;
+// The Station directory (D29, GET /api/v1/stations): pages of at most 100 Stations, and a Station lost within 30 days (the
+// Station records' own retention) is still listed, with the loss stated.
+const DIRECTORY_PAGE = 100;
+const DIRECTORY_LOST_FOR = 30 * DAY;
+const LIMIT_DIGITS = /^[0-9]{1,3}$/;
+const CURSOR_CHARACTERS = /^[A-Za-z0-9_-]{1,512}$/;
+const CURSOR_TIME = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
 const CHANGES_PATH = "/agora-build/v1/changes";
 
 const failure = (status, message, code, extra = {}) => new AppError(status, message, { code, ...extra });
@@ -50,6 +57,8 @@ const reportIdInvalid = () => failure(400, "Send the reportId as " + IDENTIFIER,
 const hostInvalid = () => failure(400, "Name the host by its id: " + IDENTIFIER, "host");
 const recordIdInvalid = () => failure(400, "Send the recordId as the record's lowercase UUID.", "record_id");
 const outcomeInvalid = () => failure(400, "Send all_applied with no pendingHosts, or deadline_passed with the hosts that didn't confirm.", "outcome");
+const limitInvalid = () => failure(400, "Choose a limit of 1 to 100.", "limit");
+const cursorInvalid = () => failure(400, "Send the cursor this list gave you.", "cursor");
 const reportIdReused = () => failure(409, "This reportId was already used for another report.", "report_id_reused");
 const notRevokedYet = () => failure(409, "This integration isn't revoked.", "invalid_state");
 const finalReported = () => failure(409, "This integration's revocation already has its final report.", "invalid_state");
@@ -130,6 +139,48 @@ function stationView(station, role) {
   };
   if (role === "owner") view.reportClientId = station.reportClientId;
   return view;
+}
+
+// The directory's limit: a whole number from 1 to 100, as a number or the digits of one (it arrives in a query); 100 when
+// it is not given.
+function directoryLimit(value) {
+  if (value === undefined || value === null) return DIRECTORY_PAGE;
+  const size = typeof value === "string" && LIMIT_DIGITS.test(value) ? Number(value) : value;
+  if (!Number.isInteger(size) || size < 1 || size > DIRECTORY_PAGE) throw limitInvalid();
+  return size;
+}
+
+// A directory cursor is base64url (unpadded) of JSON.stringify([builtIn, createdAt, id]) of the last Station on a page,
+// createdAt as the page showed it. Only exactly that is accepted: one spelling of the base64, the JSON as stringify writes
+// it, a boolean, a time as toISOString writes it (a four-digit year), and an identifier. Anything else is 400 cursor, so a cursor is only ever
+// one this list gave. It names a place in the order, not a Station: the Station need not be there any more.
+function directoryCursor(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !CURSOR_CHARACTERS.test(value)) throw cursorInvalid();
+  const bytes = Buffer.from(value, "base64url");
+  if (bytes.toString("base64url") !== value) throw cursorInvalid();
+  const text = bytes.toString("utf8");
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { throw cursorInvalid(); }
+  if (!Array.isArray(parsed) || parsed.length !== 3 || JSON.stringify(parsed) !== text) throw cursorInvalid();
+  const [builtIn, createdAt, id] = parsed;
+  if (typeof builtIn !== "boolean" || typeof createdAt !== "string" || !CURSOR_TIME.test(createdAt) || typeof id !== "string" || !ID_GRAMMAR.test(id)) throw cursorInvalid();
+  const at = new Date(createdAt);
+  if (Number.isNaN(at.getTime()) || at.toISOString() !== createdAt) throw cursorInvalid();
+  return { builtIn, createdAt, id };
+}
+const directoryCursorFor = (entry) => Buffer.from(JSON.stringify([entry.builtIn, entry.createdAt, entry.id])).toString("base64url");
+
+// A Station as the directory shows it: routing and availability only, never its report client, its owner or its members.
+// integrationsEnabled says whether an integration can be created there now: not on a removed Station, and not by a member
+// whose membership ended.
+function directoryEntry(row) {
+  return {
+    id: row.id, origin: row.origin, name: row.name, builtIn: row.builtIn, access: row.access, role: row.role, status: row.status,
+    removedAt: row.removedAt, membership: row.membership, membershipEndedAt: row.membershipEndedAt,
+    integrationsEnabled: row.status === "active" && row.integrationsEnabled && (row.role !== "member" || row.membership === "current"),
+    createdAt: row.createdAt
+  };
 }
 
 function plainObject(value) {
@@ -526,6 +577,20 @@ export function createIntegrationService({
     const station = notBuiltIn(await usable(accountId, stationId));
     if (station.role !== "owner") throw ownerOnly();
     return station;
+  }
+
+  // Reads Auth's list of the account's Stations and reconciles Portal's rows with it. False when Auth is unreachable (503):
+  // the Portal's own rows are then all there is to show, and the answer says so (stale). Any other refusal is an error.
+  async function reconcileWithAuth(accountId) {
+    let listed;
+    try {
+      listed = await manage.stations(accountId);
+    } catch (error) {
+      if (!(error instanceof ManageError) || fromManage(error).status !== 503) throw fromManage(error);
+      log("Station list served from Portal: Auth " + error.code + ".");
+    }
+    if (listed) await reconcile(accountId, listed);
+    return Boolean(listed);
   }
 
   // Brings Portal's rows in line with Auth's list for this account; Auth is authoritative. Removals run first, so a
@@ -1066,16 +1131,26 @@ export function createIntegrationService({
     },
 
     async stations(accountId) {
-      let listed;
-      try {
-        listed = await manage.stations(accountId);
-      } catch (error) {
-        if (!(error instanceof ManageError) || fromManage(error).status !== 503) throw fromManage(error);
-        log("Station list served from Portal: Auth " + error.code + ".");
-      }
-      if (listed) await reconcile(accountId, listed);
+      const fresh = await reconcileWithAuth(accountId);
       const stations = (await repository.stationsFor(accountId)).map((station) => stationView(station, station.role));
-      return { stations, stale: !listed };
+      return { stations, stale: !fresh };
+    },
+
+    // The Station directory for Astation (D29, the setting on; GET /api/v1/stations): a page of the Stations the account
+    // can use now and those it lost in the last 30 days, built-in first, then by creation and id. The limit and the cursor
+    // are checked before Auth is asked. The list is reconciled with Auth as the browser's is; when Auth is unreachable
+    // (503) it is the Portal's last copy and `stale`. `complete` is true only on the last page of a list that is not stale:
+    // anything else must not be taken to mean a Station is gone.
+    async directory(accountId, { cursor, limit } = {}) {
+      if (!delegatedHostWork) throw notFound();
+      const size = directoryLimit(limit);
+      const after = directoryCursor(cursor);
+      const fresh = await reconcileWithAuth(accountId);
+      // One more than the page, to know whether there is a next page.
+      const rows = await repository.directoryFor(accountId, { lostSince: now() - DIRECTORY_LOST_FOR, after, limit: size });
+      const stations = rows.slice(0, size).map(directoryEntry);
+      const nextCursor = rows.length > size ? directoryCursorFor(stations.at(-1)) : null;
+      return { stations, nextCursor, stale: !fresh, complete: fresh && nextCursor === null };
     },
 
     async members(accountId, stationId) {

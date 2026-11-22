@@ -71,8 +71,9 @@ export const API_V1 = "/api/v1/";
 const bearerRoutes = new Set(["GET /api/me", "GET /api/credits/balance", "GET /api/credits/statement", "POST /api/marketplaces/chat", "POST /api/marketplaces/tts", "GET /api/connections", "GET /api/connections/agora/projects", "POST /api/connections/agora/certificate", "POST /api/connections/agora/token", "DELETE /api/connections/agora", "POST /api/platform/credits/reserve", "POST /api/platform/credits/settle", "GET /api/integrations", "POST /api/stations/reports", "GET /api/stations/changes"]);
 const bearerPatterns = [/^POST \/api\/integrations\/[A-Za-z0-9_-]{1,64}\/approval$/];
 const isBearerRoute = (route) => bearerRoutes.has(route) || bearerPatterns.some((pattern) => pattern.test(route));
-// Token routes that exist only with DELEGATED_HOST_WORK=1 (D29): Astation's revoke.
-const delegatedBearerPatterns = [/^POST \/api\/integrations\/[A-Za-z0-9_-]{1,64}\/revoke$/];
+// Token routes that exist only with DELEGATED_HOST_WORK=1 (D29): Astation's revoke and its Station directory (the browser's
+// GET /api/stations is the same path without a token).
+const delegatedBearerPatterns = [/^POST \/api\/integrations\/[A-Za-z0-9_-]{1,64}\/revoke$/, /^GET \/api\/stations$/];
 // A Station's own report token (sub = its s- report client; a built-in Station has no owner) is not an account: it
 // reaches these two routes only, and no Portal account is made for it.
 const stationReportRoutes = new Set(["POST /api/stations/reports", "GET /api/stations/changes"]);

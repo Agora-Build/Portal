@@ -1418,3 +1418,257 @@ test("with the setting off, interrupt finds nothing", async (t) => {
   await assert.rejects(s.service.interrupt(OWNER, id), refused(404, "not_found"));
   assert.deepEqual([(await s.repository.integration(id)).interruptRunning, (await s.events()).length], [false, events]);
 });
+
+// D29: the native Station directory (GET /api/v1/stations, issue 40): what the account can use now and what it lost in the
+// last 30 days, in pages, with the setting on.
+const DIRECTORY_KEYS = ["access", "builtIn", "createdAt", "id", "integrationsEnabled", "membership", "membershipEndedAt", "name", "origin", "removedAt", "role", "status"];
+const START = Date.parse("2026-01-01T00:00:00.000Z");
+const CURSOR_MESSAGE = "Send the cursor this list gave you.";
+const LIMIT_MESSAGE = "Choose a limit of 1 to 100.";
+const cursorOf = (value) => Buffer.from(typeof value === "string" ? value : JSON.stringify(value)).toString("base64url");
+const refusedWith = (status, code, message) => (error) => {
+  refused(status, code)(error);
+  assert.equal(error.message, message);
+  return true;
+};
+// The Stations get creation times a day apart, so the directory's order is the order given (the built-in Station aside).
+async function dated(s, ...ids) {
+  for (const [index, id] of ids.entries()) await s.db.pool.query("UPDATE stations SET created_at = $2 WHERE id = $1", [id, new Date(START + index * DAY)]);
+}
+// Every page of the account's directory, `limit` at a time.
+async function pages(s, accountId, limit) {
+  const all = [];
+  let cursor;
+  for (;;) {
+    const page = await s.service.directory(accountId, { cursor, limit });
+    all.push(page);
+    if (!page.nextCursor) return all;
+    cursor = page.nextCursor;
+    assert.ok(all.length < 50, "the pages must end");
+  }
+}
+
+test("directory lists the built-in Station first, then owned and member Stations, with exactly the contract's fields", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const built = s.manage.seedBuiltIn({ integrations: true });
+  const shared = await s.register(STRANGER, "https://two.example");
+  await s.service.share(STRANGER, shared.id, OWNER);
+  const others = await s.register(MEMBER, "https://three.example");
+  await dated(s, s.station.id, shared.id, others.id);
+  const answer = await s.service.directory(OWNER);
+  assert.deepEqual(Object.keys(answer).sort(), ["complete", "nextCursor", "stale", "stations"]);
+  assert.deepEqual([answer.nextCursor, answer.stale, answer.complete], [null, false, true]);
+  assert.deepEqual(answer.stations.map((entry) => [entry.id, entry.role, entry.status, entry.membership]),
+    [[built.id, "built_in", "active", null], [s.station.id, "owner", "active", null], [shared.id, "member", "active", "current"]],
+    "another account's Station is not listed");
+  for (const entry of answer.stations) assert.deepEqual(Object.keys(entry).sort(), DIRECTORY_KEYS);
+  const shown = async (id) => (await s.repository.station(id)).createdAt;
+  assert.deepEqual(answer.stations[0], { id: built.id, origin: built.origin, name: "Agora Station", builtIn: true, access: "any_account", role: "built_in", status: "active", removedAt: null, membership: null, membershipEndedAt: null, integrationsEnabled: true, createdAt: await shown(built.id) });
+  assert.deepEqual(answer.stations[1], { id: s.station.id, origin: "https://one.example", name: null, builtIn: false, access: "members", role: "owner", status: "active", removedAt: null, membership: null, membershipEndedAt: null, integrationsEnabled: true, createdAt: new Date(START).toISOString() });
+  assert.deepEqual(answer.stations[2], { id: shared.id, origin: "https://two.example", name: null, builtIn: false, access: "members", role: "member", status: "active", removedAt: null, membership: "current", membershipEndedAt: null, integrationsEnabled: true, createdAt: new Date(START + DAY).toISOString() });
+  // Never a report client, an owner, or the members: routing and availability only.
+  const text = JSON.stringify(answer);
+  for (const secret of [s.station.reportClientId, shared.reportClientId, built.reportClientId, STRANGER, MEMBER]) assert.equal(text.includes(secret), false, secret);
+  // An account with nothing of its own is told of the built-in Station alone.
+  assert.deepEqual((await s.service.directory("ab" + "0".repeat(25) + "9")).stations.map((entry) => entry.id), [built.id]);
+});
+
+test("directory reconciles with Auth first: a Station only Auth knows is listed, and one Auth dropped is lost", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const known = await s.manage.registerStation({ origin: "https://auth-only.example", owner: OWNER, reportKey: {}, actor: OWNER });
+  assert.equal(await s.repository.station(known.id), null, "the Portal has not heard of it");
+  const answer = await s.service.directory(OWNER);
+  assert.deepEqual(answer.stations.map((entry) => entry.id).sort(), [known.id, s.station.id].sort());
+  assert.equal((await s.repository.station(known.id)).ownerAccount, OWNER, "reconciled, as the browser's list does");
+  // Auth removes a Station behind the Portal's back: the next listing says it was lost.
+  s.manage.records.find((entry) => entry.id === known.id).status = "removed";
+  const after = await s.service.directory(OWNER);
+  const lost = after.stations.find((entry) => entry.id === known.id);
+  assert.deepEqual([lost.role, lost.status, lost.removedAt, lost.integrationsEnabled], ["owner", "removed", new Date(s.clock.now).toISOString(), false]);
+});
+
+test("directory's integrationsEnabled is false unless the Station is active and, for a member, the membership is current", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const on = s.manage.seedBuiltIn({ integrations: true });
+  const off = s.manage.seedBuiltIn({ id: "stbuiltin2", origin: "https://station2.agora.test", name: "Second", integrations: false, reportClientId: "s-" + "0".repeat(24) + "bt" });
+  const current = await s.register(STRANGER, "https://current.example");
+  const ended = await s.register(STRANGER, "https://ended.example");
+  const removed = await s.register(STRANGER, "https://removed.example");
+  for (const { id } of [current, ended, removed]) await s.service.share(STRANGER, id, OWNER);
+  await s.service.unshare(STRANGER, ended.id, OWNER);
+  await s.service.removeStation(STRANGER, removed.id);
+  await s.service.removeStation(OWNER, s.station.id);
+  const enabled = Object.fromEntries((await s.service.directory(OWNER)).stations.map((entry) => [entry.id, [entry.role, entry.status, entry.membership, entry.integrationsEnabled]]));
+  assert.deepEqual(enabled, {
+    [on.id]: ["built_in", "active", null, true],
+    [off.id]: ["built_in", "active", null, false],
+    [s.station.id]: ["owner", "removed", null, false],
+    [current.id]: ["member", "active", "current", true],
+    [ended.id]: ["member", "active", "ended", false],
+    [removed.id]: ["member", "removed", "current", false]
+  });
+});
+
+test("directory lists a lost Station for 30 days with the loss stated, and not after", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const ended = await s.register(STRANGER, "https://ended.example");
+  const stays = await s.register(STRANGER, "https://stays.example");
+  const gone = await s.register(OWNER, "https://gone.example");
+  for (const { id } of [ended, stays]) await s.service.share(STRANGER, id, OWNER);
+  await dated(s, s.station.id, ended.id, stays.id, gone.id);
+  const lostAt = s.clock.now;
+  await s.service.unshare(STRANGER, ended.id, OWNER);
+  await s.service.removeStation(OWNER, gone.id);
+  const losses = async () => (await s.service.directory(OWNER)).stations.filter((entry) => entry.id === ended.id || entry.id === gone.id)
+    .map((entry) => [entry.id, entry.status, entry.removedAt, entry.membership, entry.membershipEndedAt]);
+  const lostIso = new Date(lostAt).toISOString();
+  const expected = [[ended.id, "active", null, "ended", lostIso], [gone.id, "removed", lostIso, null, null]];
+  assert.deepEqual(await losses(), expected, "stated at once");
+  s.clock.now = lostAt + 30 * DAY;
+  assert.deepEqual(await losses(), expected, "still there on the 30th day");
+  s.clock.now = lostAt + 30 * DAY + 1;
+  assert.deepEqual(await losses(), [], "omitted after the 30 days");
+  assert.deepEqual((await s.service.directory(OWNER)).stations.map((entry) => entry.id), [s.station.id, stays.id], "what it can still use is listed whenever");
+});
+
+test("directory pages by keyset: complete only on the last page, and the cursor is base64url of [builtIn, createdAt, id]", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const built = s.manage.seedBuiltIn({ integrations: true });
+  const second = await s.register(STRANGER, "https://two.example");
+  const third = await s.register(STRANGER, "https://three.example");
+  for (const { id } of [second, third]) await s.service.share(STRANGER, id, OWNER);
+  await dated(s, s.station.id, second.id, third.id);
+  const all = await s.service.directory(OWNER);
+  const ids = [built.id, s.station.id, second.id, third.id];
+  assert.deepEqual(all.stations.map((entry) => entry.id), ids);
+
+  const single = await pages(s, OWNER, 1);
+  assert.deepEqual(single.map((page) => page.stations.map((entry) => entry.id)), ids.map((id) => [id]), "one Station a page");
+  assert.deepEqual(single.map((page) => page.complete), [false, false, false, true], "complete only on the last page");
+  assert.deepEqual(single.map((page) => page.stale), [false, false, false, false]);
+  assert.deepEqual(single.map((page) => page.nextCursor === null), [false, false, false, true]);
+  for (const [index, page] of single.slice(0, -1).entries()) {
+    const last = page.stations.at(-1);
+    assert.match(page.nextCursor, /^[A-Za-z0-9_-]+$/, "base64url, unpadded");
+    assert.deepEqual(JSON.parse(Buffer.from(page.nextCursor, "base64url").toString("utf8")), [last.builtIn, last.createdAt, last.id], "after page " + (index + 1));
+  }
+  assert.deepEqual((await pages(s, OWNER, 3)).map((page) => page.stations.length), [3, 1]);
+  const exact = await pages(s, OWNER, 4);
+  assert.deepEqual(exact.map((page) => [page.stations.length, page.nextCursor, page.complete]), [[4, null, true]], "a page that ends the list has no next cursor");
+  assert.equal((await pages(s, OWNER, 100)).length, 1);
+  // The cursor is a place in the list, whatever the next page's size; and a Station added before it is not shown again.
+  const [first] = single;
+  const rest = await s.service.directory(OWNER, { cursor: first.nextCursor, limit: 2 });
+  assert.deepEqual([rest.stations.map((entry) => entry.id), rest.complete], [[s.station.id, second.id], false]);
+  const early = await s.register(OWNER, "https://early.example");
+  await s.db.pool.query("UPDATE stations SET created_at = $2 WHERE id = $1", [early.id, new Date(START - DAY)]);
+  assert.deepEqual((await s.service.directory(OWNER, { cursor: rest.nextCursor })).stations.map((entry) => entry.id), [third.id], "the keyset continues after the last Station seen");
+  // The limit may be a string, as it arrives in a query.
+  assert.deepEqual((await s.service.directory(OWNER, { limit: "2" })).stations.map((entry) => entry.id), [built.id, early.id]);
+});
+
+test("directory refuses a limit that is not a whole number from 1 to 100 as 400 limit, before Auth", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const calls = s.manage.calls.length;
+  for (const limit of [0, 101, -1, 1.5, NaN, Infinity, true, [], {}, 2 ** 53, "0", "101", "-1", "1.5", "abc", "", " 5", "5 ", "+5", "1e1", "0x10", "٣", "5\n", "1000000000000000000000"]) {
+    await assert.rejects(s.service.directory(OWNER, { limit }), refusedWith(400, "limit", LIMIT_MESSAGE), JSON.stringify(limit) ?? String(limit));
+  }
+  assert.equal(s.manage.calls.length, calls, "Auth is not asked");
+  for (const limit of [undefined, null, 1, 100, "1", "100", "50"]) assert.equal((await s.service.directory(OWNER, { limit })).stations.length, 1, String(limit));
+  assert.equal((await s.service.directory(OWNER, {})).complete, true, "the default is 100");
+  assert.equal((await s.service.directory(OWNER)).complete, true, "no options at all");
+});
+
+test("directory refuses a cursor that is not exactly one it gave as 400 cursor, before Auth", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const at = "2026-01-02T03:04:05.678Z";
+  const good = cursorOf([false, at, "st1"]);
+  // The same bytes with the unused bits of the last character changed: another spelling of the same cursor.
+  const spelled = (() => {
+    const bytes = Buffer.from(good, "base64url");
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const other = [...alphabet].map((letter) => good.slice(0, -1) + letter).find((candidate) => candidate !== good && Buffer.from(candidate, "base64url").equals(bytes));
+    return other;
+  })();
+  const bad = [
+    "", "!!", "not a cursor", "AAAA", "a".repeat(5000), good + "=", good + "==", good.slice(0, 4) + "+" + good.slice(5), good.slice(0, 4) + "/" + good.slice(5), " " + good, good + "\n",
+    cursorOf("st1"), cursorOf([]), cursorOf({}), cursorOf(null), cursorOf(5), cursorOf([false, at]), cursorOf([false, at, "st1", 1]),
+    cursorOf([0, at, "st1"]), cursorOf(["false", at, "st1"]), cursorOf([null, at, "st1"]),
+    cursorOf([false, 5, "st1"]), cursorOf([false, null, "st1"]), cursorOf([false, "2026-01-02", "st1"]), cursorOf([false, "2026-01-02T03:04:05Z", "st1"]), cursorOf([false, "2026-01-02T03:04:05.678+00:00", "st1"]), cursorOf([false, "2026-13-02T03:04:05.678Z", "st1"]), cursorOf([false, "2026-02-30T03:04:05.678Z", "st1"]), cursorOf([false, "+010000-01-01T00:00:00.000Z", "st1"]), cursorOf([false, "-000001-01-01T00:00:00.000Z", "st1"]), cursorOf([false, "2026-01-02T03:04:05.67Z", "st1"]), cursorOf([false, " " + at, "st1"]),
+    cursorOf([false, at, ""]), cursorOf([false, at, "a b"]), cursorOf([false, at, "st/1"]), cursorOf([false, at, "x".repeat(129)]), cursorOf([false, at, 7]), cursorOf([false, at, null]), cursorOf([false, at, ["st1"]]),
+    cursorOf('[false, "' + at + '", "st1"]'), cursorOf('[false,"' + at + '","st1"] '), cursorOf('[false,"' + at + '","st\\u0031"]'),
+    "W2ZhbHNlLCJ4Il0", cursorOf("[false,"), 5, {}, ["x"], true
+  ];
+  if (spelled) bad.push(spelled);
+  const calls = s.manage.calls.length;
+  for (const cursor of bad) await assert.rejects(s.service.directory(OWNER, { cursor }), refusedWith(400, "cursor", CURSOR_MESSAGE), typeof cursor === "string" ? cursor.slice(0, 80) : String(cursor));
+  assert.equal(s.manage.calls.length, calls, "Auth is not asked");
+  assert.ok(spelled, "the test found another spelling of a cursor");
+  // A cursor this list could have given is accepted, even for a Station that is not there: it is a place in the order.
+  const built = s.manage.seedBuiltIn({ integrations: true });
+  const listed = async (cursor) => (await s.service.directory(OWNER, { cursor })).stations.map((entry) => entry.id);
+  assert.deepEqual(await listed(undefined), [built.id, s.station.id]);
+  assert.deepEqual(await listed(null), [built.id, s.station.id], "no cursor is the first page");
+  assert.deepEqual(await listed(good), [s.station.id], "after a custom Station created on 2 January, the later ones");
+  assert.deepEqual(await listed(cursorOf([true, "2999-01-01T00:00:00.000Z", "zz"])), [s.station.id], "after every built-in Station created before then, the others");
+  assert.deepEqual(await listed(cursorOf([false, "2999-01-01T00:00:00.000Z", "zz"])), [], "after the last Station there is nothing");
+  assert.deepEqual(await listed(cursorOf([false, "2000-01-01T00:00:00.000Z", "st-gone"])), [s.station.id], "a Station that is not there is still a place in the order");
+});
+
+test("directory is stale, and never complete, when Auth is unreachable: it answers from the Portal's last copy", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const built = s.manage.seedBuiltIn({ integrations: true });
+  const second = await s.register(OWNER, "https://two.example");
+  await dated(s, s.station.id, second.id);
+  const fresh = await s.service.directory(OWNER);
+  assert.deepEqual([fresh.stale, fresh.complete, fresh.stations.length], [false, true, 3]);
+  s.manage.down = true;
+  const stale = await s.service.directory(OWNER);
+  assert.deepEqual([stale.stale, stale.complete, stale.nextCursor], [true, false, null], "the last and only page, but not complete");
+  assert.deepEqual(stale.stations, fresh.stations, "the Portal's last copy");
+  const paged = await pages(s, OWNER, 2);
+  assert.deepEqual(paged.map((page) => [page.stations.length, page.stale, page.complete]), [[2, true, false], [1, true, false]]);
+  assert.equal(stale.stations[0].id, built.id);
+  // One failed listing, then Auth is back: not stale, and complete on the last page.
+  s.manage.down = false;
+  s.manage.failNext.stations = { status: 503, code: "unavailable" };
+  assert.deepEqual([(await s.service.directory(OWNER)).stale, (await s.service.directory(OWNER)).stale], [true, false]);
+  assert.equal(s.logs.filter((line) => line.startsWith("Station list served from Portal")).length >= 2, true);
+  // Only Auth's unavailability is stale: any other refusal is an error, as for the browser's list.
+  s.manage.failNext.stations = { status: 400, code: "invalid_request" };
+  await assert.rejects(s.service.directory(OWNER), refused(400, "invalid_request"));
+});
+
+test("with the setting off, directory finds nothing and does not ask Auth", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const calls = s.manage.calls.length;
+  await assert.rejects(s.service.directory(OWNER), refused(404, "not_found"));
+  await assert.rejects(s.service.directory(OWNER, { limit: "0", cursor: "!" }), refused(404, "not_found"));
+  assert.equal(s.manage.calls.length, calls);
+  assert.equal((await s.service.stations(OWNER)).stations.length, 1, "the browser's list is as it was");
+});
+
+test("directory pages through Stations created in the same millisecond, whatever the microseconds, without a repeat or a skip", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const second = await s.register(OWNER, "https://two.example");
+  const third = await s.register(OWNER, "https://three.example");
+  const fourth = await s.register(OWNER, "https://four.example");
+  // st1 (the setup's Station) and the three above: the same shown millisecond, the stored microseconds against the id order.
+  for (const [id, created] of [[s.station.id, "2026-09-01 00:00:00.123789+00"], [second.id, "2026-09-01 00:00:00.123456+00"], [third.id, "2026-09-01 00:00:00.123000+00"], [fourth.id, "2026-09-01 00:00:00.124000+00"]]) {
+    await s.db.pool.query("UPDATE stations SET created_at = $2 WHERE id = $1", [id, created]);
+  }
+  const whole = await s.service.directory(OWNER);
+  assert.deepEqual(whole.stations.map((entry) => entry.id), [s.station.id, second.id, third.id, fourth.id], "the same shown millisecond is ordered by id");
+  assert.deepEqual(whole.stations.map((entry) => entry.createdAt), ["2026-09-01T00:00:00.123Z", "2026-09-01T00:00:00.123Z", "2026-09-01T00:00:00.123Z", "2026-09-01T00:00:00.124Z"]);
+  for (const limit of [1, 2, 3]) assert.deepEqual((await pages(s, OWNER, limit)).flatMap((page) => page.stations), whole.stations, "limit " + limit);
+});

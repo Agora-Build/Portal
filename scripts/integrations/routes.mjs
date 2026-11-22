@@ -160,6 +160,12 @@ export async function handleIntegrations({ path, method, url, read, service, cal
     return ok(await service.revokeNative(accountId, integration[1], { interruptRunning: (await read()).interruptRunning, clientId: caller.clientId }));
   }
 
+  // Astation's Station directory (D29, issue 40): the Stations the account can use and those it lost in the last 30 days, in
+  // pages. The browser's list, below, is the same path without a token.
+  if (delegatedHostWork && path === "/api/stations" && method === "GET" && caller) {
+    return ok(await service.directory(listing("stations", scoped("integrations:read")), { cursor: url.searchParams.get("cursor"), limit: url.searchParams.get("limit") }));
+  }
+
   // Everything below is for the browser session only.
   if (path === "/api/stations" && method === "GET") return ok(await service.stations(listing("stations", await portalUser())));
   if (path === "/api/stations/challenges" && method === "POST") {
