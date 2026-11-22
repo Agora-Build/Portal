@@ -503,3 +503,378 @@ test("a revocation's hosts are recorded once each, per integration, and read bac
   assert.deepEqual(rows, [{ record_id: "0f8a1b2c-3d4e-4f50-8a6b-7c8d9e0f1a2b", report_id: "r-laptop" }], "the first report's ids stand");
   assert.equal(await record("i-1", "Laptop"), true, "host names are compared as sent");
 });
+
+test("an event may name no account: an account-level entry such as accounts_baseline is read back with accountId null", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  await station(repo, "st1");
+  const append = (accountId) => db.transaction((client) => repo.appendEvent({ stationId: "st1", accountId, actor: "system", kind: accountId === null ? "accounts_baseline" : "account_disabled", details: { authCursor: "YzEy" } }, client));
+  await append("ab1");
+  await append(null);
+  const feed = await repo.changesSince("st1", 0);
+  assert.deepEqual(feed.map((event) => [event.kind, event.accountId]), [["account_disabled", "ab1"], ["accounts_baseline", null]]);
+  assert.deepEqual(feed[1].details, { authCursor: "YzEy" });
+  // Leaving the account out is a mistake, not "no account": the column used to refuse it, and null is now said on purpose.
+  await assert.rejects(db.transaction((client) => repo.appendEvent({ stationId: "st1", actor: "system", kind: "account_disabled" }, client)), TypeError);
+  assert.equal((await repo.changesSince("st1", 0)).length, 2, "nothing was written");
+});
+
+test("an entry of Auth's account feed is applied once, by its cursor and time", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  const at = "2026-11-10T10:00:00.000Z";
+  const entry = { cursor: "YzEy", at, account: "ab1", kind: "account_disabled" };
+  assert.equal(await repo.applyAccountEntry(entry), true);
+  assert.equal(await repo.applyAccountEntry(entry), false, "read again: skipped");
+  assert.equal(await repo.applyAccountEntry({ ...entry, account: "ab2", kind: "account_enabled" }), false, "the key is the cursor and time, whatever else is claimed");
+  assert.equal(await repo.applyAccountEntry({ ...entry, at: "2026-11-10T11:00:00.000Z" }), true, "the same cursor at another time (Auth restored from a backup) is another entry");
+  assert.equal(await repo.applyAccountEntry({ ...entry, cursor: "YzEz", account: null, kind: "accounts_baseline" }), true, "a baseline names no account");
+  const { rows } = await db.pool.query("SELECT auth_cursor, auth_at, account_id, kind FROM auth_account_entries ORDER BY auth_cursor, auth_at");
+  assert.deepEqual(rows.map((row) => [row.auth_cursor, row.auth_at.toISOString(), row.account_id, row.kind]), [
+    ["YzEy", at, "ab1", "account_disabled"],
+    ["YzEy", "2026-11-10T11:00:00.000Z", "ab1", "account_disabled"],
+    ["YzEz", at, null, "accounts_baseline"]
+  ], "the first entry stands");
+  await db.transaction(async (client) => {
+    assert.equal(await repo.applyAccountEntry({ ...entry, cursor: "YzE0" }, client), true, "inside a transaction");
+    assert.equal(await repo.applyAccountEntry({ ...entry, cursor: "YzE0" }, client), false);
+  });
+  // A time or cursor that is left out or malformed must not apply as "now" or as nothing: the key would not be Auth's.
+  await assert.rejects(repo.applyAccountEntry({ ...entry, at: undefined }), TypeError);
+  await assert.rejects(repo.applyAccountEntry({ ...entry, at: "not a time" }), TypeError);
+  await assert.rejects(repo.applyAccountEntry({ ...entry, cursor: "has space" }), TypeError);
+  await assert.rejects(repo.applyAccountEntry({ ...entry, cursor: undefined }), TypeError);
+  assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM auth_account_entries")).rows[0].n, 4);
+});
+
+test("an account's availability is the latest applied entry's; the disabled ones are listed in order", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  assert.deepEqual(await repo.disabledAccountList(), []);
+  await repo.setAvailability("ab3", true, "YzE1", "2026-11-10T10:00:00.000Z");
+  await repo.setAvailability("ab1", true, "YzE2", "2026-11-10T10:01:00.000Z");
+  await repo.setAvailability("ab2", false, "YzE3", "2026-11-10T10:02:00.000Z");
+  assert.deepEqual(await repo.disabledAccountList(), ["ab1", "ab3"], "ordered, enabled accounts left out");
+  await repo.setAvailability("ab1", false, "YzE8", "2026-11-10T10:03:00.000Z");
+  await repo.setAvailability("ab2", true, "YzE9", "2026-11-10T10:04:00.000Z");
+  assert.deepEqual(await repo.disabledAccountList(), ["ab2", "ab3"], "an upsert: the latest entry for an account says");
+  const { rows } = await db.pool.query("SELECT account_id, disabled, auth_cursor, auth_at FROM account_availability ORDER BY account_id");
+  assert.deepEqual(rows.map((row) => [row.account_id, row.disabled, row.auth_cursor, row.auth_at.toISOString()]), [
+    ["ab1", false, "YzE8", "2026-11-10T10:03:00.000Z"],
+    ["ab2", true, "YzE9", "2026-11-10T10:04:00.000Z"],
+    ["ab3", true, "YzE1", "2026-11-10T10:00:00.000Z"]
+  ], "one row per account, with the entry that set it");
+  await db.transaction(async (client) => {
+    await repo.setAvailability("ab4", true, "YzFh", "2026-11-10T10:05:00.000Z", client);
+    assert.deepEqual(await repo.disabledAccountList(client), ["ab2", "ab3", "ab4"], "inside a transaction");
+  });
+  await assert.rejects(db.transaction(async (client) => {
+    await repo.setAvailability("ab5", true, "YzFi", "2026-11-10T10:06:00.000Z", client);
+    throw new Error("stop");
+  }), /stop/);
+  assert.deepEqual(await repo.disabledAccountList(), ["ab2", "ab3", "ab4"], "rolled back with the transaction");
+  await assert.rejects(repo.setAvailability("ab6", "yes", "YzFj", "2026-11-10T10:07:00.000Z"), TypeError, "disabled is a boolean");
+  await assert.rejects(repo.setAvailability("ab6", true, "YzFj", undefined), TypeError);
+  await assert.rejects(repo.setAvailability("ab6", true, "bad cursor", "2026-11-10T10:07:00.000Z"), TypeError);
+});
+
+test("the accounts baseline mark is set once an accounts_baseline is applied and cleared by a skipped account entry", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  assert.equal(await repo.baselineApplied(), false, "no mark before the first baseline");
+  await repo.setBaseline("YzEy", "2026-11-10T10:00:00.000Z");
+  assert.equal(await repo.baselineApplied(), true);
+  await repo.setBaseline("YzEz", "2026-11-11T10:00:00.000Z");
+  const { rows } = await db.pool.query("SELECT id, auth_cursor, auth_at FROM account_baseline");
+  assert.deepEqual(rows.map((row) => [row.id, row.auth_cursor, row.auth_at.toISOString()]), [[true, "YzEz", "2026-11-11T10:00:00.000Z"]], "one row, the newest baseline");
+  await repo.clearBaseline();
+  assert.equal(await repo.baselineApplied(), false);
+  await repo.clearBaseline();
+  assert.equal(await repo.baselineApplied(), false, "clearing a mark that isn't there is fine");
+  await repo.setBaseline("YzE0", "2026-11-12T10:00:00.000Z");
+  await db.transaction(async (client) => {
+    assert.equal(await repo.baselineApplied(client), true, "inside a transaction");
+    await repo.clearBaseline(client);
+    assert.equal(await repo.baselineApplied(client), false);
+    await repo.setBaseline("YzE1", "2026-11-13T10:00:00.000Z", client);
+    assert.equal(await repo.baselineApplied(client), true);
+  });
+  await assert.rejects(repo.setBaseline("YzE6", undefined), TypeError);
+  await assert.rejects(repo.setBaseline("bad cursor", "2026-11-13T10:00:00.000Z"), TypeError);
+  assert.equal(await repo.baselineApplied(), true);
+});
+
+const bindingFields = (extra = {}) => ({ stationId: "st1", r9AccountId: "r9-1", genesisHash: "a".repeat(64), accountId: "ab1", bindingId: "b-1", version: 1, bindingState: "bound", reportId: "rep-1", ...extra });
+
+test("a built-in Station's binding is kept per R9 account and genesis: the first is saved, a later one replaces it", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  assert.equal(await repo.binding("st1", "r9-1", "a".repeat(64)), null);
+  await db.transaction((client) => repo.saveBinding(bindingFields(), client));
+  const first = await repo.binding("st1", "r9-1", "a".repeat(64));
+  assert.deepEqual({ ...first, updatedAt: typeof first.updatedAt }, { ...bindingFields(), updatedAt: "string" });
+  assert.equal(typeof first.version, "number", "bigint comes back as a number, not the driver's string");
+  await db.transaction((client) => repo.saveBinding(bindingFields({ accountId: "ab2", bindingId: "b-2", version: 2, bindingState: "released", reportId: "rep-2" }), client));
+  const second = await repo.binding("st1", "r9-1", "a".repeat(64));
+  assert.deepEqual([second.accountId, second.bindingId, second.version, second.bindingState, second.reportId], ["ab2", "b-2", 2, "released", "rep-2"], "an upsert: one row per key");
+  assert.ok(Date.parse(second.updatedAt) >= Date.parse(first.updatedAt));
+  assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM station_bindings")).rows[0].n, 1);
+  assert.equal(await repo.binding("st1", "r9-2", "a".repeat(64)), null, "another R9 account");
+  assert.equal(await repo.binding("st1", "r9-1", "b".repeat(64)), null, "another genesis");
+  assert.equal(await repo.binding("st2", "r9-1", "a".repeat(64)), null, "another Station");
+  await db.transaction(async (client) => assert.equal((await repo.binding("st1", "r9-1", "a".repeat(64), client)).bindingId, "b-2", "inside a transaction"));
+  for (const version of [0, -1, 1.5, 2 ** 53, "3", undefined]) await assert.rejects(db.transaction((client) => repo.saveBinding(bindingFields({ version }), client)), TypeError, "version " + String(version));
+  await assert.rejects(db.transaction((client) => repo.saveBinding(bindingFields({ bindingState: "revoked" }), client)), { code: "23514" });
+  assert.equal((await repo.binding("st1", "r9-1", "a".repeat(64))).version, 2, "refused writes change nothing");
+  const big = 2 ** 53 - 1;
+  await db.transaction((client) => repo.saveBinding(bindingFields({ r9AccountId: "r9-big", version: big }), client));
+  assert.equal((await repo.binding("st1", "r9-big", "a".repeat(64))).version, big, "the largest safe version is read back exactly");
+});
+
+test("a Station's bindings are listed by R9 account, then genesis, for that Station only", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  const save = (extra) => db.transaction((client) => repo.saveBinding(bindingFields(extra), client));
+  assert.deepEqual(await repo.bindingsOn("st1"), []);
+  await save({ r9AccountId: "r9-b", genesisHash: "c".repeat(64), bindingId: "b-3" });
+  await save({ r9AccountId: "r9-a", genesisHash: "d".repeat(64), bindingId: "b-4" });
+  await save({ r9AccountId: "r9-b", genesisHash: "a".repeat(64), bindingId: "b-5" });
+  await save({ r9AccountId: "r9-a", genesisHash: "b".repeat(64), bindingId: "b-6", bindingState: "unbound", version: 7 });
+  await save({ stationId: "st2", r9AccountId: "r9-0", bindingId: "b-7" });
+  const list = await repo.bindingsOn("st1");
+  assert.deepEqual(list.map((row) => [row.r9AccountId, row.genesisHash[0], row.bindingId]), [["r9-a", "b", "b-6"], ["r9-a", "d", "b-4"], ["r9-b", "a", "b-5"], ["r9-b", "c", "b-3"]]);
+  assert.deepEqual([list[0].stationId, list[0].accountId, list[0].version, list[0].bindingState], ["st1", "ab1", 7, "unbound"], "an unbound binding is still listed");
+  assert.deepEqual((await repo.bindingsOn("st2")).map((row) => row.bindingId), ["b-7"]);
+  await db.transaction(async (client) => assert.equal((await repo.bindingsOn("st1", client)).length, 4, "inside a transaction"));
+});
+
+test("a refused binding attempt is kept once per Station and report id, and listed for the account it protects since a time, newest first", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  const attempt = (extra) => ({ stationId: "st1", reportId: "rep-1", accountId: "ab1", r9AccountId: "r9-1", genesisHash: "a".repeat(64), reason: "bound_elsewhere", attemptedAt: later(-3 * 86400000).toISOString(), ...extra });
+  const save = (extra) => db.transaction((client) => repo.saveBindingAttempt(attempt(extra), client));
+  assert.deepEqual(await repo.bindingAttemptsFor("ab1", later(-30 * 86400000)), []);
+  await save();
+  await save({ reportId: "rep-2", reason: "owner_disabled", attemptedAt: later(-1 * 86400000).toISOString(), r9AccountId: "r9-2" });
+  await save({ reportId: "rep-3", attemptedAt: later(-40 * 86400000).toISOString() });
+  await save({ reportId: "rep-4", accountId: "ab2", attemptedAt: later(-1000).toISOString() });
+  await save({ stationId: "st2", reportId: "rep-1", attemptedAt: later(-2 * 86400000).toISOString() });
+  const since = later(-30 * 86400000);
+  const mine = await repo.bindingAttemptsFor("ab1", since);
+  assert.deepEqual(mine.map((row) => [row.stationId, row.reportId, row.reason, row.r9AccountId]), [["st1", "rep-2", "owner_disabled", "r9-2"], ["st2", "rep-1", "bound_elsewhere", "r9-1"], ["st1", "rep-1", "bound_elsewhere", "r9-1"]], "this account's, newer than the cut-off, newest first");
+  assert.deepEqual(Object.keys(mine[0]).sort(), ["accountId", "attemptedAt", "genesisHash", "r9AccountId", "reason", "recordedAt", "reportId", "stationId"]);
+  assert.deepEqual([mine[2].accountId, mine[2].genesisHash, mine[2].attemptedAt], ["ab1", "a".repeat(64), later(-3 * 86400000).toISOString()]);
+  assert.ok(!mine.some((row) => row.accountId !== "ab1"), "never another account's");
+  assert.deepEqual((await repo.bindingAttemptsFor("ab2", since)).map((row) => row.reportId), ["rep-4"]);
+  assert.deepEqual((await repo.bindingAttemptsFor("ab1", later(-3 * 86400000))).map((row) => row.reportId), ["rep-2", "rep-1", "rep-1"], "the cut-off time itself counts");
+  assert.equal((await repo.bindingAttemptsFor("ab1", later(-40 * 86400000))).length, 4, "an earlier cut-off reaches further back");
+  assert.deepEqual(await repo.bindingAttemptsFor("ab9", since), []);
+  await db.transaction(async (client) => assert.equal((await repo.bindingAttemptsFor("ab1", since, client)).length, 3, "inside a transaction"));
+  // The report id is kept once per Station: the caller looked it up first, so a second save is a mistake, not a replacement.
+  await assert.rejects(save({ accountId: "ab2" }), { code: "23505" });
+  await assert.rejects(save({ reportId: "rep-9", reason: "other" }), { code: "23514" });
+  assert.equal((await repo.bindingAttemptsFor("ab1", since)).length, 3);
+});
+
+// The Station directory (directoryFor): what an account may use now, and what it lost within the retention window.
+const DAY = 86400000;
+const CUTOFF = new Date(NOW - 30 * DAY);
+const daysAgo = (days) => new Date(NOW - days * DAY);
+
+// A Station with an explicit creation time (the order is by it), as a custom one owned by `owner` or, with builtIn, the built-in one.
+async function dated(repo, db, id, createdDaysAgo, { owner = "ab2", builtIn = false } = {}) {
+  await repo.insertStation(builtIn
+    ? { id, origin: "https://" + id + ".example", ownerAccount: null, reportClientId: "s-" + id, verifiedAt: NOW, builtIn: true, name: "Built-in " + id }
+    : { id, origin: "https://" + id + ".example", ownerAccount: owner, reportClientId: "s-" + id, verifiedAt: NOW });
+  await db.pool.query("UPDATE stations SET created_at = $2 WHERE id = $1", [id, daysAgo(createdDaysAgo)]);
+}
+
+const shape = (rows) => rows.map((row) => [row.id, row.role, row.status, row.membership]);
+
+test("directoryFor lists the built-in Stations first, then what the account owns and belongs to, by creation time and id", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  await dated(repo, db, "st-own", 90, { owner: "ab1" });
+  await dated(repo, db, "st-mem", 80);
+  await dated(repo, db, "st-b2", 50, { builtIn: true });
+  await dated(repo, db, "st-b1", 100, { builtIn: true });
+  await dated(repo, db, "st-other", 70, { owner: "ab3" });
+  await dated(repo, db, "st-theirs", 60, { owner: "ab2" });
+  await repo.addMember("st-mem", "ab1", "ab2", daysAgo(75));
+  await repo.addMember("st-theirs", "ab3", "ab2", daysAgo(55));
+  const rows = await repo.directoryFor("ab1", { lostSince: CUTOFF, limit: 100 });
+  assert.deepEqual(shape(rows), [["st-b1", "built_in", "active", null], ["st-b2", "built_in", "active", null], ["st-own", "owner", "active", null], ["st-mem", "member", "active", "current"]],
+    "built-in first even though the owned Station is older than one, then by creation; another account's Stations, and a Station it has no part in, are not listed");
+  const [builtIn, owned, member] = [rows[0], rows[2], rows[3]];
+  assert.deepEqual([builtIn.builtIn, builtIn.access, builtIn.name, builtIn.removedAt, builtIn.membershipEndedAt, builtIn.integrationsEnabled, builtIn.createdAt], [true, "any_account", "Built-in st-b1", null, null, true, daysAgo(100).toISOString()]);
+  assert.deepEqual([owned.builtIn, owned.access, owned.name, owned.origin, owned.removedAt, owned.membership, owned.membershipEndedAt], [false, "members", null, "https://st-own.example", null, null, null]);
+  assert.deepEqual([member.role, member.membership, member.membershipEndedAt, member.removedAt], ["member", "current", null, null]);
+  // Each row is a whole Station row too, so the service can answer with the directory's fields.
+  assert.deepEqual(Object.keys(member).sort(), ["access", "builtIn", "createdAt", "id", "integrationsEnabled", "membership", "membershipEndedAt", "name", "origin", "ownerAccount", "removedAt", "reportClientId", "role", "status", "verifiedAt"]);
+  // The account that owns and belongs to nothing gets the built-in Stations alone.
+  assert.deepEqual(shape(await repo.directoryFor("ab9", { lostSince: CUTOFF, limit: 100 })), [["st-b1", "built_in", "active", null], ["st-b2", "built_in", "active", null]]);
+  assert.deepEqual(shape(await repo.directoryFor("ab3", { lostSince: CUTOFF, limit: 100 })), [["st-b1", "built_in", "active", null], ["st-b2", "built_in", "active", null], ["st-other", "owner", "active", null], ["st-theirs", "member", "active", "current"]]);
+  // The same Stations as the browser list when nothing was lost.
+  assert.deepEqual((await repo.stationsFor("ab1")).map((row) => [row.id, row.role]), shape(rows).map(([id, role]) => [id, role]));
+});
+
+test("directoryFor: the built-in Station has no members and an owner is not a member, even with a stray membership row", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  await dated(repo, db, "st-b", 100, { builtIn: true });
+  await dated(repo, db, "st-own", 90, { owner: "ab1" });
+  await repo.addMember("st-b", "ab1", "ab9", daysAgo(50));
+  await repo.addMember("st-own", "ab1", "ab9", daysAgo(50));
+  await repo.removeMember("st-own", "ab1", "ab9", daysAgo(5));
+  let rows = await repo.directoryFor("ab1", { lostSince: CUTOFF, limit: 100 });
+  assert.deepEqual(shape(rows), [["st-b", "built_in", "active", null], ["st-own", "owner", "active", null]], "role built_in or owner; membership null, and no ended-membership row for a Station the account still owns");
+  assert.deepEqual(rows.map((row) => row.membershipEndedAt), [null, null]);
+  await repo.markStationRemoved("st-own", daysAgo(4));
+  rows = await repo.directoryFor("ab1", { lostSince: CUTOFF, limit: 100 });
+  assert.deepEqual(shape(rows), [["st-b", "built_in", "active", null], ["st-own", "owner", "removed", null]], "an owner's removed Station: role owner, never a member's ended membership");
+  assert.equal(rows[1].removedAt, daysAgo(4).toISOString());
+  assert.equal(rows[1].membershipEndedAt, null);
+});
+
+test("directoryFor says a lost Station was lost for 30 days: a removed one, an ended membership, both, and not after", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  const member = async (id, createdDaysAgo, endedDaysAgo = null, who = "ab1") => {
+    await dated(repo, db, id, createdDaysAgo);
+    await repo.addMember(id, who, "ab2", daysAgo(createdDaysAgo - 1));
+    if (endedDaysAgo !== null) await repo.removeMember(id, who, "ab2", daysAgo(endedDaysAgo));
+  };
+  await dated(repo, db, "st-owned-removed", 100, { owner: "ab1" });
+  await repo.markStationRemoved("st-owned-removed", daysAgo(5));
+  await dated(repo, db, "st-owned-removed-old", 99, { owner: "ab1" });
+  await repo.markStationRemoved("st-owned-removed-old", daysAgo(31));
+  await member("st-ended", 98, 10);
+  await member("st-ended-old", 97, 31);
+  await member("st-member-removed", 96);
+  await repo.markStationRemoved("st-member-removed", daysAgo(3));
+  await member("st-member-removed-old", 95);
+  await repo.markStationRemoved("st-member-removed-old", daysAgo(40));
+  await member("st-both", 94, 10);
+  await repo.markStationRemoved("st-both", daysAgo(5));
+  await member("st-both-old", 93, 40);
+  await repo.markStationRemoved("st-both-old", daysAgo(35));
+  await member("st-left-before-removal", 92, 40);
+  await repo.markStationRemoved("st-left-before-removal", daysAgo(5));
+  // Another account's losses are not this account's.
+  await dated(repo, db, "st-other-removed", 91, { owner: "ab3" });
+  await repo.markStationRemoved("st-other-removed", daysAgo(1));
+  await member("st-other-ended", 90, 1, "ab3");
+  const rows = await repo.directoryFor("ab1", { lostSince: CUTOFF, limit: 100 });
+  assert.deepEqual(shape(rows), [
+    ["st-owned-removed", "owner", "removed", null],
+    ["st-ended", "member", "active", "ended"],
+    ["st-member-removed", "member", "removed", "current"],
+    ["st-both", "member", "removed", "ended"]
+  ], "a removed Station it owned or belonged to, an ended membership on an active Station, and for both the removal; none lost more than 30 days ago, none of another account's");
+  const byId = Object.fromEntries(rows.map((row) => [row.id, row]));
+  assert.deepEqual([byId["st-owned-removed"].removedAt, byId["st-owned-removed"].membershipEndedAt], [daysAgo(5).toISOString(), null]);
+  assert.deepEqual([byId["st-ended"].removedAt, byId["st-ended"].membershipEndedAt], [null, daysAgo(10).toISOString()]);
+  assert.deepEqual([byId["st-member-removed"].removedAt, byId["st-member-removed"].membershipEndedAt], [daysAgo(3).toISOString(), null], "its membership never ended: the Station was removed under it");
+  assert.deepEqual([byId["st-both"].removedAt, byId["st-both"].membership, byId["st-both"].membershipEndedAt], [daysAgo(5).toISOString(), "ended", daysAgo(10).toISOString()], "the removal is reported, with when the membership ended as well");
+  // The window follows lostSince. A Station is lost when the account lost it: for a member who left before the Station
+  // was removed, that is when they left.
+  assert.deepEqual((await repo.directoryFor("ab1", { lostSince: daysAgo(32), limit: 100 })).map((row) => row.id),
+    ["st-owned-removed", "st-owned-removed-old", "st-ended", "st-ended-old", "st-member-removed", "st-both"]);
+  assert.deepEqual((await repo.directoryFor("ab1", { lostSince: daysAgo(60), limit: 100 })).map((row) => row.id),
+    ["st-owned-removed", "st-owned-removed-old", "st-ended", "st-ended-old", "st-member-removed", "st-member-removed-old", "st-both", "st-both-old", "st-left-before-removal"]);
+  assert.deepEqual((await repo.directoryFor("ab1", { lostSince: daysAgo(1), limit: 100 })).map((row) => row.id), [], "nothing was lost in the last day");
+});
+
+test("directoryFor counts a loss at exactly lostSince, and not a moment earlier", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  await dated(repo, db, "st-1", 50, { owner: "ab1" });
+  await dated(repo, db, "st-2", 49, { owner: "ab1" });
+  await dated(repo, db, "st-3", 48);
+  await dated(repo, db, "st-4", 47);
+  await repo.markStationRemoved("st-1", CUTOFF);
+  await repo.markStationRemoved("st-2", new Date(CUTOFF.getTime() - 1));
+  for (const id of ["st-3", "st-4"]) await repo.addMember(id, "ab1", "ab2", daysAgo(45));
+  await repo.removeMember("st-3", "ab1", "ab2", CUTOFF);
+  await repo.removeMember("st-4", "ab1", "ab2", new Date(CUTOFF.getTime() - 1));
+  assert.deepEqual((await repo.directoryFor("ab1", { lostSince: CUTOFF, limit: 100 })).map((row) => row.id), ["st-1", "st-3"]);
+});
+
+test("directoryFor pages by keyset: limit + 1 rows say whether there is more, and every page continues exactly after the last row seen", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  await dated(repo, db, "st-b", 100, { builtIn: true });
+  await dated(repo, db, "st-own", 90, { owner: "ab1" });
+  await dated(repo, db, "st-mem", 80);
+  await repo.addMember("st-mem", "ab1", "ab2", daysAgo(70));
+  await dated(repo, db, "st-lost", 70, { owner: "ab1" });
+  await repo.markStationRemoved("st-lost", daysAgo(2));
+  await dated(repo, db, "st-ended", 60);
+  await repo.addMember("st-ended", "ab1", "ab2", daysAgo(55));
+  await repo.removeMember("st-ended", "ab1", "ab2", daysAgo(2));
+  const expected = ["st-b", "st-own", "st-mem", "st-lost", "st-ended"];
+  assert.deepEqual((await repo.directoryFor("ab1", { lostSince: CUTOFF, limit: 100 })).map((row) => row.id), expected);
+  assert.equal((await repo.directoryFor("ab1", { lostSince: CUTOFF, limit: 5 })).length, 5, "exactly a page and no more: no extra row");
+  assert.deepEqual((await repo.directoryFor("ab1", { lostSince: CUTOFF, limit: 2 })).map((row) => row.id), ["st-b", "st-own", "st-mem"], "limit + 1");
+  const pages = [];
+  let after;
+  for (;;) {
+    const rows = await repo.directoryFor("ab1", { lostSince: CUTOFF, after, limit: 1 });
+    pages.push(rows.map((row) => row.id));
+    if (rows.length < 2) break;
+    after = { builtIn: rows[0].builtIn, createdAt: rows[0].createdAt, id: rows[0].id };
+  }
+  assert.deepEqual(pages, [["st-b", "st-own"], ["st-own", "st-mem"], ["st-mem", "st-lost"], ["st-lost", "st-ended"], ["st-ended"]], "every page's last row is the next page's first, and the last page has no extra");
+  // After the built-in Station the rest follow, after any row of the rest only later ones do, and after the last none.
+  const rest = async (row) => (await repo.directoryFor("ab1", { lostSince: CUTOFF, after: { builtIn: row.builtIn, createdAt: row.createdAt, id: row.id }, limit: 100 })).map((r) => r.id);
+  const all = await repo.directoryFor("ab1", { lostSince: CUTOFF, limit: 100 });
+  assert.deepEqual(await rest(all[0]), expected.slice(1));
+  assert.deepEqual(await rest(all[2]), expected.slice(3));
+  assert.deepEqual(await rest(all[4]), []);
+  // A cursor may name a Station that is no longer listed: the order is by the key, not by the row.
+  assert.deepEqual((await repo.directoryFor("ab1", { lostSince: CUTOFF, after: { builtIn: false, createdAt: daysAgo(85).toISOString(), id: "st-gone" }, limit: 100 })).map((r) => r.id), ["st-mem", "st-lost", "st-ended"]);
+  assert.deepEqual((await repo.directoryFor("ab1", { lostSince: CUTOFF, after: { builtIn: true, createdAt: daysAgo(500).toISOString(), id: "st-gone" }, limit: 100 })).map((r) => r.id), expected, "after a built-in Station that sorts before st-b, st-b and everything else follow");
+  await db.transaction(async (client) => assert.equal((await repo.directoryFor("ab1", { lostSince: CUTOFF, limit: 1 }, client)).length, 2, "inside a transaction"));
+});
+
+// The cursor carries a Station's createdAt as the directory shows it: to the millisecond. A creation time with
+// microseconds (now() has them) must order and page by that same value, or a page repeats a row or skips one.
+test("directoryFor orders and pages by createdAt as shown, to the millisecond, then id, whatever the microseconds", async (t) => {
+  const { repo, db } = await setup(t);
+  if (!repo) return;
+  for (const [id, created] of [["st-a", "2026-09-01 00:00:00.123789+00"], ["st-b", "2026-09-01 00:00:00.123456+00"], ["st-c", "2026-09-01 00:00:00.124000+00"], ["st-d", "2026-09-01 00:00:00.122999+00"], ["st-e", "2026-09-01 00:00:00.123000+00"]]) {
+    await repo.insertStation({ id, origin: "https://" + id + ".example", ownerAccount: "ab1", reportClientId: "s-" + id, verifiedAt: NOW });
+    await db.pool.query("UPDATE stations SET created_at = $2 WHERE id = $1", [id, created]);
+  }
+  const all = await repo.directoryFor("ab1", { lostSince: CUTOFF, limit: 100 });
+  assert.deepEqual(all.map((row) => [row.id, row.createdAt]), [
+    ["st-d", "2026-09-01T00:00:00.122Z"],
+    ["st-a", "2026-09-01T00:00:00.123Z"],
+    ["st-b", "2026-09-01T00:00:00.123Z"],
+    ["st-e", "2026-09-01T00:00:00.123Z"],
+    ["st-c", "2026-09-01T00:00:00.124Z"]
+  ], "the same millisecond is ordered by id, not by the microseconds that are not shown");
+  const seen = [];
+  let after;
+  for (let guard = 0; guard < 10; guard += 1) {
+    const rows = await repo.directoryFor("ab1", { lostSince: CUTOFF, after, limit: 1 });
+    seen.push(rows[0].id);
+    if (rows.length < 2) break;
+    after = { builtIn: rows[0].builtIn, createdAt: rows[0].createdAt, id: rows[0].id };
+  }
+  assert.deepEqual(seen, ["st-d", "st-a", "st-b", "st-e", "st-c"], "paging one at a time visits each Station once");
+});
+
+test("directoryFor refuses what it cannot page by: a missing lostSince, a bad limit, a bad after", async (t) => {
+  const { repo } = await setup(t);
+  if (!repo) return;
+  const good = { lostSince: CUTOFF, limit: 10 };
+  await repo.directoryFor("ab1", good);
+  await assert.rejects(repo.directoryFor("ab1", { limit: 10 }), TypeError, "no window would list nothing lost, or everything, by accident");
+  await assert.rejects(repo.directoryFor("ab1", { ...good, lostSince: "yesterday" }), TypeError);
+  for (const limit of [0, -1, 1.5, "10", NaN, undefined]) await assert.rejects(repo.directoryFor("ab1", { ...good, limit }), TypeError, String(limit));
+  const after = { builtIn: false, createdAt: "2026-09-01T00:00:00.000Z", id: "st-1" };
+  await repo.directoryFor("ab1", { ...good, after });
+  await repo.directoryFor("ab1", { ...good, after: null });
+  for (const bad of [{ ...after, builtIn: "false" }, { ...after, createdAt: "soon" }, { ...after, createdAt: undefined }, { ...after, id: 5 }, { ...after, id: undefined }, "st-1", []]) await assert.rejects(repo.directoryFor("ab1", { ...good, after: bad }), TypeError, JSON.stringify(bad));
+});

@@ -32,6 +32,21 @@ function cursorNumber(cursor) {
 
 // Auth's change feed cursor: opaque to the Portal, base64url as Auth hands it out.
 export const AUTH_CURSOR = /^[A-Za-z0-9_-]{1,64}$/;
+
+// A cursor of Auth's feed that is kept as a key: a missing or malformed one is a mistake, not "no cursor".
+function authCursorOf(cursor) {
+  if (typeof cursor !== "string" || !AUTH_CURSOR.test(cursor)) throw new TypeError("An Auth change cursor is 1 to 64 base64url characters.");
+  return cursor;
+}
+
+// A time that has to be given, as a Date. when() reads a missing time as now, which would make a key or a window
+// something the caller never said.
+function timeOf(value, name) {
+  const date = value === undefined || value === null ? null : new Date(value);
+  if (date === null || Number.isNaN(date.getTime())) throw new TypeError(name + " must be a time.");
+  return date;
+}
+
 // A time as toISOString writes it, which is all the Portal keeps in an event's details (authAt, which applyAuthChange
 // takes only in that form, and seenAt): latestStatus casts only such strings, so a stored value can't make it fail.
 const ISO_TIME = "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$";
@@ -86,11 +101,42 @@ function eventRow(row) {
     id: Number(row.id),
     at: iso(row.at),
     integrationId: row.integration_id,
-    accountId: row.account_id,
+    // An account-level event such as accounts_baseline names no account.
+    accountId: row.account_id ?? null,
     kind: row.kind,
     state: row.state,
     reason: row.reason,
     details: row.details
+  };
+}
+
+// A built-in Station's recorded binding. `accountId` is the Agora.Build account that owns it (the report's `account`) and
+// `r9AccountId` the R9 account (the report's `accountId`). The version is a bigint: it is read back as a number, which is
+// exact because only a safe integer is saved.
+function bindingRow(row) {
+  return {
+    stationId: row.station_id,
+    r9AccountId: row.r9_account_id,
+    genesisHash: row.genesis_hash,
+    accountId: row.account_id,
+    bindingId: row.binding_id,
+    version: Number(row.version),
+    bindingState: row.binding_state,
+    reportId: row.report_id,
+    updatedAt: iso(row.updated_at)
+  };
+}
+
+function bindingAttemptRow(row) {
+  return {
+    stationId: row.station_id,
+    reportId: row.report_id,
+    accountId: row.account_id,
+    r9AccountId: row.r9_account_id,
+    genesisHash: row.genesis_hash,
+    reason: row.reason,
+    attemptedAt: iso(row.attempted_at),
+    recordedAt: iso(row.recorded_at)
   };
 }
 
@@ -143,6 +189,53 @@ export function createRepository(db) {
         "SELECT s.*, CASE WHEN s.built_in THEN 'built_in' WHEN s.owner_account = $1 THEN 'owner' ELSE 'member' END AS role FROM stations s WHERE s.status = 'active' AND (s.built_in OR s.owner_account = $1 OR EXISTS (SELECT 1 FROM station_members m WHERE m.station_id = s.id AND m.account_id = $1 AND m.removed_at IS NULL)) ORDER BY s.built_in DESC, s.created_at, s.id",
         [accountId]);
       return rows.map((row) => ({ ...stationRow(row), role: row.role }));
+    },
+
+    // The Station directory of one account (GET /api/v1/stations): the active Stations it can use now, as stationsFor has
+    // them, and the ones it lost at or after `lostSince`, each saying so. Rows are in the directory's order, the
+    // built-in Stations first, then by createdAt and id, and carry stationRow's fields with `role`, `membership` and
+    // `membershipEndedAt` added:
+    //   - the built-in Station: role built_in, no membership (it has no members);
+    //   - a Station the account owns: role owner, no membership (an owner is not a member), even with a stray member row;
+    //   - any other Station it has a member row on: role member; membership "current" while a row of it is current,
+    //     and "ended" with the latest end otherwise.
+    // A Station is lost to the account when it is removed (status removed, removedAt: for an owner, or a member, current or
+    // not) or its membership ended (status active, membership ended). The loss is dated when the account lost it: the
+    // removal, or for a member whose membership ended, the earlier of the end and the removal. A Station removed after a
+    // member left it is still listed as removed, for as long as that departure is inside the window; for one with both,
+    // the removal is the status and the end is still given. A removed built-in Station is no one's loss.
+    //
+    // Paging is a keyset on (built_in DESC, createdAt, id): `after` is { builtIn, createdAt, id } of the last row of the
+    // page before (as that row gave them), or absent for the first page. The order and the keyset use createdAt as the
+    // rows show it, to the millisecond, so a cursor made from a row's own createdAt continues exactly after it however
+    // many microseconds the stored time has. The query asks for `limit + 1` rows: more than `limit` rows means there is a
+    // next page, which the caller cuts off.
+    async directoryFor(accountId, { lostSince, after = null, limit } = {}, client) {
+      const since = timeOf(lostSince, "lostSince");
+      if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError("limit must be a whole number, 1 or more.");
+      const values = [accountId, since, limit + 1];
+      let keyset = "";
+      if (after !== null && after !== undefined) {
+        if (typeof after !== "object" || Array.isArray(after) || typeof after.builtIn !== "boolean" || typeof after.id !== "string") throw new TypeError("after must be { builtIn, createdAt, id } of a listed Station.");
+        values.push(after.builtIn, timeOf(after.createdAt, "after.createdAt"), after.id);
+        keyset = " WHERE (d.built_in < $4 OR (d.built_in = $4 AND (d.created_ms, d.id) > ($5::timestamptz, $6::text)))";
+      }
+      const { rows } = await run(client,
+        "WITH mine AS (SELECT station_id, bool_or(removed_at IS NULL) AS is_current, max(removed_at) AS ended_at FROM station_members WHERE account_id = $1 GROUP BY station_id), " +
+        "listed AS (SELECT s.*, date_trunc('milliseconds', s.created_at) AS created_ms, " +
+        "CASE WHEN s.built_in THEN 'built_in' WHEN s.owner_account = $1 THEN 'owner' ELSE 'member' END AS role, " +
+        "CASE WHEN s.built_in OR s.owner_account = $1 THEN NULL WHEN m.is_current THEN 'current' ELSE 'ended' END AS membership, " +
+        "CASE WHEN s.built_in OR s.owner_account = $1 OR m.is_current THEN NULL ELSE m.ended_at END AS membership_ended_at " +
+        "FROM stations s LEFT JOIN mine m ON m.station_id = s.id WHERE CASE " +
+        "WHEN s.built_in THEN s.status = 'active' " +
+        "WHEN s.owner_account = $1 THEN (s.status = 'active' OR (s.status = 'removed' AND s.removed_at >= $2)) " +
+        "WHEN m.station_id IS NULL THEN false " +
+        "WHEN s.status = 'active' THEN (m.is_current OR m.ended_at >= $2) " +
+        "WHEN m.is_current THEN s.removed_at >= $2 " +
+        "ELSE LEAST(s.removed_at, m.ended_at) >= $2 END) " +
+        "SELECT d.* FROM listed d" + keyset + " ORDER BY d.built_in DESC, d.created_ms, d.id LIMIT $3",
+        values);
+      return rows.map((row) => ({ ...stationRow(row), role: row.role, membership: row.membership ?? null, membershipEndedAt: iso(row.membership_ended_at) ?? null }));
     },
 
     async builtInStations(client) {
@@ -275,6 +368,9 @@ export function createRepository(db) {
     // One advisory lock serialises appenders until commit, so id order is commit order and a feed cursor never skips.
     async appendEvent({ stationId, integrationId = null, accountId, actor, kind, state = null, reason = null, details = {} }, client) {
       if (!client) throw new TypeError("appendEvent needs a transaction client.");
+      // The column takes null for an account-level event that names no account (accounts_baseline); a missing account
+      // is a mistake, which the column's NOT NULL used to catch.
+      if (accountId === undefined) throw new TypeError("appendEvent needs an accountId, or null for an event that names none.");
       await client.query("SELECT pg_advisory_xact_lock(hashtext('portal_integration_events'))");
       const { rows } = await client.query(
         "INSERT INTO integration_events (station_id, integration_id, account_id, actor, kind, state, reason, details) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, at",
@@ -349,6 +445,85 @@ export function createRepository(db) {
     async latestEventId(client) {
       const { rows } = await run(client, "SELECT COALESCE(MAX(id), 0) AS id FROM integration_events");
       return Number(rows[0].id);
+    },
+
+    // Records an account-level entry of Auth's feed as applied, once: its cursor and time are the key (the time tells
+    // apart a cursor Auth hands out again after its database was restored). Returns false when it was already applied,
+    // and then nothing is recorded; the caller (service.accountChange) applies the entry only on true, in the same
+    // transaction. `account` is null for an accounts_baseline.
+    async applyAccountEntry({ cursor, at, account = null, kind }, client) {
+      const { rowCount } = await run(client, "INSERT INTO auth_account_entries (auth_cursor, auth_at, account_id, kind) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING", [authCursorOf(cursor), timeOf(at, "at"), account, kind]);
+      return rowCount > 0;
+    },
+
+    // An account's availability as the latest applied entry says: one row per account, replaced by each entry.
+    async setAvailability(account, disabled, cursor, at, client) {
+      if (typeof disabled !== "boolean") throw new TypeError("disabled must be true or false.");
+      await run(client,
+        "INSERT INTO account_availability (account_id, disabled, auth_cursor, auth_at) VALUES ($1, $2, $3, $4) ON CONFLICT (account_id) DO UPDATE SET disabled = EXCLUDED.disabled, auth_cursor = EXCLUDED.auth_cursor, auth_at = EXCLUDED.auth_at, updated_at = now()",
+        [account, disabled, authCursorOf(cursor), timeOf(at, "at")]);
+    },
+
+    // The accounts that are disabled, in order: the "disabled" of a checkpoint and a built-in Station's cursor-0 snapshot.
+    async disabledAccountList(client) {
+      const { rows } = await run(client, "SELECT account_id FROM account_availability WHERE disabled ORDER BY account_id COLLATE \"C\"");
+      return rows.map((row) => row.account_id);
+    },
+
+    // The mark that an accounts_baseline was applied: Auth's feed alone is then authoritative for every account.
+    async setBaseline(cursor, at, client) {
+      await run(client,
+        "INSERT INTO account_baseline (id, auth_cursor, auth_at) VALUES (true, $1, $2) ON CONFLICT (id) DO UPDATE SET auth_cursor = EXCLUDED.auth_cursor, auth_at = EXCLUDED.auth_at, applied_at = now()",
+        [authCursorOf(cursor), timeOf(at, "at")]);
+    },
+
+    // Clears the mark: the Portal skipped an account entry while its setting was off, so availability is unknown again.
+    async clearBaseline(client) {
+      await run(client, "DELETE FROM account_baseline");
+    },
+
+    async baselineApplied(client) {
+      const { rows } = await run(client, "SELECT EXISTS (SELECT 1 FROM account_baseline) AS applied");
+      return rows[0].applied === true;
+    },
+
+    // The built-in Station's last reported binding of an R9 account at a genesis, or null (service.report, the
+    // checkpoint). Names follow the table: accountId is the Agora.Build owner, r9AccountId the R9 account.
+    async binding(stationId, r9AccountId, genesisHash, client) {
+      const { rows } = await run(client, "SELECT * FROM station_bindings WHERE station_id = $1 AND r9_account_id = $2 AND genesis_hash = $3", [stationId, r9AccountId, genesisHash]);
+      return rows[0] ? bindingRow(rows[0]) : null;
+    },
+
+    // Records the binding as the Station's latest for its R9 account and genesis, replacing the one before. The caller
+    // has applied the version rules (service.report, under the event lock); this writes what it is given.
+    async saveBinding({ stationId, r9AccountId, genesisHash, accountId, bindingId, version, bindingState, reportId }, client) {
+      if (!Number.isSafeInteger(version) || version < 1) throw new TypeError("version must be a positive whole number.");
+      await run(client,
+        "INSERT INTO station_bindings (station_id, r9_account_id, genesis_hash, account_id, binding_id, version, binding_state, report_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) " +
+        "ON CONFLICT (station_id, r9_account_id, genesis_hash) DO UPDATE SET account_id = EXCLUDED.account_id, binding_id = EXCLUDED.binding_id, version = EXCLUDED.version, binding_state = EXCLUDED.binding_state, report_id = EXCLUDED.report_id, updated_at = now()",
+        [stationId, r9AccountId, genesisHash, accountId, bindingId, version, bindingState, reportId]);
+    },
+
+    // Every binding the Station has reported, by R9 account and then genesis (byte order, so the checkpoint reads the
+    // same whatever the database's locale).
+    async bindingsOn(stationId, client) {
+      const { rows } = await run(client, "SELECT * FROM station_bindings WHERE station_id = $1 ORDER BY r9_account_id COLLATE \"C\", genesis_hash COLLATE \"C\"", [stationId]);
+      return rows.map(bindingRow);
+    },
+
+    // Keeps a refused binding attempt. The caller has found no report under this id (service.report); a second one with
+    // the same id on a Station is refused by the key, not replaced.
+    async saveBindingAttempt({ stationId, reportId, accountId, r9AccountId, genesisHash, reason, attemptedAt }, client) {
+      await run(client,
+        "INSERT INTO binding_attempts (station_id, report_id, account_id, r9_account_id, genesis_hash, reason, attempted_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        [stationId, reportId, accountId, r9AccountId, genesisHash, reason, timeOf(attemptedAt, "attemptedAt")]);
+    },
+
+    // The attempts reported for this account (the one the Station says to alert) made at or after `since`, newest first.
+    // Only that account's: another account's attempt, and the other account named in one, are never read here.
+    async bindingAttemptsFor(accountId, since, client) {
+      const { rows } = await run(client, "SELECT * FROM binding_attempts WHERE account_id = $1 AND attempted_at >= $2 ORDER BY attempted_at DESC, station_id, report_id", [accountId, timeOf(since, "since")]);
+      return rows.map(bindingAttemptRow);
     }
   };
 }

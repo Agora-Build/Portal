@@ -1,0 +1,63 @@
+-- Delegated host work, the exact-cursor checkpoint, account availability and the built-in Station's binding reports
+-- (D29, docs/integrations.md §3.11; Portal issues #40 and #41). The Portal applies every account-level entry of Auth's
+-- feed once, keeps each account's availability and whether Auth's accounts baseline was applied, and records the
+-- bindings and refused binding attempts the built-in Station reports.
+SET LOCAL lock_timeout = '5s';
+
+-- Account-level events (accounts_baseline) name no account.
+ALTER TABLE integration_events ALTER COLUMN account_id DROP NOT NULL;
+
+-- Every account-level entry of Auth's feed the Portal applied, once each: re-reading the feed skips them.
+CREATE TABLE auth_account_entries (
+  auth_cursor text NOT NULL,
+  auth_at timestamptz NOT NULL,
+  account_id text,
+  kind text NOT NULL,
+  applied_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (auth_cursor, auth_at)
+);
+
+-- Each account's availability as the latest applied entry says.
+CREATE TABLE account_availability (
+  account_id text PRIMARY KEY,
+  disabled boolean NOT NULL,
+  auth_cursor text NOT NULL,
+  auth_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- One row once an accounts_baseline is applied; deleted when the Portal, with its setting off, skips an account entry.
+CREATE TABLE account_baseline (
+  id boolean PRIMARY KEY DEFAULT true CHECK (id),
+  auth_cursor text NOT NULL,
+  auth_at timestamptz NOT NULL,
+  applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- The built-in Station's last reported binding per R9 account.
+CREATE TABLE station_bindings (
+  station_id text NOT NULL,
+  r9_account_id text NOT NULL,
+  genesis_hash text NOT NULL,
+  account_id text NOT NULL,
+  binding_id text NOT NULL,
+  version bigint NOT NULL CHECK (version > 0),
+  binding_state text NOT NULL CHECK (binding_state IN ('bound', 'unbound', 'released')),
+  report_id text NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (station_id, r9_account_id, genesis_hash)
+);
+
+-- The built-in Station's refused binding attempts, shown to the account each one protects.
+CREATE TABLE binding_attempts (
+  station_id text NOT NULL,
+  report_id text NOT NULL,
+  account_id text NOT NULL,
+  r9_account_id text NOT NULL,
+  genesis_hash text NOT NULL,
+  reason text NOT NULL CHECK (reason IN ('bound_elsewhere', 'owner_disabled')),
+  attempted_at timestamptz NOT NULL,
+  recorded_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (station_id, report_id)
+);
+CREATE INDEX binding_attempts_account_idx ON binding_attempts (account_id, attempted_at);
