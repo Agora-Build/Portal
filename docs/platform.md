@@ -1554,7 +1554,9 @@ Repeating the current state changes nothing and succeeds. Any other report is
 **With `DELEGATED_HOST_WORK=1` (off by default):** the Station also reports how a revocation went, host by host
 ([D29](integrations.md#311-delegated-host-work-d29), Phase B), so that the Portal can show how many hosts applied it. The
 two forms, their validation and the error codes are under "Routes"; this is when to send them and what to do with each
-answer, as agreed with Atem ([Atem PR #148](https://github.com/Agora-Build/Atem/pull/148), the acknowledgment ledger).
+answer, as agreed with Atem ([Atem PR #148](https://github.com/Agora-Build/Atem/pull/148), the acknowledgment ledger, now in
+[`designs/protocol/atem-client-bindings.md` §9](https://github.com/Agora-Build/Atem/blob/main/designs/protocol/atem-client-bindings.md#9-for-station-builders)
+on Atem's `main`).
 With the setting off a body with a `reportId` is 400 `report`. The built-in Station also sends two binding reports,
 which are described after the change feed ("The built-in Station's binding reports").
 
@@ -1566,10 +1568,10 @@ which are described after the change feed ("The built-in Station's binding repor
     revocation in force; else `deadline_passed` with the hosts that didn't confirm (never none), 24 hours after the
     revocation's start (the clock, below).
 - **`reportId` is opaque to the Portal.** It checks only that it is 1 to 128 characters of `[A-Za-z0-9._:-]` and never
-  recomputes it. Atem's reference derivation is in its bindings' "For Station builders"
-  ([Atem PR #148](https://github.com/Agora-Build/Atem/pull/148), `designs/protocol/atem-client-bindings.md` §9, not yet
-  merged): `<kind>:` and a SHA-256 over the report's identity, never over time, order or a counter. Whatever a Station
-  uses must give a retry the same id.
+  recomputes it. Atem's reference derivation is in its bindings' "For Station builders",
+  [`designs/protocol/atem-client-bindings.md` §9](https://github.com/Agora-Build/Atem/blob/main/designs/protocol/atem-client-bindings.md#9-for-station-builders),
+  "`report_id` and the Portal's idempotency": `<kind>:` and a SHA-256 over the report's identity, never over time, order
+  or a counter. Whatever a Station uses must give a retry the same id.
 - **Idempotency.** Report ids are per Station and kept forever, with the body and the answer they got.
   - The same `reportId` with the same body gets the recorded answer (200) and changes nothing. The body is compared by
     its fields, whatever their order, with `pendingHosts` in the order sent, so a retry sends the same list in the same
@@ -1619,6 +1621,27 @@ which are described after the change feed ("The built-in Station's binding repor
     (another Station at Auth, say a removed one registered again) the same way: every revocation goes on reporting under
     the new ID, including its later per-host reports and its final, as Atem's §11.4 has it. The old Station's integrations
     then get 404, which is final.
+
+**Signing control records.** With delegated host work the Station signs the control records hosts act on (`revoke`,
+`hold`, `release`, `interrupt_running` and `cover`) from the effective state in its Portal feed; the Portal never sees
+them. The full rules are Atem's, in
+[`designs/protocol/atem-client-bindings.md` §9](https://github.com/Agora-Build/Atem/blob/main/designs/protocol/atem-client-bindings.md#9-for-station-builders),
+"Control records" ("The Station's duties"), which Auth/Portal agreed on
+[Atem PR #147](https://github.com/Agora-Build/Atem/pull/147#issuecomment-6813332550). These touch what the Portal holds:
+
+- **Whoever holds the service key controls coverage.** The principal's own key (the integration's service key) may sign
+  every action. A Station that hands an integration over stops signing for it, and the key leaves with it. At Auth an
+  integration belongs to exactly one Station, so the Portal never hands one over between Stations.
+- **A reset starts from the current state, never from a backup.** After a reset (a new feed identity for the Station's
+  origin) the Station re-issues covers only for the principals it still covers, signed anew from its current effective
+  state. That state is the Portal's: the cursor-0 snapshot and the checkpoint are current, never a restored backup's.
+- **`issued_at` only rises.** Each record a Station signs for a principal is issued strictly after every record it
+  signed for it before, across a restart, a reset's snapshot and a handover.
+- **Removal is not two-phase yet.** Atem's §9 says a Station learns of its own removal only through a two-phase removal:
+  its integrations go `revoking` with reason `station_removed`, it issues and serves their records, then the removal
+  completes. The Portal does not do that yet: removal is one step. Auth removes the Station, and the Portal marks it
+  removed and its integrations `revoking` (reason `station_removed`, no interrupt) together, so the Station reads its feed
+  no more and never serves those records (the native revoke, under "Routes").
 
 **The change feed.** `GET /api/v1/stations/changes?cursor=<n>` returns
 `{ changes, cursor }` and, only for `cursor=0`, `integrations`, a snapshot of
