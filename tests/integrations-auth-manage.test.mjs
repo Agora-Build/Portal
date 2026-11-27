@@ -166,3 +166,16 @@ test("integrationChanges reads Auth's change feed after a cursor and checks the 
   const ahead = stub(Response.json({ error: "cursor_ahead" }, { status: 409 }));
   await assert.rejects(clientWith(ahead).integrationChanges({ after: "Yzk", limit: 100 }), (error) => error instanceof ManageError && error.status === 409 && error.code === "cursor_ahead");
 });
+
+test("the two-phase removal's calls (D29): POST .../removal answers Auth's JSON, POST .../complete-removal is 204, and refusals carry Auth's code", async () => {
+  let s = stub(Response.json({ status: "removing", removalStartedAt: "2026-11-27T10:00:00.000Z" }));
+  assert.deepEqual(await clientWith(s).beginStationRemoval("st/1", actor), { status: "removing", removalStartedAt: "2026-11-27T10:00:00.000Z" });
+  assert.deepEqual([s.calls[0].method, s.calls[0].url, s.calls[0].body, s.calls[0].headers.has("content-type")], ["POST", issuer + "/manage/v1/stations/st%2F1/removal?actor=" + actor, undefined, false]);
+  s = stub(new Response(null, { status: 204 }));
+  assert.equal(await clientWith(s).completeStationRemoval("st1", "system"), undefined);
+  assert.deepEqual([s.calls[0].method, s.calls[0].url, s.calls[0].body], ["POST", issuer + "/manage/v1/stations/st1/complete-removal?actor=system", undefined]);
+  s = stub(Response.json({ error: "not_found" }, { status: 404 }));
+  await assert.rejects(clientWith(s).beginStationRemoval("st1", actor), (error) => error instanceof ManageError && error.status === 404 && error.code === "not_found");
+  s = stub(Response.json({ error: "not_removing" }, { status: 409 }));
+  await assert.rejects(clientWith(s).completeStationRemoval("st1", "system"), (error) => error instanceof ManageError && error.status === 409 && error.code === "not_removing");
+});

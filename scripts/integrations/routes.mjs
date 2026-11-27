@@ -192,7 +192,9 @@ export async function handleIntegrations({ path, method, url, read, service, cal
       if (method === "DELETE") { await service.unshare(changing(await portalUser()), id, member); return ok({ unshared: true }); }
       return null;
     }
-    if (!action && method === "DELETE") { await service.removeStation(changing(await portalUser()), id); return ok({ removed: true }); }
+    // { removed: true }, or with the setting on, while its two-phase removal runs, { removed: false, removing: true,
+    // completeBy } (D29).
+    if (!action && method === "DELETE") return ok(await service.removeStation(changing(await portalUser()), id));
     if (action === "members" && method === "GET") return ok(await service.members(listing("members", await portalUser()), id));
     if (action === "read-token" && method === "POST") {
       const accountId = await portalUser(); limit("read-token:" + accountId, 30, 60000);

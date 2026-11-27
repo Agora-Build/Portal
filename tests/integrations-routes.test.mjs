@@ -1592,3 +1592,22 @@ test("with the setting off, GET /api/v1/stations does not exist and the browser'
   assert.deepEqual(Object.keys(body).sort(), ["stale", "stations"]);
   assert.deepEqual(body.stations.map((entry) => [entry.id, entry.role]), [[built.id, "built_in"], [station.id, "owner"]]);
 });
+
+// D29 two-phase removal: the browser's DELETE answers what the service says.
+test("with the setting on, DELETE /api/stations/<id> answers the two-phase removal: removing with completeBy, or removed when nothing was left to pass on", async (t) => {
+  const integrations = await stack(t, { delegatedHostWork: true });
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const owner = await signIn(app);
+  const { station } = await registerStation(app, integrations, owner.cookie);
+  const mine = await createIntegration(app, owner.cookie, station.id);
+  await integrations.db.pool.query("UPDATE integrations SET state = 'ready' WHERE id = $1", [mine.id]);
+  const removing = await call(app.base, "/api/stations/" + station.id, { cookie: owner.cookie, method: "DELETE" });
+  const body = await removing.json();
+  assert.deepEqual([removing.status, Object.keys(body), body.removed, body.removing, typeof body.completeBy], [200, ["removed", "removing", "completeBy"], false, true, "string"]);
+  const listed = (await (await call(app.base, "/api/stations", { cookie: owner.cookie })).json()).stations;
+  assert.deepEqual(listed.map((entry) => [entry.id, entry.status]), [[station.id, "removing"]]);
+  const empty = (await registerStation(app, integrations, owner.cookie, "https://two.example")).station;
+  const removed = await call(app.base, "/api/stations/" + empty.id, { cookie: owner.cookie, method: "DELETE" });
+  assert.deepEqual([removed.status, await removed.json()], [200, { removed: true }]);
+});
