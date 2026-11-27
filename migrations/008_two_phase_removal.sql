@@ -8,7 +8,8 @@ SET LOCAL lock_timeout = '5s';
 SELECT pg_advisory_xact_lock(hashtext('portal_integration_events'));
 
 -- active, then removing, then removed. A removing Station still reads its feed and reports; nothing else uses it. It has
--- the time its removal began (the Portal's clock), from which it is removed at the latest 26 hours later.
+-- the time its removal began (the Portal's clock); it is due 26 hours later, and removed at the first hourly check at or
+-- after that.
 ALTER TABLE stations DROP CONSTRAINT stations_status_check;
 ALTER TABLE stations ADD CONSTRAINT stations_status_check CHECK (status IN ('active', 'removing', 'removed'));
 ALTER TABLE stations ADD COLUMN removal_started_at timestamptz;

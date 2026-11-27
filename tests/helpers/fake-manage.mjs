@@ -19,8 +19,8 @@ export const BUILT_IN_REPORT_CLIENT = "s-" + "0".repeat(24) + "bs";
 // takes `interruptRunning` on a revocation and records it as `=== true` (false when it is left out); an Auth without
 // the setting refuses the key with 400 invalid_request. `sent` keeps each changeIntegration body as it went over the wire.
 // A delegated Auth also has the two-phase removal (D29): beginStationRemoval and completeStationRemoval (404 without the
-// setting, as an Auth without the routes); a removing Station is listed with its status, holds its origin, and is removed
-// in one step by removeStation too.
+// setting, as an Auth without the routes, before the actor is looked at); a removing Station is listed with its status,
+// holds its origin, and is removed in one step by removeStation too.
 export function fakeManage({ now = Date.now, delegated = false } = {}) {
   const stations = [];
   const integrations = [];
@@ -153,12 +153,15 @@ export function fakeManage({ now = Date.now, delegated = false } = {}) {
       station.reportClientRevoked = true;
       auth.revokeWhere((integration) => integration.stationId === id, { actor, reason: "station_removed" });
     },
-    // POST /manage/v1/stations/<id>/removal (D29, `delegated` only; otherwise 404, as an Auth without the route): the owner
-    // begins a two-phase removal. The Station becomes removing and its integrations are revoked (station_removed, no
-    // interrupt); its report client stays. A removing one answers the same again; a removed or unknown one is 404.
+    // POST /manage/v1/stations/<id>/removal (D29, `delegated` only; otherwise 404 before the actor is looked at, as an Auth
+    // without the route answers): the owner begins a two-phase removal. The Station becomes removing and its integrations
+    // are revoked (station_removed, no interrupt); its report client stays. A removing one answers the same again; a
+    // removed or unknown one is 404.
     async beginStationRemoval(id, actor) {
-      await auth.gate("beginStationRemoval", actor);
-      if (!delegated) fail(404, "not_found");
+      await auth.open("beginStationRemoval", () => {
+        if (!delegated) fail(404, "not_found");
+        if (!valid(actor) || disabledAccounts.has(actor)) fail(400, "invalid_request");
+      });
       const station = stations.find((entry) => entry.id === id && (entry.status === "active" || entry.status === "removing"));
       if (!station) fail(404, "not_found");
       notBuiltIn(station);
@@ -170,12 +173,14 @@ export function fakeManage({ now = Date.now, delegated = false } = {}) {
       }
       return { status: "removing", removalStartedAt: station.removalStartedAt };
     },
-    // POST /manage/v1/stations/<id>/complete-removal (D29, `delegated` only; otherwise 404): the owner, or "system" (the
-    // Portal's own check), completes it: removed, its report client revoked. 204, again for one already removed; an active
-    // Station is 409 not_removing.
+    // POST /manage/v1/stations/<id>/complete-removal (D29, `delegated` only; otherwise 404, again before the actor is looked
+    // at): the owner, or "system" (the Portal's own check), completes it: removed, its report client revoked. 204, again
+    // for one already removed; an active Station is 409 not_removing.
     async completeStationRemoval(id, actor) {
-      await auth.open("completeStationRemoval", () => { if (actor !== "system" && !valid(actor)) fail(400, "invalid_request"); });
-      if (!delegated) fail(404, "not_found");
+      await auth.open("completeStationRemoval", () => {
+        if (!delegated) fail(404, "not_found");
+        if (actor !== "system" && !valid(actor)) fail(400, "invalid_request");
+      });
       const station = stations.find((entry) => entry.id === id);
       if (!station) fail(404, "not_found");
       notBuiltIn(station);

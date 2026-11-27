@@ -1163,9 +1163,9 @@ owner's decisions are in its Appendix A.
   in Astation is always mirrored to the Portal, so the Station's record backs it.
 - The Portal shows Revoking until every covered host has applied the revocation, or 24 hours have passed.
 - Removing a Station is two-phase: the Station is Removing while it passes the revocations to the hosts, and is removed
-  once each has its final report, or at the first hourly check 26 hours after the removal began. An integration revoked
-  without its Station's final report shows "Revoked; your hosts weren't all told", and Astation offers its owner a native
-  revoke.
+  once each has its final report, or at the first hourly check at or after 26 hours from when the removal began. An
+  integration with an R9 service that is revoked without its Station's final report shows "Revoked; your hosts weren't
+  all told", and Astation offers its owner a native revoke.
 
 **Auth/Portal's part** (the design's I.9 and IV rows 6, 7 and 16; built after the shared contract and Atem's host
 work, nothing before the owner approves):
@@ -1179,7 +1179,7 @@ work, nothing before the owner approves):
   `integrations:approve`); the Station feed's `interruptRunning`, `interrupt_requested`, account events (built-in
   Station only) and `binding_released`; the report kinds `revocation_applied{host, record_id}`,
   `revoked{outcome, pending_hosts}`, `binding_changed` and `binding_attempt`; the expiry, pause, host-sender and
-  mailbox copy; the two-phase Station removal (`removing`, its completion at the first hourly check 26 hours after the begin,
+  mailbox copy; the two-phase Station removal (`removing`, its completion at the first hourly check at or after 26 hours from the begin,
   `pendingHostRevocation` and the native revoke that clears it, 409 `station_removing`); and the Station Builders contract in
   [platform.md](platform.md#for-station-builders).
 - **Admin site:** the revoke form's question, an "Interrupt running tasks" action, the disable confirmation ("This

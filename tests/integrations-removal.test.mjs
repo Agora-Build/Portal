@@ -227,6 +227,29 @@ test("an Auth that refuses the begin otherwise leaves everything as it was", asy
   assert.deepEqual([(await s.repository.station(s.station.id)).status, (await s.row(id)).state, (await s.events("integration_revoked")).length, s.asked("removeStation")], ["active", "provisioning", before, 0]);
 });
 
+test("a disabled owner who removes a Station when Auth has no two-phase removal is refused, and the begin's 404 proves nothing: the owner-disabled flags stay and no integration_owner_enabled is appended", async (t) => {
+  const s = await setup(t, { authDelegated: false });
+  if (!s) return;
+  const first = await s.integration();
+  const second = await s.integration();
+  // Agora.Build disabled the owner: Auth refuses them as actor, and the Portal holds the flag on each integration.
+  s.manage.setOwnerDisabled(OWNER, true);
+  const disabledAt = iso(s.clock.now);
+  for (const id of [first, second]) await s.repository.updateIntegration(id, { ownerDisabledAt: disabledAt });
+  const enabled = (await s.events("integration_owner_enabled")).length;
+  s.notified.length = 0;
+  s.logs.length = 0;
+  // Auth has no begin route, so it answers 404 before it looks at the actor; the one-step DELETE then refuses the disabled actor.
+  await assert.rejects(s.service.removeStation(OWNER, s.station.id), refused(400, "invalid_request"));
+  assert.deepEqual([s.asked("beginStationRemoval"), s.asked("removeStation")], [1, 1], "the begin was 404, the one-step DELETE refused");
+  assert.equal((await s.repository.station(s.station.id)).status, "active", "the Station stays active at the Portal");
+  assert.equal(s.authStation().status, "active", "and at Auth");
+  for (const id of [first, second]) assert.equal((await s.row(id)).ownerDisabledAt, disabledAt, "the owner-disabled flag is kept");
+  assert.equal((await s.events("integration_owner_enabled")).length, enabled, "no integration_owner_enabled is appended");
+  assert.deepEqual(s.notified, [], "no Station is pushed");
+  assert.ok(!s.logs.some((line) => line.startsWith("Owner-disabled flag cleared")), "nothing is logged as cleared");
+});
+
 test("with the setting off, removing a Station is today's one step: Auth's DELETE, its integrations revoking, nothing flagged", async (t) => {
   const s = await setup(t, { delegatedHostWork: false, authDelegated: true });
   if (!s) return;

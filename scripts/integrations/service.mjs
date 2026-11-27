@@ -66,8 +66,8 @@ const FEED_LIMIT = 500;
 // Station records' own retention) is still listed, with the loss stated.
 const DIRECTORY_PAGE = 100;
 const DIRECTORY_LOST_FOR = 30 * DAY;
-// A two-phase removal (D29) completes at the latest 26 hours after it began: a Station's own final report comes at most 24
-// hours after a revocation starts, and an hour's slack each way.
+// A two-phase removal (D29) is due 26 hours after it began (completeBy), and completes at the first hourly check at or after
+// that: a Station's own final report comes at most 24 hours after a revocation starts, and an hour's slack each way.
 const REMOVAL_DEADLINE = 26 * 3600000;
 const LIMIT_DIGITS = /^[0-9]{1,3}$/;
 const CURSOR_CHARACTERS = /^[A-Za-z0-9_-]{1,512}$/;
@@ -202,7 +202,7 @@ async function viaAuth(call) {
 
 // Members are not shown the Station's report client; it is not secret, but they have no use for it. Nobody is shown a
 // built-in Station's report client (its role is built_in). A removing Station (D29) also says when its removal began and
-// when it completes at the latest, and takes no integration.
+// its completeBy (the first hourly check at or after it completes the removal), and takes no integration.
 function stationView(station, role) {
   const view = {
     id: station.id, origin: station.origin, role, ownerAccount: station.ownerAccount, status: station.status, ...removalOf(station), createdAt: station.createdAt,
@@ -243,16 +243,18 @@ function directoryCursor(value) {
 }
 const directoryCursorFor = (entry) => Buffer.from(JSON.stringify([entry.builtIn, entry.createdAt, entry.id])).toString("base64url");
 
-// What removing a Station answers (D29): { removed: true }, or, while it is removing, when its removal completes at the
-// latest.
+// What removing a Station answers (D29): { removed: true }, or, while it is removing, its completeBy (the first hourly check
+// at or after it completes the removal).
 const completeByOf = (station) => new Date(Date.parse(station.removalStartedAt) + REMOVAL_DEADLINE).toISOString();
 const removalAnswer = (station) => (station.status === "removing" ? { removed: false, removing: true, completeBy: completeByOf(station) } : { removed: true });
-// The fields a removing Station's views add: when its removal began and when it completes at the latest.
+// The fields a removing Station's views add: when its removal began and its completeBy (the first hourly check at or after
+// it completes the removal).
 const removalOf = (station) => (station.status === "removing" ? { removalStartedAt: station.removalStartedAt, completeBy: completeByOf(station) } : {});
 
 // A Station as the directory shows it: routing and availability only, never its report client, its owner or its members.
 // integrationsEnabled says whether an integration can be created there now: not on a removing (D29) or removed Station, and
-// not by a member whose membership ended. A removing Station also says when its removal began and completes at the latest.
+// not by a member whose membership ended. A removing Station also says when its removal began and its
+// completeBy (the first hourly check at or after it completes the removal).
 function directoryEntry(row) {
   return {
     id: row.id, origin: row.origin, name: row.name, builtIn: row.builtIn, access: row.access, role: row.role, status: row.status,
@@ -731,7 +733,7 @@ export function createIntegrationService({
     return flagged;
   }
 
-  // The Portal's half of beginning a two-phase removal (D29), once Auth has the Station removing: in one transaction under
+  // The Portal's part of beginning a two-phase removal (D29), once Auth has the Station removing: in one transaction under
   // the event lock the Station becomes removing, dated now; every integration on it is revoked as an indirect revocation
   // (revokeOn, reason station_removed, no interrupt: one awaiting approval at once, the others revoking until their
   // Station's final report); and a station_removing event names the integrations still revoking, the ones the Station has
@@ -747,7 +749,7 @@ export function createIntegrationService({
     });
   }
 
-  // Auth's half of completing a two-phase removal (D29): complete-removal removes the Station and revokes its report client
+  // Auth's part of completing a two-phase removal (D29): complete-removal removes the Station and revokes its report client
   // (204, again for one already removed). An Auth without the route (404: its setting turned off while the Station was
   // removing) gets its one-step DELETE instead, named as the owner who began the removal, which removes a removing Station
   // too; a 404 to that as well means Auth has the Station no more. Any other refusal is logged and leaves it removing, for
@@ -768,14 +770,14 @@ export function createIntegrationService({
     return true;
   }
 
-  // Completes a removing Station's removal (D29): Auth first (completedAtAuth), then the Portal's half (completeHere).
+  // Completes a removing Station's removal (D29): Auth first (completedAtAuth), then the Portal's part (completeHere).
   // Returns whether this call completed it.
   async function finishRemoval(station, completedBy) {
     if (!(await completedAtAuth(station))) return false;
     return completeHere(station, completedBy);
   }
 
-  // Inside the caller's transaction, under the event lock, the Portal's half of completing a removal (D29), once Auth has
+  // Inside the caller's transaction, under the event lock, the Portal's part of completing a removal (D29), once Auth has
   // the Station removed, and only while the Portal still has it removing (so two replicas, or a replica and a reconcile,
   // complete it once): it is removed, every integration on it not revoked yet revoked and, with an R9 service, flagged
   // (abandonOn), and a station_removed event says how it completed (`completedBy`: all_revoked, deadline, or auth_removed
@@ -789,7 +791,7 @@ export function createIntegrationService({
     return count;
   }
 
-  // The Portal's half of completing a removal in its own transaction (completeOn). The Station is pushed once more after the
+  // The Portal's part of completing a removal in its own transaction (completeOn). The Station is pushed once more after the
   // commit: its token is refused from now on, which is how it learns to stop. Returns whether this call completed it.
   async function completeHere(station, completedBy) {
     const flagged = await appending((client) => completeOn(client, station, completedBy));
@@ -819,9 +821,9 @@ export function createIntegrationService({
     }
   }
 
-  // Auth lists a Station as removing that the Portal has active (D29): Auth began its removal, but the Portal's half was
+  // Auth lists a Station as removing that the Portal has active (D29): Auth began its removal, but the Portal's part was
   // lost (the owner's request failed after Auth answered), or the Portal has just reconciled the Station from Auth. With
-  // the setting on, the Portal begins its half now, as the system, pushes the Station and completes the removal at once
+  // the setting on, the Portal begins its part now, as the system, pushes the Station and completes the removal at once
   // if nothing is left to pass on.
   async function followRemoving(stationId) {
     const station = await repository.station(stationId);
@@ -853,7 +855,7 @@ export function createIntegrationService({
   // an older Auth): Auth's DELETE removes the Station and revokes its report client at once, so it can pass nothing on.
   // In one transaction the Station is removed and every integration on it revoked, each with an R9 service flagged
   // (abandonOn); the Station is pushed once, as today. A 404 to the DELETE means Auth has removed it already (an earlier
-  // try whose Portal half failed), so a retry converges; a Station the Portal has removed meanwhile (another path) gets
+  // try whose Portal part failed), so a retry converges; a Station the Portal has removed meanwhile (another path) gets
   // no second event, log line or push.
   async function removeInOneStep(accountId, station) {
     await byActor(accountId, async () => {
@@ -1682,14 +1684,16 @@ export function createIntegrationService({
         changed(stationId);
         return { removed: true };
       }
-      const begun = await byActor(accountId, async () => {
-        try {
-          return await manage.beginStationRemoval(stationId, accountId);
-        } catch (error) {
-          if (error instanceof ManageError && error.status === 404) return null;
-          throw error;
-        }
-      });
+      // An Auth without the route answers 404 before it looks at the actor, so that answer proves nothing about the owner
+      // (byActor would clear their owner-disabled flags): it is taken outside byActor. The one-step DELETE checks the actor
+      // before its 404, so removeInOneStep's own 404 stays inside.
+      let begun;
+      try {
+        begun = await byActor(accountId, () => manage.beginStationRemoval(stationId, accountId));
+      } catch (error) {
+        if (!(error instanceof AppError && error.status === 404)) throw error;
+        begun = null;
+      }
       if (!begun) return removeInOneStep(accountId, station);
       await beginRemovalHere(station, accountId);
       changed(stationId);

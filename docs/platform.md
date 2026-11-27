@@ -1051,7 +1051,7 @@ Portal keep working.
   until a newer image runs again. So before rolling back, turn the admin site's `DELEGATED_HOST_WORK` off and then the
   Portal's (the admin site's must be off whenever the Portal's is), so no removal begins, and wait until
   `SELECT count(*) FROM stations WHERE status = 'removing';` is 0. Each removal begun completes at the first hourly check
-  after 26 hours from its begin, so the wait is up to about 27 hours after the last begin; the check runs with the setting
+  at or after 26 hours from its begin, so the wait is up to about 27 hours after the last begin; the check runs with the setting
   off too, and the log says `Station removal completed` for each. If the rollback can't wait, the operator sees what the
   older image does above. After rolling forward, the first check, once the first sync with Auth is done, completes each
   removing Station whose integrations are all revoked or whose removal began 26 hours ago, with its flags. A Station that
@@ -1213,14 +1213,14 @@ so it never reads its integrations' revocations, and they stay `revoking`.
    `auth_removed`. If Auth answers 404 to the completion (its setting was turned off meanwhile), the Portal removes the
    Station with Auth's one-step `DELETE`, named as its owner; if that answers 404 too, Auth has the Station no more, and the
    Portal completes it. The completion needs nothing of the Station, so a Station that reports nothing (its owner's account
-   disabled meanwhile, say, which stops its tokens) is still removed at the first check after `completeBy`.
+   disabled meanwhile, say, which stops its tokens) is still removed at the first check at or after `completeBy`.
 
 **A removal already begun is never cut short**, whatever the Portal's setting is later (a removing Station exists only
 because the setting was on). With the setting off, a removing Station still shows as removing on the account page (the
 directory is 404 with the setting off), still refuses what a removing Station refuses, still reads its feed and reports, and
 a repeat remove still answers `removing`. Its removal still completes, flagging what a host may hold as below: after a
 `revoked` report without a `reportId` (with the setting off a report with one is 400 `report`), by the hourly check, or at
-the first check after 26 hours.
+the first check at or after 26 hours.
 
 The log says how a removal ended, as counts: `Station removal completed: every integration revoked.`,
 `Station removal completed after 26 hours: <n> integrations pending host revocation.`,
@@ -1541,7 +1541,7 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
     - `name` is `null` for a custom Station. `access` is `any_account` (the built-in Station) or `members`.
     - `role` is `built_in`, `owner` or `member`. `status` is `active`, `removing` or `removed`. `removedAt` is set when it
       is `removed`. A `removing` Station also has `removalStartedAt` and `completeBy` (26 hours later; its removal
-      completes at the first check after that, the hourly one), which no other entry has ("Removing A Station").
+      completes at the first check at or after that, the hourly one), which no other entry has ("Removing A Station").
     - `membership` is `current` or `ended` for a member, and `null` for the owner and the built-in Station.
       `membershipEndedAt` is set when it is `ended`.
     - `integrationsEnabled` says whether an integration can be created there now. It is `false` on a removing or removed
