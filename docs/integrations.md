@@ -780,8 +780,10 @@ delegated work (Astation #79) waits for, comes first.
     counts here, and an admin token works on no other Portal route.
   - The actor is `sub`. Limits per admin: 120 reads and 30 changes a minute (429).
 - **Portal: `admin_actions`** (migration 007): `id`, `at`, `actor`, `action`, `target_kind`, `target`, `reason`,
-  `outcome` (`started`, `done`, `failed`) and `details`. A change writes `started` in its own transaction first and
-  stops if that fails; then `done` or `failed` with what happened. Slice 1 has one action, `binding_released`.
+  `outcome` (`started`, `done`, `failed`) and `details`. A change writes `started` in its own transaction once the
+  request's own fields (shape, reason, key) pass, and stops if that write fails; then `done` with what it did, or
+  `failed` with the refusal's code. A repeat answered with an existing release writes no row. Slice 1 has one action,
+  `binding_released`.
 - **Portal: reading bindings** (a read; `DELEGATED_HOST_WORK=1`): `GET /api/admin/v1/bindings?account=<ab…>` or
   `?accountId=<R9 account ID>`, exactly one of them. The answer lists the built-in Stations' recorded bindings that match:
   `{ stationId, account, accountState, accountId, genesisHash, bindingId, version, bindingState, updatedAt, releases }`.
@@ -812,7 +814,7 @@ delegated work (Astation #79) waits for, comes first.
     `binding_changed` report in one durable transaction, and closes what it served within 60 seconds of the Portal's
     commit, serving binding-based service only while its last complete feed read began under 60 seconds ago (it fails
     closed otherwise, and polls at least every 20 seconds);
-  - recording a `binding_changed` with a higher version settles each pending release of that `(accountId,
+  - recording a `binding_changed` with a higher version settles each pending release of that Station's `(accountId,
     genesisHash)` in the same transaction: `applied` if it is `released` with the same `bindingId`, otherwise
     `superseded`.
 - **Admin site** (`DELEGATED_HOST_WORK=1`): an "R9 bindings" page, searched by Agora.Build account or R9 account and
