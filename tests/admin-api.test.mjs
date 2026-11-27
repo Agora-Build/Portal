@@ -147,6 +147,10 @@ test("a missing, malformed or invalid token is 401 token, and a cookie never cou
     "wrong issuer": await adminToken(app, { iss: "https://evil.example" }),
     "wrong audience": await adminToken(app, { aud: "https://agora.build" }),
     "expired": await adminToken(app, { iat: past - 60, exp: past }),
+    // Auth issues exactly 60-second tokens with an iat and one audience.
+    "no iat": await adminToken(app, {}, { omit: ["iat"] }),
+    "a 15-minute life": await adminToken(app, { exp: seconds() + 900 }),
+    "aud an array holding the audience": await adminToken(app, { aud: [siteUrl] }),
     "sub not an account": await adminToken(app, { sub: "s-" + "0".repeat(26) }),
     "no auth_time": await adminToken(app, {}, { omit: ["auth_time"] }),
     "auth_time not a number": await adminToken(app, { auth_time: String(seconds()) }),

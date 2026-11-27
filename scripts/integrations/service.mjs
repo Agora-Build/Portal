@@ -1143,7 +1143,8 @@ export function createIntegrationService({
   }
 
   // An admin action whose change threw is marked failed, as Auth's withAdminAction does: best effort, logged when it can't
-  // be. A row left started means the change may or may not have happened; binding_releases and the feed say which.
+  // be. A row left started means nothing was released: the done (or a failed found under the lock) commits with the release
+  // and its feed change, and finishing touches only a started row, so a commit that did happen is never marked failed.
   async function actionFailed(id) {
     try {
       await repository.finishAdminAction(id, "failed", { code: "error" });
@@ -1660,7 +1661,7 @@ export function createIntegrationService({
           }, client);
           await repository.appendEvent({
             stationId: station.id, integrationId: null, accountId: binding.accountId, actor, kind: RELEASE_KIND, state: null, reason: request.reason,
-            details: { releaseId: release.releaseId, binding: { accountId: binding.r9AccountId, genesisHash: binding.genesisHash, bindingId: binding.bindingId, version: binding.version } }
+            details: { admin: true, releaseId: release.releaseId, binding: { accountId: binding.r9AccountId, genesisHash: binding.genesisHash, bindingId: binding.bindingId, version: binding.version } }
           }, client);
           await repository.finishAdminAction(id, "done", { releaseId: release.releaseId }, client);
           return { created: release };

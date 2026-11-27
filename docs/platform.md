@@ -664,7 +664,8 @@ Delegated Host Work").
   a creation and for renewing an expired integration alike. With the setting off a `revoking` integration holds its place
   until the Station reports `revoked`, as before; turning the setting off again counts the ones still `revoking` once more.
 - **Admins.** Agora.Build admins act on the admin site (`https://admin.agora.build`, dev
-  `https://admin.dev.agora.build`; [D26](integrations.md#334-the-admin-site-d26)), which calls Auth, never in the Portal. In the Portal an admin is just
+  `https://admin.dev.agora.build`; [D26](integrations.md#334-the-admin-site-d26)), which calls Auth (and, to release an R9
+  binding, the Portal's admin API, "The Admin API" under "Routes"), never in the Portal. In the Portal an admin is just
   another account: every listing shows an account its own integrations and those on custom Stations it owns, another
   account's integration on the built-in Station is 404 for everyone but its owner, and Auth refuses the Portal's
   management calls that act across accounts. Their changes reach the Portal through Auth's change feed (see "Admin
@@ -683,8 +684,8 @@ Delegated Host Work").
   Crockford base32 characters, and the scope includes `station.report`. It reaches only the two report routes (403
   elsewhere) and is never a Portal account. Its feed lists every integration on it, each with `ownerAccount`, and
   nothing else; push hints go to its origin. With `DELEGATED_HOST_WORK=1` (off by default) its feed also carries the
-  account changes, its checkpoint the accounts and its bindings, and it may send the two binding reports; a custom Station
-  gets none of these ("For Station Builders").
+  account changes and the `binding_released` change of an admin's release, its checkpoint the accounts, its bindings and its
+  `pendingReleases`, and it may send the two binding reports; a custom Station gets none of these ("For Station Builders").
 - **Sync.** The Portal learns of built-in Stations from Auth itself: when the Stations and integrations stack becomes
   ready (the server prepares it in the background as soon as it listens; a request to one of their routes waits for
   it) and then hourly, it reads Auth's listing of built-in Stations, which is not for any one account
@@ -1031,6 +1032,22 @@ Portal keep working.
   deploy or the rollback first. After a rollback to such an image and forward again, the line shows once and nothing else
   is needed. With the setting off the guard moves the Portal to `waiting` instead, silently, and the cursor needs the
   reset once every replica runs with the setting on.
+- **Rolling back past migration 007** (D27's slice 1) leaves its tables and column in place, which an older image ignores,
+  but an older image does not know releases. Turn the admin site's release off first (its `DELEGATED_HOST_WORK`, the third
+  in "Turning On Delegated Host Work"), keep the Portal's setting on, and wait until
+  `SELECT count(*) FROM binding_releases WHERE state = 'pending';` is 0: each pending release is settled by its Station's
+  next report for that binding, and with the Portal's setting off nothing settles. An older image serves a recorded
+  `binding_released` change without `account`, `releaseId` or `binding`, with the reason masked as `agora_build` (this image
+  stores the change marked as an admin's, so the older image's generic rule hides the admin's reason too), sends no
+  `pendingReleases` and settles nothing: a binding report it records moves `station_bindings` on and leaves every release
+  pending. After rolling forward, find the releases left pending although the binding moved on with:
+  `SELECT r.release_id FROM binding_releases r JOIN station_bindings b USING (station_id, r9_account_id, genesis_hash) WHERE r.state = 'pending' AND b.version > r.version;`
+  Such a release was not necessarily refused: the Station may have applied it while the older image ran. The Portal settles
+  it only when the Station next sends a `binding_changed` for that binding with a higher version than the binding's now (a
+  report with the same or a lower version settles nothing), so until then it stays `pending` on the admin site and in the
+  checkpoint's `pendingReleases`. To tell what happened, compare the binding's row (`b.binding_state`, `b.binding_id`,
+  `b.account_id`, `b.version`) with the release's and with what the Station itself reports for that binding: `released`
+  with the release's `binding_id` and `account_id` is an applied release, anything else a superseded one.
 
 #### Turning On Delegated Host Work
 
@@ -1466,11 +1483,14 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
 - **The token.** Each call carries `Authorization: Bearer` with a token Auth's admin client gets for it by exchanging the
   admin's passkey step-up ID token (RFC 8693, `resource` the Portal's API audience, `scope=portal.admin`; Auth's
   `docs/integrating.md`). It lives 60 seconds, and the admin site keeps none. The Portal checks it as every bearer token
-  (issuer, audience, ES256, `typ` `at+jwt`, expiry), then that `client_id` is `PORTAL_ADMIN_CLIENT_ID`, `scope` includes
+  (issuer, audience, ES256, `typ` `at+jwt`, expiry) and as Auth issues it (an `iat`, at most 60 seconds from `iat` to `exp`,
+  and `aud` one string, not a list), then that `client_id` is `PORTAL_ADMIN_CLIENT_ID`, `scope` includes
   `portal.admin`, `acr` is `urn:agora:mfa`, `sub` is an admin, and `auth_time` (whole seconds) is at most 900 s old for a
   `GET` and 300 s for any other method. The admins are those Auth's built-in listing names for the active built-in Stations.
   There are none until the Portal's first built-in sync, and an admin Auth stops listing is refused from the next sync on
-  (Auth's exchange already refuses them at once). The actor of every change is `sub`, never a field of the body.
+  (Auth's exchange already refuses them at once). If Auth stops listing a whole built-in Station, its stored admins keep
+  counting until the Station is marked removed, while Auth's own exchange refuses a non-admin at once. The actor of every
+  change is `sub`, never a field of the body.
 - **Nothing else counts.** A cookie is never read here. An admin token (one whose scope has `portal.admin`, or, with the
   setting, any token of the admin client) is refused on every other `/api/` route with 403 "An Agora.Build admin token works
   only on the admin API, /api/admin/v1.", and never makes a Portal account.
@@ -1612,7 +1632,9 @@ Station's service only, never R9 state:
   `done` (`details` `{ releaseId }`) or `failed` (`{ code }`: the refusal's, or `error` when something broke). A repeat the
   Portal finds before it writes `started` writes no row. A request racing an identical one may already have written
   `started`: it finds the release only inside the transaction, answers 200 with it, and ends `done` with
-  `{ releaseId, repeated: true }`.
+  `{ releaseId, repeated: true }`. The `done` (or a `failed` found inside the transaction) commits with the release and its
+  feed change, so a row left `started` (the process died, or the database could not be written to) means nothing was
+  released.
 
 Apps and Stations that send an access token use `/api/v1/` only: a bearer
 token on the unversioned `/api/...` path gets 404 naming the `/api/v1` path.

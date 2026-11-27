@@ -114,7 +114,13 @@ test("a release is 201 with a pending release, admin_actions started then done, 
   });
   assert.deepEqual(Object.keys(change.binding), ["accountId", "genesisHash", "bindingId", "version"]);
   // The event keeps the admin and their reason; the feed says only agora_build.
-  assert.deepEqual((await s.db.pool.query("SELECT actor, account_id, reason, integration_id FROM integration_events WHERE kind = 'binding_released'")).rows, [{ actor: ADMIN, account_id: OWNER, reason: REASON, integration_id: null }]);
+  const { rows: [event], rowCount } = await s.db.pool.query("SELECT actor, account_id, reason, integration_id, details FROM integration_events WHERE kind = 'binding_released'");
+  assert.equal(rowCount, 1);
+  assert.deepEqual({ ...event, details: null }, { actor: ADMIN, account_id: OWNER, reason: REASON, integration_id: null, details: null });
+  // It is marked an admin's, as Auth's admin events are: an image from before migration 007 has no binding_released branch
+  // and serves the stored event the generic way, which masks the reason exactly when details.admin is true.
+  assert.deepEqual(event.details, { admin: true, releaseId: release.releaseId, binding: { accountId: R9_ACCOUNT, genesisHash: GENESIS, bindingId: "bind-1", version: 3 } });
+  assert.equal(event.details?.admin === true ? "agora_build" : event.reason, "agora_build", "the generic masking rule hides the reason");
   await s.service._pushesIdle();
   assert.deepEqual(s.pushFetch.posts, [{ url: s.built.origin + "/agora-build/v1/changes", body: { cursor: change.id } }]);
 });
@@ -290,6 +296,63 @@ test("the release, its feed change and its done are one transaction: a failure i
   assert.deepEqual((await s.service.changes(s.built.reportClientId, String(before.cursor))).changes, [], "no change on the feed");
   assert.deepEqual(s.pushFetch.posts, [], "no push");
   assert.deepEqual((await actions(s)).map((row) => [row.outcome, row.details]), [["failed", { code: "error" }]]);
+});
+
+// startAdminAction is the one write between the first verdict (no lock) and the release's transaction (under the event
+// lock), so a request wrapped there is overtaken by whatever the test runs "before it returns": the branches under the
+// lock, made deterministic. `overtaken.run` is the test's one-shot work, run once the action is written started.
+function overtaking() {
+  const overtaken = { run: null };
+  const wrap = (repository) => ({
+    ...repository,
+    async startAdminAction(row, client) {
+      await repository.startAdminAction(row, client);
+      const run = overtaken.run;
+      overtaken.run = null;
+      if (run) await run();
+    }
+  });
+  return { overtaken, wrap };
+}
+
+test("an identical request that commits its release after this one's action starts: 200 with that release, the action done with repeated: true, and no second release", async (t) => {
+  const { overtaken, wrap } = overtaking();
+  const s = await setup(t, { wrap });
+  if (!s) return;
+  await report(s);
+  const other = s.make(s.repository);
+  const asked = body(s);
+  let competing = null;
+  overtaken.run = async () => { competing = await other.releaseBinding(ADMIN, asked); };
+  const made = await s.service.releaseBinding(ADMIN, asked);
+  assert.equal(competing?.status, 201, "the competing request made the release");
+  assert.equal(made.status, 200);
+  assert.deepEqual(made.release, competing.release);
+  assert.deepEqual([await count(s, "binding_releases"), await count(s, "integration_events", "kind = 'binding_released'")], [1, 1]);
+  const rows = await actions(s);
+  assert.deepEqual(rows.map((row) => row.outcome), ["done", "done"]);
+  assert.deepEqual(rows.map((row) => row.details).sort((a, b) => Object.keys(a).length - Object.keys(b).length), [
+    { releaseId: competing.release.releaseId }, { releaseId: competing.release.releaseId, repeated: true }
+  ]);
+  await s.service._pushesIdle();
+  await other._pushesIdle();
+  assert.equal(s.pushFetch.posts.length, 1, "one push, for the competing request's release");
+});
+
+test("a binding report that moves the binding on after this request's action starts: 409 binding_changed, the action failed with that code, and no release, feed change or push", async (t) => {
+  const { overtaken, wrap } = overtaking();
+  const s = await setup(t, { wrap });
+  if (!s) return;
+  await report(s);
+  const before = await s.service.changes(s.built.reportClientId, "0");
+  overtaken.run = () => report(s, { version: 4 });
+  await assert.rejects(s.service.releaseBinding(ADMIN, body(s)), refused(409, "binding_changed", "This binding has changed since it was loaded. Load it again."));
+  assert.equal(overtaken.run, null, "the report ran");
+  await s.service._pushesIdle();
+  assert.deepEqual([await count(s, "binding_releases"), await count(s, "integration_events", "kind = 'binding_released'")], [0, 0]);
+  assert.deepEqual((await s.service.changes(s.built.reportClientId, String(before.cursor))).changes.filter((change) => change.kind === "binding_released"), []);
+  assert.deepEqual((await actions(s)).map((row) => [row.outcome, row.details]), [["failed", { code: "binding_changed" }]]);
+  assert.deepEqual(s.pushFetch.posts, [], "no push");
 });
 
 test("the action is written started before anything else: if that write fails, nothing is released", async (t) => {
