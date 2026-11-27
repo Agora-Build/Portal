@@ -49,12 +49,11 @@ integration's service identity.
   admin site is D27 (§3.3.5).
 - **Launch, message and notify** (D28): Auth accepts the three scopes and the Portal offers them. The Station turns
   them into Atem's new signed operations only in builds with a feature that is off everywhere (§3.1.3).
-- **Delegated host work** (D29, agreed by Atem, Astation and Auth/Portal on 2026-11-08; Phase A built in Auth, the
-  Portal and the admin site, Phase B's revocation reports and the availability slice (the Station directory, the
-  checkpoint, account availability and the binding reports) in the Portal, and the two-phase Station removal in Auth and
-  the Portal, off by default): Atem owns the tasks it
-  accepts, so they survive their sender going offline or its integration expiring, while revocation stays signed, durable
-  and race-safe; host-to-host senders use the same lifecycle (§3.11).
+- **Delegated host work** (D29, agreed by Atem, Astation and Auth/Portal on 2026-11-08; Phase A built in Auth, the Portal and
+  the admin site, Phase B's revocation reports and the availability slice (the Station directory, the checkpoint, account
+  availability and the binding reports) in the Portal, and the two-phase Station removal in Auth and the Portal, off by
+  default): Atem owns the tasks it accepts, so they survive their sender going offline or its integration expiring, while
+  revocation stays signed, durable and race-safe; host-to-host senders use the same lifecycle (§3.11).
 - **Later:** the mobile app (§3.3.3), Discord (§3.8), the assistant (§3.9), Station AI (§3.10), account deletion and
   export (§3.6), and production.
 
@@ -93,18 +92,16 @@ Notes:
 - **Launch, message and notify, Station (Astation):** the Station maps the three scopes to Atem's operations only with
   the Cargo feature `host-work-api`, which is off on every Station. Astation's consent review, signing gate and native
   launch are merged; its message inbox is not built.
-- **Delegated host work:** the design was agreed by Atem, Astation and Auth/Portal on 2026-11-08. Phase A is built in
-  Auth, the Portal and the admin site, off by default (Auth's `AUTH_DELEGATED_HOST_WORK`, the Portal's
-  `DELEGATED_HOST_WORK`, and the admin site's own `DELEGATED_HOST_WORK`, turned on in that order). Phase B, the Station's
-  revocation reports and the per-host counts, is built in the Portal, off under the same `DELEGATED_HOST_WORK`. So is the
-  availability slice: the native Station directory, the exact-cursor checkpoint, account availability (it relies on the
-  accounts baseline Auth writes with `AUTH_DELEGATED_HOST_WORK` on) and the built-in Station's two binding reports. The
-  two-phase Station removal is built in Auth and the Portal, off under both settings: a removed Station first passes its
-  integrations' revocations to the hosts (platform.md, "Removing A Station"). Phase
-  C includes releasing a binding, which is being built as D27's slice 1 (§3.3.5); the rest of it is not started (§3.11
-  says what the phases are). Atem has started
-  its shared core, and nothing new is activated until the agreed schemas, compatible verifiers and end-to-end tests are in
-  place.
+- **Delegated host work:** the design was agreed by Atem, Astation and Auth/Portal on 2026-11-08. Phase A is built in Auth,
+  the Portal and the admin site, off by default (Auth's `AUTH_DELEGATED_HOST_WORK`, the Portal's `DELEGATED_HOST_WORK`, and
+  the admin site's own `DELEGATED_HOST_WORK`, turned on in that order). Phase B, the Station's revocation reports and the
+  per-host counts, is built in the Portal, off under the same `DELEGATED_HOST_WORK`. So is the availability slice: the native
+  Station directory, the exact-cursor checkpoint, account availability (it relies on the accounts baseline Auth writes with
+  `AUTH_DELEGATED_HOST_WORK` on) and the built-in Station's two binding reports. The two-phase Station removal is built in
+  Auth and the Portal, behind both settings and off by default: a removed Station first passes its integrations' revocations
+  to the hosts (platform.md, "Removing A Station"). Phase C includes releasing a binding, which is being built as D27's slice
+  1 (§3.3.5); the rest of it is not started (§3.11 says what the phases are). Atem has started its shared core, and nothing
+  new is activated until the agreed schemas, compatible verifiers and end-to-end tests are in place.
 - **Hosted agent execution:** the dev Station image is built with the Cargo feature `hosted-agent-api`; default and
   production builds keep it closed.
 - **Production:** no production Auth, Portal or built-in Station is set up. The admin site's code accepts only its dev
@@ -1166,8 +1163,9 @@ owner's decisions are in its Appendix A.
   in Astation is always mirrored to the Portal, so the Station's record backs it.
 - The Portal shows Revoking until every covered host has applied the revocation, or 24 hours have passed.
 - Removing a Station is two-phase: the Station is Removing while it passes the revocations to the hosts, and is removed
-  once each has its final report, or 26 hours after the removal began. An integration it couldn't confirm on every host
-  shows "Revoked; your hosts weren't all told", and Astation offers its owner a native revoke.
+  once each has its final report, or at the first hourly check 26 hours after the removal began. An integration revoked
+  without its Station's final report shows "Revoked; your hosts weren't all told", and Astation offers its owner a native
+  revoke.
 
 **Auth/Portal's part** (the design's I.9 and IV rows 6, 7 and 16; built after the shared contract and Atem's host
 work, nothing before the owner approves):
@@ -1181,8 +1179,8 @@ work, nothing before the owner approves):
   `integrations:approve`); the Station feed's `interruptRunning`, `interrupt_requested`, account events (built-in
   Station only) and `binding_released`; the report kinds `revocation_applied{host, record_id}`,
   `revoked{outcome, pending_hosts}`, `binding_changed` and `binding_attempt`; the expiry, pause, host-sender and
-  mailbox copy; the two-phase Station removal (`removing`, its completion within 26 hours, `pendingHostRevocation` and
-  the native revoke that clears it, 409 `station_removing`); and the Station Builders contract in
+  mailbox copy; the two-phase Station removal (`removing`, its completion at the first hourly check 26 hours after the begin,
+  `pendingHostRevocation` and the native revoke that clears it, 409 `station_removing`); and the Station Builders contract in
   [platform.md](platform.md#for-station-builders).
 - **Admin site:** the revoke form's question, an "Interrupt running tasks" action, the disable confirmation ("This
   also suspends the built-in Station's relay and mailbox service for this account's hosts. It revokes nothing on the

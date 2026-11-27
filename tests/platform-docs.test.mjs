@@ -106,7 +106,12 @@ test("the example answers in platform.md are what the Portal gives", async (t) =
   const staying = await service.createIntegration(OWNER, { stationId: leaving.id, name: "Leaving", scopes: [], publicJwk: publicJwk() });
   await service.approve(OWNER, staying.id, { r9Svc: R9 });
   assert.equal((await service.removeStation(OWNER, leaving.id)).removing, true);
-  assertMatches("directory-removing", (await service.directory(OWNER, {})).stations.find((entry) => entry.id === leaving.id));
+  const removing = (await service.directory(OWNER, {})).stations.find((entry) => entry.id === leaving.id);
+  assertMatches("directory-removing", removing);
+  // completeBy is 26 hours after removalStartedAt, in the document's example as in the service's entry.
+  for (const [name, entry] of [["the example", examples["directory-removing"]], ["the service's entry", removing]]) {
+    assert.equal(Date.parse(entry.completeBy) - Date.parse(entry.removalStartedAt), 26 * 3600000, name + ": completeBy is 26 hours after removalStartedAt");
+  }
 
   // The checkpoint of the built-in Station: a ready integration, a revoking one that interrupts, Auth's baseline, a disabled
   // account and a binding.
