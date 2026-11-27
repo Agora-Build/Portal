@@ -800,10 +800,13 @@ delegated work (Astation #79) waits for, comes first.
     `version` differs from the record: 409 `binding_changed` (the page reloads it).
   - Otherwise, in one transaction under the Station event lock, with the binding re-read and locked: a
     `binding_releases` row (`pending`), the `binding_released` change on that Station's feed, and the `admin_actions`
-    row's `done`; the Station is pushed after the commit. The answer is 201 with the release:
-    `{ releaseId, stationId, account, accountId, genesisHash, bindingId, version, state, requestedAt, settledAt,
-    actor, reason }`. `releaseId` is `rl-` and a lowercase ULID.
-  - `GET /api/admin/v1/releases/<releaseId>` reads one release.
+    row's `done`; the Station is pushed after the commit. The answer is `{ "release": … }`: 201 for the new release,
+    and 200 for a repeat of the same key or a pending release of the same binding. A release is `{ releaseId,
+    stationId, account, accountId, genesisHash, bindingId, version, state, requestedAt, settledAt, settledVersion, actor,
+    reason }`; `settledAt` and `settledVersion` are `null` while it is pending. `releaseId` is `rl-` and a lowercase ULID.
+  - `GET /api/admin/v1/releases/<releaseId>` reads one release, with the same `{ "release": … }` wrapper.
+  - A database failure on any admin route is 503 `unavailable`. A `PORTAL_ADMIN_CLIENT_ID` that is the Portal's own
+    client ID or a Station report client's leaves the admin API off.
   - Releases are kept forever, like the Station reports.
 - **Portal: the Station's side of it**, as posted on
   [Portal #41](https://github.com/Agora-Build/Portal/issues/41#issuecomment-7208684880) and written into platform.md's
