@@ -1633,11 +1633,12 @@ test("the stack's built-in sync then completes the removals that are done: a Sta
   });
   try {
     await integrations.ready();
+    // ready() does not wait for the completions: the first sync starts them, and the log line comes once one has committed.
+    await waitFor(() => logs.includes("Station removal completed after 26 hours: 1 integration pending host revocation."), "the removal the first sync completes");
     assert.equal((await repository.station(registered.id)).status, "removed", "completed after the first sync");
     const row = await repository.integration("i-1");
     assert.deepEqual([row.state, row.pendingHostRevocation], ["revoked", true]);
     assert.equal(manage.calls.filter((name) => name === "completeStationRemoval").length, 1);
-    assert.ok(logs.includes("Station removal completed after 26 hours: 1 integration pending host revocation."));
     await integrations.service._pushesIdle();
     assert.deepEqual(pushes, ["https://one.example/agora-build/v1/changes"]);
   } finally {
@@ -1695,6 +1696,34 @@ test("the hourly sync completes a removal that has become 26 hours old since the
     await waitFor(async () => (await repository.station(station.id)).status === "removed", "the removal completed by the next sync");
     assert.deepEqual([(await repository.integration("i-1")).pendingHostRevocation, manage.calls.filter((name) => name === "completeStationRemoval").length], [true, 1]);
   } finally {
+    await integrations.close();
+  }
+});
+
+test("ready() does not wait for the removals the first sync completes: it is ready while Auth's completion is still held", { timeout: 20000 }, async (t) => {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
+  const manage = fakeManage({ delegated: true });
+  const { repository, station } = await seedRemoving(db, manage, 27);
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  const complete = manage.completeStationRemoval;
+  let asked = 0;
+  manage.completeStationRemoval = async (...args) => { asked += 1; await held; return complete(...args); };
+  const integrations = createIntegrationStack({
+    db: { ...db, close: async () => {} }, manage, idp: null, log: () => {}, delegatedHostWork: true,
+    authChanges: { pollMs: 3600000, minGapMs: 5 }
+  });
+  try {
+    // Bounded, so a ready() that waited for the held completion fails this test instead of hanging the run.
+    const expired = new Promise((resolve, reject) => setTimeout(() => reject(new Error("ready() waited for the completions")), 5000).unref());
+    assert.equal(typeof (await Promise.race([integrations.ready(), expired])).stations, "function", "ready although Auth has not answered the completion");
+    await waitFor(() => asked > 0, "the completion asked of Auth");
+    assert.equal((await repository.station(station.id)).status, "removing");
+    release();
+    await waitFor(async () => (await repository.station(station.id)).status === "removed", "the removal completed once Auth answers");
+  } finally {
+    release();
     await integrations.close();
   }
 });

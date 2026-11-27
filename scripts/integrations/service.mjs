@@ -155,11 +155,12 @@ const WAITING_AGAIN_MS = 3600000;
 const accountsCount = (count) => count + (count === 1 ? " account" : " accounts");
 const integrationsCount = (count) => count + (count === 1 ? " integration" : " integrations");
 // The line logged for a completed removal, by how it completed (D29, completedBy), given how many integrations it flagged.
-const COMPLETED = {
-  all_revoked: () => "Station removal completed: every integration revoked.",
-  deadline: (flagged) => "Station removal completed after 26 hours: " + integrationsCount(flagged) + " pending host revocation.",
-  auth_removed: (flagged) => "Station removal completed: Auth has it removed; " + integrationsCount(flagged) + " pending host revocation."
-};
+function completedLine(completedBy, flagged) {
+  if (completedBy === "all_revoked") return "Station removal completed: every integration revoked.";
+  if (completedBy === "deadline") return "Station removal completed after 26 hours: " + integrationsCount(flagged) + " pending host revocation.";
+  if (completedBy === "auth_removed") return "Station removal completed: Auth has it removed; " + integrationsCount(flagged) + " pending host revocation.";
+  return "Station removal completed: " + integrationsCount(flagged) + " pending host revocation.";
+}
 const WAITING = Symbol("waiting");
 // How the Station's feed and an integration's history name a change an Agora.Build admin made (spec §3.3.4): the admin
 // and the reason they gave stay in the Portal's event (actor, reason) and in Auth's audit.
@@ -665,20 +666,32 @@ export function createIntegrationService({
   }
 
   // Inside the caller's transaction, retires a Portal Station at `origin` (active, or removing: D29) other than `id`: Auth
-  // has given the origin to `id`, so the old Station is gone there, with its integrations. With the setting on it is gone
-  // without its removal's two phases, so what it couldn't pass on is flagged (abandonOn). Returns the retired Station's ID
-  // or null.
+  // has given the origin to `id`, so the old Station is gone there, with its integrations (removeGoneOn). Returns the
+  // retired Station's ID or null.
   async function retireStale(client, origin, id) {
     const stale = await repository.activeStationAt(origin, client);
     if (!stale || stale.id === id) return null;
-    await repository.markStationRemoved(stale.id, now(), client);
-    await revokeGone(client, stale.id);
-    await repository.appendEvent({ stationId: stale.id, accountId: stale.ownerAccount ?? SYSTEM, actor: SYSTEM, kind: "station_removed", reason: "reconciled" }, client);
+    await removeGoneOn(client, stale.id);
     return stale.id;
   }
 
-  // The revocations of a Station Auth has removed behind the Portal's back (reconcile, retireStale): at once, and with the
-  // setting on (D29) flagged where a host may hold them, since the Station never passed them on (abandonOn).
+  // Inside the caller's transaction, under the event lock, removes a Station Auth has removed behind the Portal's back
+  // (reconcile, retireStale), deciding on the row as it is now, whatever the setting. One the Portal has removing (D29) is
+  // completed as its removal would be (completeOn, `auth_removed`): a removal begun keeps its flags and its event. An active
+  // one is gone without the two phases: its integrations are revoked at once (revokeGone). Returns null when the Portal has
+  // it removed already, else { completed, flagged }: whether it completed a removal, and how many integrations that flagged.
+  async function removeGoneOn(client, stationId) {
+    const station = await repository.station(stationId, client);
+    if (station?.status === "removing") return { completed: true, flagged: await completeOn(client, station, "auth_removed") };
+    if (station?.status !== "active") return null;
+    await repository.markStationRemoved(stationId, now(), client);
+    await revokeGone(client, stationId);
+    await repository.appendEvent({ stationId, accountId: station.ownerAccount ?? SYSTEM, actor: SYSTEM, kind: "station_removed", reason: "reconciled" }, client);
+    return { completed: false, flagged: 0 };
+  }
+
+  // The revocations of an active Station Auth has removed behind the Portal's back: at once, and with the setting on (D29)
+  // flagged where a host may hold them, since the Station never passed them on (abandonOn).
   const revokeGone = (client, stationId) => (delegatedHostWork
     ? abandonOn(client, stationId, { actor: SYSTEM, reason: "reconciled" })
     : revokeOn(client, stationId, () => true, { actor: SYSTEM, reason: "reconciled", direct: true }));
@@ -757,22 +770,26 @@ export function createIntegrationService({
     return completeHere(station, completedBy);
   }
 
-  // The Portal's half of completing a removal (D29), once Auth has the Station removed: in one transaction under the event
-  // lock and only while the Portal still has it removing (so two replicas, or a replica and a reconcile, complete it once)
-  // it is removed, every integration on it not revoked yet revoked and, with an R9 service, flagged (abandonOn), and a
-  // station_removed event says how it completed (`completedBy`: all_revoked, deadline, or auth_removed when a listing
-  // found Auth had removed it). The Station is pushed once more after the commit: its token is refused from now on, which
-  // is how it learns to stop. Returns whether this call completed it.
+  // Inside the caller's transaction, under the event lock, the Portal's half of completing a removal (D29), once Auth has
+  // the Station removed, and only while the Portal still has it removing (so two replicas, or a replica and a reconcile,
+  // complete it once): it is removed, every integration on it not revoked yet revoked and, with an R9 service, flagged
+  // (abandonOn), and a station_removed event says how it completed (`completedBy`: all_revoked, deadline, or auth_removed
+  // when a listing found Auth had removed it). Returns how many integrations it flagged, or null when the Portal no longer
+  // has it removing.
+  async function completeOn(client, station, completedBy) {
+    if ((await repository.station(station.id, client))?.status !== "removing") return null;
+    await repository.markStationRemoved(station.id, now(), client);
+    const count = await abandonOn(client, station.id, { actor: SYSTEM, reason: "station_removed" });
+    await repository.appendEvent({ stationId: station.id, accountId: station.ownerAccount, actor: SYSTEM, kind: "station_removed", reason: "removal_completed", details: { completedBy, pendingHostRevocation: count } }, client);
+    return count;
+  }
+
+  // The Portal's half of completing a removal in its own transaction (completeOn). The Station is pushed once more after the
+  // commit: its token is refused from now on, which is how it learns to stop. Returns whether this call completed it.
   async function completeHere(station, completedBy) {
-    const flagged = await appending(async (client) => {
-      if ((await repository.station(station.id, client))?.status !== "removing") return null;
-      await repository.markStationRemoved(station.id, now(), client);
-      const count = await abandonOn(client, station.id, { actor: SYSTEM, reason: "station_removed" });
-      await repository.appendEvent({ stationId: station.id, accountId: station.ownerAccount, actor: SYSTEM, kind: "station_removed", reason: "removal_completed", details: { completedBy, pendingHostRevocation: count } }, client);
-      return count;
-    });
+    const flagged = await appending((client) => completeOn(client, station, completedBy));
     if (flagged === null) return false;
-    log(COMPLETED[completedBy](flagged));
+    log(completedLine(completedBy, flagged));
     changed(station.id);
     return true;
   }
@@ -897,21 +914,12 @@ export function createIntegrationService({
       }
       if (known.has(station.id)) continue;
       if (station.role === "owner") {
-        // A Station the Portal has removing (D29) that Auth has removed: its removal completed there (the Portal's half
-        // is still to do), so the Portal completes it, flags and all, and the event says so.
-        if (station.status === "removing") {
-          await completeHere(station, "auth_removed");
-          continue;
-        }
-        // Gated on the Station still being there under the lock, so listings racing each other record its removal once.
-        const removed = await appending(async (client) => {
-          if (!(await repository.markStationRemoved(station.id, now(), client))) return false;
-          await revokeGone(client, station.id);
-          await repository.appendEvent({ stationId: station.id, accountId, actor: "system", kind: "station_removed", reason: "reconciled" }, client);
-          return true;
-        });
-        if (removed) {
-          log("Station removed in Portal: absent from Auth.");
+        // Decided on the row under the lock (removeGoneOn), not on the one read above: a Station the Portal has removing
+        // (D29) has its removal completed, flags and all; an active one is gone without the two phases; one removed
+        // meanwhile (listings racing each other, or a completion) is left, so its removal is recorded once.
+        const gone = await appending((client) => removeGoneOn(client, station.id));
+        if (gone) {
+          log(gone.completed ? completedLine("auth_removed", gone.flagged) : "Station removed in Portal: absent from Auth.");
           changed(station.id);
         }
         continue;

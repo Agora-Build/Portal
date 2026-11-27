@@ -58,26 +58,31 @@ export function createIntegrationStack({ db, manage, idp, log, stationFetch = cr
   }, PARTITION_INTERVAL);
   partitions.unref();
   // The built-in Stations, synced from Auth's account-less listing once the stack is ready and then hourly (P17, D26);
-  // a failed sync is logged by syncBuiltIn and tried again a minute later. After a sync that reached Auth, the removing
-  // Stations that are done, or 26 hours old, are completed (D29, completeRemovals; it calls Auth too, so not after a failed
-  // one). ready() waits for the first sync and those completions, each bounded by the management call's 10 s timeout plus
-  // its database statements (each within statement_timeout).
+  // a failed sync is logged by syncBuiltIn and tried again a minute later. ready() waits for the first sync, which is
+  // bounded by the management call's 10 s timeout plus the database statements of reconciling (each within
+  // statement_timeout). After a sync that reached Auth, the removing Stations that are done, or 26 hours old, are completed
+  // (D29, completeRemovals; it calls Auth too, so not after a failed sync): by the hourly run before it re-arms, and by
+  // ready() once the feed has started, beside it, since nothing it returns needs them (close() waits for them).
   let builtInSync = null;
+  let completing = null;
   let closed = false;
-  const syncBuiltIn = async () => {
+  const syncBuiltIn = async ({ first = false } = {}) => {
     const synced = await service.syncBuiltIn();
-    if (synced && !closed) await service.completeRemovals();
-    if (closed) return;
-    builtInSync = setTimeout(syncBuiltIn, synced ? builtInSyncAfter.ok : builtInSyncAfter.failed);
-    builtInSync.unref();
+    if (synced && !first && !closed) await service.completeRemovals();
+    if (!closed) {
+      builtInSync = setTimeout(syncBuiltIn, synced ? builtInSyncAfter.ok : builtInSyncAfter.failed);
+      builtInSync.unref();
+    }
+    return synced;
   };
   function ready() {
     pending ||= (async () => {
       await db.migrate();
       await db.ensureEventPartitions();
       prepared = true;
-      await syncBuiltIn();
+      const synced = await syncBuiltIn({ first: true });
       if (!closed) feed.start();
+      if (synced && !closed) completing = service.completeRemovals().catch((error) => log("Station removals not checked: " + (error.code || "error") + "."));
       return service;
     })().catch((error) => {
       pending = null;
@@ -99,6 +104,7 @@ export function createIntegrationStack({ db, manage, idp, log, stationFetch = cr
       closed = true;
       clearInterval(partitions);
       clearTimeout(builtInSync);
+      await completing;
       await feed.stop();
       await db.close();
     }

@@ -20,6 +20,12 @@ const RECORD = "0b9f5b1e-6c1d-4c38-9a59-2f0d0f6e7a10";
 
 const publicJwk = () => generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey.export({ format: "jwk" });
 const iso = (ms) => new Date(ms).toISOString();
+// Waits for `promise`, but fails after `ms` so a test that deadlocks fails fast instead of hanging the run.
+function within(promise, ms, label) {
+  let timer;
+  const expired = new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error("timed out waiting for " + label)), ms); });
+  return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
+}
 
 // The Portal with the setting on over a fake Auth with its own on (`authDelegated` false: an Auth without the two-phase
 // routes), on a clock the tests move, with a custom Station of OWNER's shared with MEMBER. `open()` starts another replica
@@ -40,10 +46,10 @@ async function setup(t, { delegatedHostWork = true, authDelegated = delegatedHos
     log: (line) => logs.push(line), challengeValue: () => "proof-value-" + (++counter), notify: (stationId) => notified.push(stationId), delegatedHostWork: setting
   });
   const service = open();
-  async function register(accountId = OWNER, origin = "https://one.example") {
-    const challenge = await service.createChallenge(accountId, origin);
+  async function register(accountId = OWNER, origin = "https://one.example", via = service) {
+    const challenge = await via.createChallenge(accountId, origin);
     served.body = challenge.value;
-    return service.registerStation(accountId, { challengeId: challenge.challengeId, reportKey: publicJwk() });
+    return via.registerStation(accountId, { challengeId: challenge.challengeId, reportKey: publicJwk() });
   }
   const station = await register();
   await service.share(OWNER, station.id, MEMBER);
@@ -413,10 +419,12 @@ test("two replicas completing the same removal at once complete it once: one sta
   // The event lock is held meanwhile, so both have found the Station removing and had Auth's answer before either commits.
   const holder = await s.db.pool.connect();
   let counts;
+  let running = null;
   try {
     await holder.query("BEGIN");
     await holder.query("SELECT pg_advisory_xact_lock(hashtext('portal_integration_events'))");
-    const running = Promise.all([s.service.completeRemovals(), replica.completeRemovals()]);
+    running = Promise.all([s.service.completeRemovals(), replica.completeRemovals()]);
+    running.catch(() => {});
     const until = Date.now() + 5000;
     while (s.asked("completeStationRemoval") < 2) {
       if (Date.now() > until) throw new Error("both replicas should have asked Auth");
@@ -427,6 +435,8 @@ test("two replicas completing the same removal at once complete it once: one sta
   } finally {
     await holder.query("ROLLBACK").catch(() => {});
     holder.release();
+    // On a failure above both are still waiting for the lock: they finish now, before the database goes.
+    if (running) await within(running.catch(() => {}), 10000, "the replicas to finish");
   }
   assert.deepEqual(counts.sort(), [0, 1], "one of them completed it");
   assert.equal((await s.events("station_removed")).length, 1);
@@ -626,7 +636,7 @@ test("a member's listing without a Station the Portal has removing never records
   assert.deepEqual([(await s.events("member_removed")).length, (await s.events("station_removed")).length], [0, 1]);
 });
 
-test("a removing Station whose origin another Station took at Auth is retired as gone: its revoking integrations flagged, no second event for the removal", async (t) => {
+test("a removing Station whose origin another Station took at Auth is retired by completing its removal: its revoking integrations flagged, one removal_completed event", async (t) => {
   const s = await setup(t);
   if (!s) return;
   const silent = await s.integration();
@@ -635,13 +645,64 @@ test("a removing Station whose origin another Station took at Auth is retired as
   const successor = await s.register(STRANGER, "https://one.example");
   assert.deepEqual([(await s.repository.station(s.station.id)).status, (await s.repository.station(successor.id)).status], ["removed", "active"]);
   assert.deepEqual(await s.flag(silent), ["revoked", true]);
-  assert.deepEqual((await s.events("station_removed")).map((event) => [event.actor, event.reason]), [["system", "reconciled"]]);
+  assert.deepEqual((await s.events("station_removed")).map((event) => [event.actor, event.reason, event.details]), [["system", "removal_completed", { completedBy: "auth_removed", pendingHostRevocation: 1 }]]);
+  assert.ok(s.logs.includes("Station removed in Portal: its origin belongs to another Station at Auth."));
   await s.service.stations(OWNER);
   assert.equal((await s.events("station_removed")).length, 1, "the owner's listing finds it removed already");
 });
 
-test("two listings finding the same Station gone record it removed once", async (t) => {
+test("with the setting turned off meanwhile, a removing Station whose origin another Station took (a new registration, or a listing's successor) still ends removed with its revoking integrations revoked and flagged", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const silent = await s.integration();
+  const waiting = await s.integration(OWNER, { approved: false });
+  const second = await s.register(OWNER, "https://two.example");
+  const there = await s.integration(OWNER, { stationId: second.id });
+  await s.service.removeStation(OWNER, s.station.id);
+  await s.service.removeStation(OWNER, second.id);
+  s.authStation().status = "removed";
+  s.authStation(second.id).status = "removed";
+  const off = s.open({ delegatedHostWork: false });
+  // A registration at the first origin.
+  const successor = await s.register(STRANGER, "https://one.example", off);
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, (await s.repository.station(successor.id)).status], ["removed", "active"]);
+  assert.deepEqual([await s.flag(silent), await s.flag(waiting)], [["revoked", true], ["revoked", false]]);
+  // A listing at the second: Auth gave the origin to another account's new Station.
+  const listed = await s.manage.registerStation({ origin: "https://two.example", owner: STRANGER, reportKey: {}, actor: STRANGER });
+  await off.stations(STRANGER);
+  assert.deepEqual([(await s.repository.station(second.id)).status, (await s.repository.station(listed.id)).status], ["removed", "active"]);
+  assert.deepEqual(await s.flag(there), ["revoked", true]);
+  assert.deepEqual((await s.events("station_removed")).map((event) => [event.station_id, event.reason, event.details]), [
+    [s.station.id, "removal_completed", { completedBy: "auth_removed", pendingHostRevocation: 1 }], [second.id, "removal_completed", { completedBy: "auth_removed", pendingHostRevocation: 1 }]
+  ], "one removal_completed event each");
+});
+
+test("an owner's listing decides on the Station as it is under the lock, whatever its setting: one the Portal began removing since it was read is completed with flags", async (t) => {
+  const armed = { run: null };
+  const s = await setup(t, {
+    wrap: (repository) => ({
+      ...repository,
+      async stationsFor(...args) {
+        const found = await repository.stationsFor(...args);
+        // Another replica begins the removal right after this listing read the Station, still active.
+        if (armed.run) { const run = armed.run; armed.run = null; await run(); }
+        return found;
+      }
+    })
+  });
+  if (!s) return;
+  const id = await s.integration();
+  s.authStation().status = "removed";
+  const off = s.open({ delegatedHostWork: false });
+  armed.run = () => s.repository.markStationRemoving(s.station.id, s.clock.now);
+  await off.stations(OWNER);
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, await s.flag(id)], ["removed", ["revoked", true]]);
+  assert.deepEqual((await s.events("station_removed")).map((event) => [event.reason, event.details]), [["removal_completed", { completedBy: "auth_removed", pendingHostRevocation: 1 }]]);
+});
+
+test("two listings finding the same Station gone record it removed once", { timeout: 20000 }, async (t) => {
   // Both listings read the account's Stations before either commits, so each finds the Station active and absent from Auth.
+  // The wait is bounded: if a listing never reads, the test fails instead of hanging.
   const barrier = { on: false, reads: 0, release: null, open: null };
   barrier.open = new Promise((release) => { barrier.release = release; });
   const s = await setup(t, {
@@ -650,7 +711,7 @@ test("two listings finding the same Station gone record it removed once", async 
       async stationsFor(...args) {
         const found = await repository.stationsFor(...args);
         if (barrier.on && ++barrier.reads === 2) barrier.release();
-        if (barrier.on) await barrier.open;
+        if (barrier.on) await within(barrier.open, 10000, "both listings to read the account's Stations");
         return found;
       }
     })
@@ -660,8 +721,11 @@ test("two listings finding the same Station gone record it removed once", async 
   s.authStation().status = "removed";
   s.notified.length = 0;
   barrier.on = true;
-  await Promise.all([s.service.stations(OWNER), s.open().stations(OWNER)]);
-  barrier.on = false;
+  try {
+    await Promise.all([s.service.stations(OWNER), s.open().stations(OWNER)]);
+  } finally {
+    barrier.on = false;
+  }
   assert.deepEqual([(await s.events("station_removed")).length, await s.flag(id), s.notified], [1, ["revoked", true], [s.station.id]]);
 });
 
