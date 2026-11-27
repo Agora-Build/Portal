@@ -750,6 +750,18 @@ export function createIntegrationService({
     }
   }
 
+  // The admins Auth's built-in listing names for a built-in Station (D27), kept only to check the admin API's tokens: in
+  // the Portal an admin is still an ordinary account. Only this listing has them; one without them (an Auth from before
+  // D27) means none, so nobody passes the gate. Entries that aren't account IDs are ignored and counted, never echoed.
+  async function followAdmins(entry) {
+    const listed = Array.isArray(entry.admins) ? entry.admins : [];
+    const valid = listed.filter((id) => typeof id === "string" && ACCOUNT_ID.test(id));
+    const ignored = listed.length - valid.length;
+    if (ignored) log("Built-in Station admins: ignored " + ignored + (ignored === 1 ? " entry that is not an account ID." : " entries that are not account IDs."));
+    const admins = [...new Set(valid)].sort();
+    if (await repository.setBuiltInAdmins(entry.id, admins)) log("Built-in Station admins followed from Auth: " + admins.length + (admins.length === 1 ? " admin." : " admins."));
+  }
+
   // How the Portal follows Auth's accounts (D29, the setting on). It is in one of three modes, kept with its place in
   // Auth's feed (repository.accountSync):
   // * rebuilding: from the feed's first entry, into tables of its own (a first start, a reset, or Auth restored). The
@@ -1549,8 +1561,8 @@ export function createIntegrationService({
 
     // The built-in Stations as Auth lists them naming no account (GET /manage/v1/built-in-stations, spec §3.3.4), so
     // their report clients are known before anyone signs in. Only the built-in part of reconcile runs: nothing is
-    // removed or revoked on absence. Never throws; returns whether it synced. Run by the stack at ready(), hourly, and
-    // a minute after a failure.
+    // removed or revoked on absence. Each Station's `admins` are kept too (followAdmins, D27). Never throws; returns whether
+    // it synced. Run by the stack at ready(), hourly, and a minute after a failure.
     async syncBuiltIn() {
       try {
         const listed = (await manage.builtInStations()).filter((entry) => entry.builtIn === true);
@@ -1558,7 +1570,10 @@ export function createIntegrationService({
         for (const station of await repository.builtInStations()) {
           if (!known.has(station.id)) log("Built-in Station absent from Auth's listing: left as it is.");
         }
-        for (const entry of listed) await reconcileBuiltIn(entry);
+        for (const entry of listed) {
+          await reconcileBuiltIn(entry);
+          await followAdmins(entry);
+        }
         return true;
       } catch (error) {
         log("Built-in Station sync failed: " + (error instanceof ManageError ? error.code : error.code || "error") + ".");
@@ -1728,6 +1743,9 @@ export function createIntegrationService({
     },
 
     notify: (stationId) => changed(stationId),
+
+    // Whether the account is one of the admins Auth lists for an active built-in Station (D27): the admin API's gate.
+    isPortalAdmin: (accountId) => repository.isPortalAdmin(accountId),
 
     // For tests: resolves once no push is in flight.
     async _pushesIdle() {

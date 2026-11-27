@@ -140,6 +140,27 @@ function bindingAttemptRow(row) {
   };
 }
 
+// A release of a built-in Station's binding (D27, binding_releases) in the admin API's shape: `account` is the Agora.Build
+// owner released and `accountId` the R9 account, as in the binding reports. Versions are bigints read back as numbers,
+// exact because only safe integers are saved.
+function releaseRow(row) {
+  return {
+    releaseId: row.release_id,
+    stationId: row.station_id,
+    account: row.account_id,
+    accountId: row.r9_account_id,
+    genesisHash: row.genesis_hash,
+    bindingId: row.binding_id,
+    version: Number(row.version),
+    state: row.state,
+    requestedAt: iso(row.requested_at),
+    settledAt: iso(row.settled_at) ?? null,
+    settledVersion: row.settled_version === null ? null : Number(row.settled_version),
+    actor: row.actor,
+    reason: row.reason
+  };
+}
+
 export function createRepository(db) {
   const run = (client, text, values) => (client || db.pool).query(text, values);
 
@@ -636,6 +657,122 @@ export function createRepository(db) {
       const { rows } = await run(client, "SELECT * FROM binding_attempts WHERE account_id = $1 AND attempted_at >= $2 ORDER BY attempted_at DESC, station_id, report_id" + (limit === undefined ? "" : " LIMIT $3"),
         limit === undefined ? [accountId, timeOf(since, "since")] : [accountId, timeOf(since, "since"), limit]);
       return rows.map(bindingAttemptRow);
+    },
+
+    // The admins Auth's built-in listing names for a built-in Station (D27), as given (the service sorts them). Only an
+    // active built-in Station's are kept. Returns whether they changed.
+    async setBuiltInAdmins(id, admins, client) {
+      if (!Array.isArray(admins) || admins.some((admin) => typeof admin !== "string")) throw new TypeError("admins must be a list of account IDs.");
+      const { rowCount } = await run(client,
+        "UPDATE stations SET admin_accounts = $2::text[] WHERE id = $1 AND built_in AND status = 'active' AND admin_accounts IS DISTINCT FROM $2::text[]",
+        [id, admins]);
+      return rowCount > 0;
+    },
+
+    // Whether the account is an admin of an active built-in Station: the admin API's admin set (D27).
+    async isPortalAdmin(accountId, client) {
+      const { rows } = await run(client, "SELECT EXISTS (SELECT 1 FROM stations WHERE built_in AND status = 'active' AND $1 = ANY (admin_accounts)) AS admin", [accountId]);
+      return rows[0].admin === true;
+    },
+
+    // binding(), read and locked for the caller's transaction (a release, D27).
+    async bindingForUpdate(stationId, r9AccountId, genesisHash, client) {
+      if (!client) throw new TypeError("bindingForUpdate needs a transaction client.");
+      const { rows } = await client.query("SELECT * FROM station_bindings WHERE station_id = $1 AND r9_account_id = $2 AND genesis_hash = $3 FOR UPDATE", [stationId, r9AccountId, genesisHash]);
+      return rows[0] ? bindingRow(rows[0]) : null;
+    },
+
+    // The active built-in Stations' recorded bindings of an Agora.Build account (`account`) or of an R9 account
+    // (`r9AccountId`), exactly one of them: by Station (oldest first), then as bindingsOn orders them.
+    async bindingsFor({ account, r9AccountId } = {}, client) {
+      if ((account === undefined) === (r9AccountId === undefined)) throw new TypeError("Name exactly one of account or r9AccountId.");
+      const column = account === undefined ? "b.r9_account_id" : "b.account_id";
+      const { rows } = await run(client,
+        "SELECT b.* FROM station_bindings b JOIN stations s ON s.id = b.station_id WHERE s.built_in AND s.status = 'active' AND " + column + " = $1 " +
+        "ORDER BY s.created_at, s.id, b.r9_account_id COLLATE \"C\", b.genesis_hash COLLATE \"C\"",
+        [account ?? r9AccountId]);
+      return rows.map(bindingRow);
+    },
+
+    // The accounts among `accountIds` that account_availability has disabled now, as a Set.
+    async disabledAmong(accountIds, client) {
+      if (!accountIds.length) return new Set();
+      const { rows } = await run(client, "SELECT account_id FROM account_availability WHERE disabled AND account_id = ANY ($1::text[])", [accountIds]);
+      return new Set(rows.map((row) => row.account_id));
+    },
+
+    // A new pending release (D27). The caller holds the event lock and has made every check (service.releaseBinding); the
+    // database refuses a second pending release of the same exact binding and a key used again.
+    async insertRelease({ releaseId, stationId, accountId, r9AccountId, genesisHash, bindingId, version, actor, reason, requestedAt, idempotencyKey, requestHash }, client) {
+      if (!Number.isSafeInteger(version) || version < 1) throw new TypeError("version must be a positive whole number.");
+      const { rows } = await run(client,
+        "INSERT INTO binding_releases (release_id, station_id, account_id, r9_account_id, genesis_hash, binding_id, version, actor, reason, requested_at, idempotency_key, request_hash) " +
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *",
+        [releaseId, stationId, accountId, r9AccountId, genesisHash, bindingId, version, actor, reason, timeOf(requestedAt, "requestedAt"), idempotencyKey, requestHash]);
+      return releaseRow(rows[0]);
+    },
+
+    async releaseById(releaseId, client) {
+      const { rows } = await run(client, "SELECT * FROM binding_releases WHERE release_id = $1", [releaseId]);
+      return rows[0] ? releaseRow(rows[0]) : null;
+    },
+
+    // The release made under an idempotency key, with the hash of the request that made it, or null.
+    async releaseByKey(key, client) {
+      const { rows } = await run(client, "SELECT * FROM binding_releases WHERE idempotency_key = $1", [key]);
+      return rows[0] ? { release: releaseRow(rows[0]), requestHash: rows[0].request_hash } : null;
+    },
+
+    // The pending release of one exact binding (its Station, R9 account, genesis, bindingId and version), or null.
+    async pendingReleaseOf({ stationId, r9AccountId, genesisHash, bindingId, version }, client) {
+      const { rows } = await run(client,
+        "SELECT * FROM binding_releases WHERE station_id = $1 AND r9_account_id = $2 AND genesis_hash = $3 AND binding_id = $4 AND version = $5 AND state = 'pending'",
+        [stationId, r9AccountId, genesisHash, bindingId, version]);
+      return rows[0] ? releaseRow(rows[0]) : null;
+    },
+
+    // A binding's releases (its Station, R9 account and genesis), the newest first, at most `limit`.
+    async releasesOf(stationId, r9AccountId, genesisHash, { limit = 10 } = {}, client) {
+      if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError("limit must be a whole number, 1 or more.");
+      const { rows } = await run(client,
+        "SELECT * FROM binding_releases WHERE station_id = $1 AND r9_account_id = $2 AND genesis_hash = $3 ORDER BY requested_at DESC, release_id COLLATE \"C\" DESC LIMIT $4",
+        [stationId, r9AccountId, genesisHash, limit]);
+      return rows.map(releaseRow);
+    },
+
+    // A Station's releases not settled yet, the oldest first: the checkpoint's pendingReleases.
+    async pendingReleasesOn(stationId, client) {
+      const { rows } = await run(client, "SELECT * FROM binding_releases WHERE station_id = $1 AND state = 'pending' ORDER BY requested_at, release_id COLLATE \"C\"", [stationId]);
+      return rows.map(releaseRow);
+    },
+
+    // Settles, for a recorded binding_changed (service.recordBinding, in its transaction), every pending release of that
+    // Station's R9 account at that genesis whose version is lower than the report's: applied when the report is released
+    // with the release's bindingId, superseded otherwise. Returns the releases it settled, oldest first.
+    async settleReleases({ stationId, r9AccountId, genesisHash, bindingId, version, bindingState, settledAt }, client) {
+      if (!Number.isSafeInteger(version) || version < 1) throw new TypeError("version must be a positive whole number.");
+      const { rows } = await run(client,
+        "WITH settled AS (UPDATE binding_releases SET state = CASE WHEN $5::text = 'released' AND binding_id = $4 THEN 'applied' ELSE 'superseded' END, " +
+        "settled_at = $7, settled_version = $6 WHERE station_id = $1 AND r9_account_id = $2 AND genesis_hash = $3 AND state = 'pending' AND version < $6 RETURNING *) " +
+        "SELECT * FROM settled ORDER BY requested_at, release_id COLLATE \"C\"",
+        [stationId, r9AccountId, genesisHash, bindingId, bindingState, version, timeOf(settledAt, "settledAt")]);
+      return rows.map(releaseRow);
+    },
+
+    // An admin's change as it starts (D27, admin_actions): written before the change, in its own statement, so that the
+    // change never runs if this fails.
+    async startAdminAction({ id, actor, action, targetKind, target, reason, at }, client) {
+      await run(client,
+        "INSERT INTO admin_actions (id, at, actor, action, target_kind, target, reason) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        [id, timeOf(at, "at"), actor, action, targetKind, target, reason]);
+    },
+
+    // Done with what it did, or failed with the refusal's code. Only a started one is finished; returns whether this
+    // call finished it.
+    async finishAdminAction(id, outcome, details, client) {
+      if (outcome !== "done" && outcome !== "failed") throw new TypeError("An admin action ends done or failed.");
+      const { rowCount } = await run(client, "UPDATE admin_actions SET outcome = $2, details = $3 WHERE id = $1 AND outcome = 'started'", [id, outcome, JSON.stringify(details ?? {})]);
+      return rowCount > 0;
     }
   };
 }
