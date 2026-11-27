@@ -782,8 +782,9 @@ delegated work (Astation #79) waits for, comes first.
 - **Portal: `admin_actions`** (migration 007): `id`, `at`, `actor`, `action`, `target_kind`, `target`, `reason`,
   `outcome` (`started`, `done`, `failed`) and `details`. A change writes `started` in its own transaction once the
   request's own fields (shape, reason, key) pass, and stops if that write fails; then `done` with what it did, or
-  `failed` with the refusal's code. A repeat answered with an existing release writes no row. Slice 1 has one action,
-  `binding_released`.
+  `failed` with the refusal's code. A repeat answered with an existing release writes no row, unless it raced an
+  identical request and had written `started` already: it then ends `done` with `details.repeated: true`. Slice 1 has one
+  action, `binding_released`.
 - **Portal: reading bindings** (a read; `DELEGATED_HOST_WORK=1`): `GET /api/admin/v1/bindings?account=<ab…>` or
   `?accountId=<R9 account ID>`, exactly one of them. The answer lists the built-in Stations' recorded bindings that match:
   `{ stationId, account, accountState, accountId, genesisHash, bindingId, version, bindingState, updatedAt, releases }`.
