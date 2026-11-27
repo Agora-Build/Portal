@@ -2008,11 +2008,14 @@ them. The full rules are Atem's, in
   state. That state is the Portal's: the cursor-0 snapshot and the checkpoint are current, never a restored backup's.
 - **`issued_at` only rises.** Each record a Station signs for a principal is issued strictly after every record it
   signed for it before, across a restart, a reset's snapshot and a handover.
-- **Removal is not two-phase yet.** Atem's §9 says a Station learns of its own removal only through a two-phase removal:
-  its integrations go `revoking` with reason `station_removed`, it issues and serves their records, then the removal
-  completes. The Portal does not do that yet: removal is one step. Auth removes the Station, and the Portal marks it
-  removed and its integrations `revoking` (reason `station_removed`, no interrupt) together, so the Station reads its feed
-  no more and never serves those records (the native revoke, under "Routes").
+- **Removal is two-phase with both settings on.** Atem's §9 says a Station learns of its own removal only through a
+  two-phase removal, and with `DELEGATED_HOST_WORK` and Auth's `AUTH_DELEGATED_HOST_WORK` on the Portal does that
+  ("Removing A Station"): the Station's integrations go `revoking` with reason `station_removed`, the Station still reads
+  its feed and reports while it issues and serves their records, and the removal completes once they are all `revoked`
+  or at the first hourly check at or after 26 hours. Those with an R9 service still revoking then, and those of a
+  Station that leaves without the two phases, are flagged pending host revocation for the owner's native revoke
+  ("Routes"). With either setting off, removal is one step, as before: the Station reads its feed no more and never
+  serves those records.
 
 **The change feed.** `GET /api/v1/stations/changes?cursor=<n>` returns
 `{ changes, cursor }` and, only for `cursor=0`, `integrations`, a snapshot of
