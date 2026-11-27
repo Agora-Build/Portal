@@ -2006,6 +2006,20 @@ them. The full rules are Atem's, in
 - **A reset starts from the current state, never from a backup.** After a reset (a new feed identity for the Station's
   origin) the Station re-issues covers only for the principals it still covers, signed anew from its current effective
   state. That state is the Portal's: the cursor-0 snapshot and the checkpoint are current, never a restored backup's.
+- **A stopped service needs no cover.** At an origin the Station stops covering a service at the first of:
+  - a revoke of it that the snapshot itself carries and that verifies at the verifying head: a retained revoke carried
+    as it is, a current manager's copy, the service's own key's revoke signed anew, or a current manager's fresh,
+    owner-confirmed revoke;
+  - its removal from the device list;
+  - the Station handing it over, or being removed.
+
+  Such a service's snapshot carries its revoke and interrupts, and no cover, hold or release. Until then it is covered,
+  revoked in the Portal or not. A revoke only the Portal has, an expiry, or a missing key or reservation never ends
+  coverage: the snapshot still needs a cover signed anew for it, or one of the revokes above. Atem's
+  [§I.5.2](https://github.com/Agora-Build/Atem/blob/main/designs/delegated-host-work.md#i52-feeds-their-identity-and-coverage)
+  (host-work-v1 §11.1, "Which principals a Station currently covers") has the rule, proposed on
+  [Astation #114](https://github.com/Agora-Build/Astation/issues/114#issuecomment-7207811340) and agreed by Astation
+  ([7208700195](https://github.com/Agora-Build/Astation/issues/114#issuecomment-7208700195)).
 - **`issued_at` only rises.** Each record a Station signs for a principal is issued strictly after every record it
   signed for it before, across a restart, a reset's snapshot and a handover.
 - **Removal is two-phase with both settings on.** Atem's §9 says a Station learns of its own removal only through a
