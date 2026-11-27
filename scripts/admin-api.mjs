@@ -58,9 +58,37 @@ export function adminClientIdFrom(value, log = () => {}, portalClientId = null) 
 export const isAdminToken = (caller, adminClientId) => caller.scopes.includes(ADMIN_SCOPE) || (adminClientId !== null && caller.clientId === adminClientId);
 export const adminTokenOnly = () => new AppError(403, "An Agora.Build admin token works only on the admin API, " + ADMIN_API + ".");
 
-// The admin API's routes. Slice 1's (releasing R9 bindings) come with the release; until then there is none, so a request
-// that passes the gate is 404 not_found. null: no route here.
-async function route() {
+const RELEASE_PATH = /^\/api\/admin\/v1\/releases\/([^/]+)$/;
+const BODY_FORM = "Send { stationId, accountId, genesisHash, bindingId, version, reason, key }.";
+
+// A change's JSON body, read by serve.mjs's reader: its refusals (not JSON, too large, not a JSON object) keep their status
+// and carry the code body here.
+async function readBody(read) {
+  try {
+    return await read();
+  } catch (error) {
+    if (error instanceof AppError && [400, 413, 415].includes(error.status)) throw failure(error.status, error.status === 400 ? BODY_FORM : error.message, "body");
+    throw error;
+  }
+}
+
+// The admin API's routes. Slice 1's release R9 bindings and need DELEGATED_HOST_WORK=1; without it there are none. null: no
+// route here, which the gate answers 404 not_found.
+async function route({ method, path, url, read, service, actor, delegatedHostWork }) {
+  if (!delegatedHostWork) return null;
+  if (path === ADMIN_API + "/bindings" && method === "GET") {
+    // Exactly one parameter, account or accountId; anything else goes as { } and the service answers 400 query.
+    const params = [...url.searchParams];
+    const query = params.length === 1 && ["account", "accountId"].includes(params[0][0]) ? { [params[0][0]]: params[0][1] } : {};
+    return { status: 200, body: await service.adminBindings(query) };
+  }
+  if (path === ADMIN_API + "/bindings/release" && method === "POST") {
+    // 201 for a new release, 200 for a repeat or the pending one; { release }, the wrapper GET /releases/<id> uses too.
+    const { status, release } = await service.releaseBinding(actor, await readBody(read));
+    return { status, body: { release } };
+  }
+  const release = method === "GET" ? RELEASE_PATH.exec(path) : null;
+  if (release) return { status: 200, body: await service.release(release[1]) };
   return null;
 }
 
@@ -70,8 +98,8 @@ async function route() {
 // the admins (403 not_admin), auth_time recent enough for a read or a change (401 mfa_required), and the admin's limits
 // (429 rate_limited), which count only requests that passed every token check. Returns { status, body }. `limit` is
 // serve.mjs's limiter and `now` its clock. The service is ready once and cached, so a database that goes down later
-// surfaces as a raw error from its first query: that is 503 unavailable too, not a 500, logged by its code only. Any
-// route that queries the database (Task 4's) answers the same way.
+// surfaces as a raw error from its first query: that is 503 unavailable too, not a 500, logged by its code only. So is a
+// route's own failure that isn't an AppError (the database going down in a query); an AppError of the service passes.
 export async function handleAdmin({ method, path, url, authorization, read, idp, integrations, adminClientId, delegatedHostWork = false, limit, now = Date.now, log = () => {} }) {
   if (!adminClientId || !integrations) throw new AppError(404, TODAY_NOT_FOUND);
   const change = method !== "GET";
@@ -112,7 +140,14 @@ export async function handleAdmin({ method, path, url, authorization, read, idp,
     if (error?.status === 429) throw rateLimited();
     throw error;
   }
-  const handled = await route({ method, path, url, read, service, actor: caller.sub, delegatedHostWork });
+  let handled;
+  try {
+    handled = await route({ method, path, url, read, service, actor: caller.sub, delegatedHostWork });
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    log("The admin API could not answer: " + reasonOf(error) + ".");
+    throw unavailable();
+  }
   if (!handled) throw routeNotFound();
   return handled;
 }

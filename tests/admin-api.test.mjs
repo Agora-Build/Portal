@@ -412,3 +412,114 @@ test("a request on an admin path makes no account and sets no cookie, whoever se
   const { accounts = [] } = await app.store.snapshot();
   assert.deepEqual(accounts.filter((account) => [ADMIN, ADMIN_TOO, OWNER].includes(account.id)), [], "no account is made");
 });
+
+// Slice 1's routes (D27, DELEGATED_HOST_WORK=1): reading bindings, releasing one, and reading a release, as the admin site
+// calls them.
+const BODY = (error) => ({ error, code: "body" });
+
+test("with the setting on: GET bindings, POST bindings/release and GET releases/<id> over HTTP", async (t) => {
+  const s = await stack(t, { delegatedHostWork: true });
+  if (!s) return;
+  const app = await start(t, { integrations: s.service, delegatedHostWork: true });
+  const genesisHash = "b".repeat(64);
+  await s.service.report(s.built.reportClientId, { state: "binding_changed", reportId: "binding_changed:" + "1".repeat(64), account: OWNER, accountId: "r9:account-1", genesisHash, bindingId: "bind-1", version: 3, bindingState: "bound" });
+  const read = await adminToken(app);
+  const listed = await call(app, "/api/admin/v1/bindings?account=" + OWNER, { bearer: read });
+  assert.equal(listed.status, 200);
+  const { bindings } = await listed.json();
+  assert.deepEqual(bindings.map((entry) => [entry.stationId, entry.account, entry.accountState, entry.accountId, entry.bindingId, entry.version, entry.bindingState, entry.releases]), [[s.built.id, OWNER, "unknown", "r9:account-1", "bind-1", 3, "bound", []]]);
+  assert.equal((await (await call(app, "/api/admin/v1/bindings?accountId=" + encodeURIComponent("r9:account-1"), { bearer: read })).json()).bindings.length, 1);
+  const query = [400, { error: "Search by exactly one of account (an ab… account ID) or accountId (an R9 account ID).", code: "query" }];
+  for (const search of ["", "?account=", "?account=" + OWNER + "&accountId=r9", "?account=" + OWNER + "&account=" + OWNER, "?owner=" + OWNER, "?account=" + OWNER + "&page=2"]) {
+    assert.deepEqual(await answer(await call(app, "/api/admin/v1/bindings" + search, { bearer: read })), query, search);
+  }
+  const data = { stationId: s.built.id, accountId: "r9:account-1", genesisHash, bindingId: "bind-1", version: 3, reason: "Lost account; ticket 4821.", key: "form:0001" };
+  const made = await call(app, "/api/admin/v1/bindings/release", { method: "POST", bearer: await adminToken(app), data });
+  assert.equal(made.status, 201);
+  const created = await made.json();
+  assert.deepEqual(Object.keys(created), ["release"], "the same wrapper as GET /releases/<id>");
+  const { release } = created;
+  assert.deepEqual([release.state, release.actor, release.account, release.reason], ["pending", ADMIN, OWNER, "Lost account; ticket 4821."]);
+  assert.deepEqual(await answer(await call(app, "/api/admin/v1/bindings/release", { method: "POST", bearer: await adminToken(app), data })), [200, { release }], "a retry with the form's key");
+  assert.deepEqual(await answer(await call(app, "/api/admin/v1/bindings/release", { method: "POST", bearer: await adminToken(app), data: { ...data, key: "form:0002" } })), [200, { release }], "the pending release, under another key");
+  assert.deepEqual(await answer(await call(app, "/api/admin/v1/releases/" + release.releaseId, { bearer: read })), [200, { release }]);
+  for (const id of ["rl-" + "0".repeat(26), "nope", release.releaseId.toUpperCase()]) {
+    assert.deepEqual(await answer(await call(app, "/api/admin/v1/releases/" + id, { bearer: read })), [404, { error: "This release was not found.", code: "release" }], id);
+  }
+  assert.deepEqual((await (await call(app, "/api/admin/v1/bindings?account=" + OWNER, { bearer: read })).json()).bindings[0].releases, [release]);
+  // The body: JSON, an object, at most 16 KB.
+  const raw = async (contentType, payload) => answer(await fetch(app.base + "/api/admin/v1/bindings/release", { method: "POST", headers: { Authorization: "Bearer " + read, "Content-Type": contentType }, body: payload }));
+  assert.deepEqual(await raw("text/plain", "{}"), [415, BODY("Send JSON for this request.")]);
+  assert.deepEqual(await raw("application/json", "[1]"), [400, BODY("Send { stationId, accountId, genesisHash, bindingId, version, reason, key }.")]);
+  assert.deepEqual(await raw("application/json", "{"), [400, BODY("Send { stationId, accountId, genesisHash, bindingId, version, reason, key }.")]);
+  assert.deepEqual(await raw("application/json", JSON.stringify({ ...data, reason: "x".repeat(17000) })), [413, BODY("This request is too large.")]);
+  // A wrong method on a route's path is no route.
+  assert.deepEqual(await answer(await call(app, "/api/admin/v1/bindings", { method: "POST", bearer: read, data: {} })), passed);
+  // The built-in Station's feed has the change.
+  const feed = await s.service.changes(s.built.reportClientId, "0");
+  assert.deepEqual(feed.changes.filter((change) => change.kind === "binding_released").map((change) => change.releaseId), [release.releaseId]);
+});
+
+test("with the setting off the three routes are 404 not_found once the gate has passed, and nothing is written", async (t) => {
+  const s = await stack(t);
+  if (!s) return;
+  const app = await start(t, { integrations: s.service, delegatedHostWork: false });
+  const routes = [
+    ["GET", "/api/admin/v1/bindings?account=" + OWNER],
+    ["POST", "/api/admin/v1/bindings/release", { stationId: s.built.id, accountId: "r9:account-1", genesisHash: "b".repeat(64), bindingId: "bind-1", version: 3, reason: "Lost account.", key: "form:0001" }],
+    ["GET", "/api/admin/v1/releases/rl-" + "0".repeat(26)]
+  ];
+  for (const [method, path, data] of routes) {
+    assert.deepEqual(await answer(await call(app, path, { method, bearer: await adminToken(app), data })), passed, method + " " + path);
+    assert.deepEqual(await answer(await call(app, path, { method, data })), TOKEN, "the gate still comes first: " + path);
+  }
+  assert.equal((await s.db.pool.query("SELECT count(*)::int AS n FROM admin_actions")).rows[0].n, 0);
+});
+
+test("an oversized body is 413 body, read through the 16 KB limit, and writes no admin_actions row, whether its length is declared or streamed", async (t) => {
+  const s = await stack(t, { delegatedHostWork: true });
+  if (!s) return;
+  const app = await start(t, { integrations: s.service, delegatedHostWork: true });
+  const bearer = await adminToken(app);
+  const data = { stationId: s.built.id, accountId: "r9:account-1", genesisHash: "b".repeat(64), bindingId: "bind-1", version: 3, reason: "Lost account.", key: "form:0001" };
+  const actions = async () => (await s.db.pool.query("SELECT count(*)::int AS n FROM admin_actions")).rows[0].n;
+  const tooLarge = [413, BODY("This request is too large.")];
+  // A declared length over the limit: refused before anything is read.
+  assert.deepEqual(await answer(await call(app, "/api/admin/v1/bindings/release", { method: "POST", bearer, data: { ...data, stationId: "s".repeat(20000) } })), tooLarge);
+  // A streamed body (no length declared) is cut off at the limit as it is read.
+  const chunks = [Buffer.from('{"reason":"'), Buffer.alloc(9000, "x"), Buffer.alloc(9000, "x"), Buffer.from('"}')];
+  const streamed = new ReadableStream({ start(controller) { for (const chunk of chunks) controller.enqueue(chunk); controller.close(); } });
+  const response = await fetch(app.base + "/api/admin/v1/bindings/release", { method: "POST", duplex: "half", headers: { Authorization: "Bearer " + bearer, "Content-Type": "application/json" }, body: streamed });
+  assert.deepEqual(await answer(response), tooLarge);
+  assert.equal(await actions(), 0, "nothing reached admin_actions");
+});
+
+test("a database failure inside a route is 503 unavailable, logged by its code only, and a refusal of the service passes through unchanged", async (t) => {
+  const s = await stack(t, { delegatedHostWork: true });
+  if (!s) return;
+  const data = { stationId: s.built.id, accountId: "r9:account-1", genesisHash: "b".repeat(64), bindingId: "bind-1", version: 3, reason: "Lost account.", key: "form:0001" };
+  const requests = [["GET", "/api/admin/v1/bindings?account=" + OWNER], ["POST", "/api/admin/v1/bindings/release", data], ["GET", "/api/admin/v1/releases/rl-" + "0".repeat(26)]];
+  const failures = [
+    ["a connection refused", Object.assign(new Error("connect ECONNREFUSED db.internal.example:5432 password=hunter2"), { code: "ECONNREFUSED" }), "ECONNREFUSED"],
+    ["an error with no code", new TypeError("Cannot read properties of undefined (reading 'query') at db.internal.example"), "error"]
+  ];
+  for (const [label, failure, reason] of failures) {
+    const lines = [];
+    const down = () => { throw failure; };
+    const app = await start(t, { integrations: { ...s.service, adminBindings: down, release: down, releaseBinding: down }, delegatedHostWork: true, log: adminLog(lines) });
+    const bearer = await adminToken(app);
+    for (const [method, path, payload] of requests) {
+      const response = await call(app, path, { method, bearer, data: payload });
+      assert.equal(response.headers.get("www-authenticate"), null, label);
+      assert.deepEqual(await answer(response), UNAVAILABLE, label + ": " + method + " " + path);
+    }
+    assert.deepEqual(lines, Array(3).fill("The admin API could not answer: " + reason + "."), label);
+    assert.equal(lines.some((line) => line.includes(bearer) || line.includes("db.internal") || line.includes("hunter2")), false, label + ": nothing but the code is logged");
+  }
+  // The service's own refusals are its answer, not a 503, and are not logged.
+  const lines = [];
+  const app = await start(t, { integrations: s.service, delegatedHostWork: true, log: adminLog(lines) });
+  assert.deepEqual(await answer(await call(app, "/api/admin/v1/bindings", { bearer: await adminToken(app) })), [400, { error: "Search by exactly one of account (an ab… account ID) or accountId (an R9 account ID).", code: "query" }]);
+  assert.deepEqual(await answer(await call(app, "/api/admin/v1/releases/nope", { bearer: await adminToken(app) })), [404, { error: "This release was not found.", code: "release" }]);
+  assert.deepEqual(lines, []);
+});

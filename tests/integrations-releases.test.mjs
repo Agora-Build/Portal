@@ -313,3 +313,85 @@ test("with DELEGATED_HOST_WORK off a release is 404 not_found and writes nothing
   assert.deepEqual(feed.changes.filter((change) => change.kind === "binding_released").map((change) => change.releaseId), [made.release.releaseId], "served as recorded");
   await off._pushesIdle();
 });
+
+// Reading (D27): the admin site's "R9 bindings" page and a release's own page.
+const BINDING_KEYS = ["stationId", "account", "accountState", "accountId", "genesisHash", "bindingId", "version", "bindingState", "updatedAt", "releases"];
+
+test("adminBindings lists the active built-in Stations' bindings of an account or an R9 account, each with its ten newest releases, newest first", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await report(s);
+  await report(s, { genesisHash: "a".repeat(64), version: 1 });
+  await report(s, { account: OTHER, accountId: "r9:account-2", bindingId: "bind-o", version: 1 });
+  const mine = await s.service.adminBindings({ account: OWNER });
+  assert.deepEqual(Object.keys(mine), ["bindings"]);
+  assert.deepEqual(mine.bindings.map((entry) => [entry.stationId, entry.account, entry.accountState, entry.accountId, entry.genesisHash.slice(0, 1), entry.bindingId, entry.version, entry.bindingState, entry.releases]), [
+    [s.built.id, OWNER, "unknown", R9_ACCOUNT, "a", "bind-1", 1, "bound", []],
+    [s.built.id, OWNER, "unknown", R9_ACCOUNT, "b", "bind-1", 3, "bound", []]
+  ]);
+  for (const entry of mine.bindings) {
+    assert.deepEqual(Object.keys(entry), BINDING_KEYS);
+    assert.equal(typeof entry.updatedAt, "string");
+  }
+  assert.deepEqual((await s.service.adminBindings({ accountId: "r9:account-2" })).bindings.map((entry) => [entry.account, entry.bindingId]), [[OTHER, "bind-o"]]);
+  assert.deepEqual(await s.service.adminBindings({ accountId: "r9:nobody" }), { bindings: [] });
+  // Eleven releases of one binding, one version after another: the ten newest, newest first.
+  const made = [];
+  for (let n = 1; n <= 11; n += 1) {
+    s.clock.now += 1000;
+    await report(s, { version: 3 + n, bindingId: "bind-" + n });
+    made.push((await s.service.releaseBinding(ADMIN, body(s, { version: 3 + n, bindingId: "bind-" + n }))).release.releaseId);
+  }
+  const [, released] = (await s.service.adminBindings({ account: OWNER })).bindings;
+  assert.deepEqual(released.releases.map((release) => release.releaseId), made.slice(1).reverse());
+  for (const release of released.releases) assert.deepEqual(Object.keys(release), RELEASE_KEYS);
+  // A removed built-in Station's bindings are not listed.
+  await s.repository.markStationRemoved(s.built.id, s.clock.now);
+  assert.deepEqual(await s.service.adminBindings({ account: OWNER }), { bindings: [] });
+});
+
+test("accountState is disabled while the account is listed disabled, enabled while the view is complete, and unknown otherwise", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await report(s);
+  await report(s, { account: OTHER, accountId: "r9:account-2", bindingId: "bind-o", version: 1 });
+  const states = async () => [(await s.service.adminBindings({ account: OWNER })).bindings[0].accountState, (await s.service.adminBindings({ account: OTHER })).bindings[0].accountState];
+  assert.deepEqual(await states(), ["unknown", "unknown"]);
+  await s.repository.setAvailability(OTHER, true, "YzE", s.clock.now);
+  assert.deepEqual(await states(), ["unknown", "disabled"], "disabled even while the view isn't complete");
+  await s.repository.setBaseline("YzI", s.clock.now);
+  await s.repository.markBaselineComplete();
+  assert.deepEqual(await states(), ["enabled", "disabled"]);
+  await s.repository.setAvailability(OTHER, false, "YzM", s.clock.now);
+  assert.deepEqual(await states(), ["enabled", "enabled"]);
+});
+
+test("adminBindings takes exactly one of account or accountId, each in its grammar; anything else is 400 query", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const query = refused(400, "query", "Search by exactly one of account (an ab… account ID) or accountId (an R9 account ID).");
+  for (const asked of [{}, { account: OWNER, accountId: R9_ACCOUNT }, { account: "ab123" }, { account: "ab" + "k".repeat(26) }, { account: "" }, { accountId: "" }, { accountId: "a b" }, { accountId: "x".repeat(129) }, { account: 7 }]) {
+    await assert.rejects(s.service.adminBindings(asked), query, JSON.stringify(asked));
+  }
+});
+
+test("release reads one release by its id, and anything else is 404 release", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await report(s);
+  const made = (await s.service.releaseBinding(ADMIN, body(s))).release;
+  assert.deepEqual(await s.service.release(made.releaseId), { release: made });
+  for (const id of ["rl-" + "0".repeat(26), made.releaseId.toUpperCase(), "rl-", undefined, 7]) {
+    await assert.rejects(s.service.release(id), refused(404, "release", "This release was not found."), String(id));
+  }
+});
+
+test("with DELEGATED_HOST_WORK off, reading bindings and releases is 404 not_found", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await report(s);
+  const made = (await s.service.releaseBinding(ADMIN, body(s))).release;
+  const off = s.make(s.repository, { delegatedHostWork: false });
+  await assert.rejects(off.adminBindings({ account: OWNER }), refused(404, "not_found"));
+  await assert.rejects(off.release(made.releaseId), refused(404, "not_found"));
+});

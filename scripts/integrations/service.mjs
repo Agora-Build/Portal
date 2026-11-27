@@ -52,6 +52,9 @@ const ATTEMPT_CLOCK_SKEW = 3600000;
 // has exactly these fields. The release writes this kind on the Station's feed and in admin_actions.
 const RELEASE_FIELDS = ["stationId", "accountId", "genesisHash", "bindingId", "version", "reason", "key"];
 const RELEASE_KIND = "binding_released";
+// A release's id: rl- and a lowercase ULID. A binding's page shows its ten newest releases.
+const RELEASE_ID = /^rl-[0-9a-hjkmnp-tv-z]{26}$/;
+const RELEASES_SHOWN = 10;
 // An admin's reason, as Auth checks one (Auth's checkReason): trimmed, 1 to 500 characters of text on one line, not only
 // zero-width characters, and no control characters, line or paragraph separators, or bidirectional marks.
 const ADMIN_REASON_MAX = 500;
@@ -96,6 +99,8 @@ const releaseBodyInvalid = () => failure(400, "Send { " + RELEASE_FIELDS.join(",
 const adminReasonInvalid = () => failure(400, "Give a reason of 1 to 500 characters on one line.", "reason");
 const releaseKeyInvalid = () => failure(400, "Send the form's key: 3 to 200 letters, digits, ':', '_' or '-', starting with a letter or digit.", "key");
 const bindingMissing = () => failure(404, "No binding is recorded for this R9 account on that built-in Station.", "binding");
+const releaseMissing = () => failure(404, "This release was not found.", "release");
+const bindingsQueryInvalid = () => failure(400, "Search by exactly one of account (an ab… account ID) or accountId (an R9 account ID).", "query");
 const releaseKeyReused = () => failure(409, "This key was already used for another release request.", "key_reused");
 const ownAccount = () => failure(403, "You can't release a binding of your own account.", "own_account");
 const notBound = () => failure(409, "Only a bound binding can be released.", "not_bound");
@@ -1656,6 +1661,43 @@ export function createIntegrationService({
       if (done.repeat) return { status: 200, release: done.repeat };
       changed(done.created.stationId);
       return { status: 201, release: done.created };
+    },
+
+    // The admin site's "R9 bindings" page (D27, the setting on): the active built-in Stations' recorded bindings of one
+    // Agora.Build account (`account`) or one R9 account (`accountId`), exactly one of them (else 400 query), each with its
+    // owner's state and its ten newest releases, newest first, all read in one snapshot. accountState is disabled while
+    // the account is listed disabled, enabled while the Portal's account view is complete, and unknown otherwise
+    // (platform.md, "Account Availability").
+    async adminBindings({ account, accountId } = {}) {
+      if (!delegatedHostWork) throw adminNotFound();
+      const byAccount = account !== undefined;
+      if (byAccount === (accountId !== undefined)) throw bindingsQueryInvalid();
+      const valid = byAccount ? typeof account === "string" && ACCOUNT_ID.test(account) : typeof accountId === "string" && ID_GRAMMAR.test(accountId);
+      if (!valid) throw bindingsQueryInvalid();
+      const snapshot = await db.transaction(async (client) => {
+        const rows = await repository.bindingsFor(byAccount ? { account } : { r9AccountId: accountId }, client);
+        const disabled = await repository.disabledAmong([...new Set(rows.map((row) => row.accountId))], client);
+        const complete = await repository.baselineApplied(client);
+        const releases = [];
+        for (const row of rows) releases.push(await repository.releasesOf(row.stationId, row.r9AccountId, row.genesisHash, { limit: RELEASES_SHOWN }, client));
+        return { rows, disabled, complete, releases };
+      }, { isolation: "repeatable read", readOnly: true });
+      return {
+        bindings: snapshot.rows.map((row, index) => ({
+          stationId: row.stationId, account: row.accountId,
+          accountState: snapshot.disabled.has(row.accountId) ? "disabled" : snapshot.complete ? "enabled" : "unknown",
+          accountId: row.r9AccountId, genesisHash: row.genesisHash, bindingId: row.bindingId, version: row.version, bindingState: row.bindingState,
+          updatedAt: row.updatedAt, releases: snapshot.releases[index]
+        }))
+      };
+    },
+
+    // One release by its id (D27, the setting on): { release }, or 404 release.
+    async release(releaseId) {
+      if (!delegatedHostWork) throw adminNotFound();
+      const found = typeof releaseId === "string" && RELEASE_ID.test(releaseId) ? await repository.releaseById(releaseId) : null;
+      if (!found) throw releaseMissing();
+      return { release: found };
     },
 
     // This Station's changes after `cursor`, oldest first, each with its integration's current settings. From cursor 0
