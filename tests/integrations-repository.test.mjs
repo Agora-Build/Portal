@@ -842,7 +842,7 @@ test("directoryFor lists the built-in Stations first, then what the account owns
   assert.deepEqual([owned.builtIn, owned.access, owned.name, owned.origin, owned.removedAt, owned.membership, owned.membershipEndedAt], [false, "members", null, "https://st-own.example", null, null, null]);
   assert.deepEqual([member.role, member.membership, member.membershipEndedAt, member.removedAt], ["member", "current", null, null]);
   // Each row is a whole Station row too, so the service can answer with the directory's fields.
-  assert.deepEqual(Object.keys(member).sort(), ["access", "builtIn", "createdAt", "id", "integrationsEnabled", "membership", "membershipEndedAt", "name", "origin", "ownerAccount", "removedAt", "reportClientId", "role", "status", "verifiedAt"]);
+  assert.deepEqual(Object.keys(member).sort(), ["access", "builtIn", "createdAt", "id", "integrationsEnabled", "membership", "membershipEndedAt", "name", "origin", "ownerAccount", "removalStartedAt", "removedAt", "reportClientId", "role", "status", "verifiedAt"]);
   // The account that owns and belongs to nothing gets the built-in Stations alone.
   assert.deepEqual(shape(await repo.directoryFor("ab9", { lostSince: CUTOFF, limit: 100 })), [["st-b1", "built_in", "active", null], ["st-b2", "built_in", "active", null]]);
   assert.deepEqual(shape(await repo.directoryFor("ab3", { lostSince: CUTOFF, limit: 100 })), [["st-b1", "built_in", "active", null], ["st-b2", "built_in", "active", null], ["st-other", "owner", "active", null], ["st-theirs", "member", "active", "current"]]);
@@ -1220,4 +1220,67 @@ test("an admin action is written started, then finished once, done or failed, wi
   for (const bad of [{ id: "pa-1" }, { actor: "admin" }, { action: "account_disabled" }, { targetKind: "account" }, { reason: "" }]) {
     await assert.rejects(repo.startAdminAction({ id: "pa-" + "1".repeat(26), actor: ADMIN_AB, action: "binding_released", targetKind: "binding", target: "t", reason: "r", at: NOW, ...bad }), { code: "23514" }, JSON.stringify(bad));
   }
+});
+
+// Two-phase Station removal (D29, migration 008): removing and when it began, the Stations being removed, the flag of an
+// integration pending host revocation, and a Station's newest event of one kind.
+test("a custom Station goes from active to removing once, dated, and then to removed; while removing it reports, holds its origin and is listed", async (t) => {
+  const { db, repo } = await setup(t);
+  if (!repo) return;
+  await station(repo, "st1", "ab1");
+  await station(repo, "st2", "ab1");
+  await repo.insertStation({ id: "stb", origin: "https://stb.example", reportClientId: "s-stb", verifiedAt: NOW, builtIn: true, name: "Built in" });
+  await repo.addMember("st1", "ab2", "ab1", NOW);
+  assert.equal(await repo.markStationRemoving("st1", later(1000)), true);
+  assert.equal(await repo.markStationRemoving("st1", later(2000)), false, "once");
+  assert.equal(await repo.markStationRemoving("stb", later(1000)), false, "never a built-in Station");
+  await assert.rejects(repo.markStationRemoving("st2"), TypeError, "the time is given");
+  const removing = await repo.station("st1");
+  assert.deepEqual([removing.status, removing.removalStartedAt, removing.removedAt], ["removing", later(1000).toISOString(), null]);
+  assert.equal((await repo.station("st2")).removalStartedAt, null);
+  assert.equal((await repo.stationByReportClient("s-st1")).id, "st1", "its report client still reports");
+  assert.deepEqual((await repo.stationsFor("ab1")).map((row) => [row.id, row.status]), [["stb", "active"], ["st1", "removing"], ["st2", "active"]]);
+  assert.deepEqual((await repo.stationsFor("ab2")).map((row) => [row.id, row.role, row.status]), [["stb", "built_in", "active"], ["st1", "member", "removing"]]);
+  assert.deepEqual((await repo.directoryFor("ab2", { lostSince: CUTOFF, limit: 100 })).map((row) => [row.id, row.status, row.membership, row.removalStartedAt]),
+    [["stb", "active", null, null], ["st1", "removing", "current", later(1000).toISOString()]], "the directory lists it as one the account still has");
+  await db.transaction(async (client) => assert.equal((await repo.activeStationAt("https://st1.example", client)).id, "st1", "it still holds its origin"));
+  assert.equal(await repo.markStationRemoving("st2", later(500)), true);
+  assert.deepEqual((await repo.removingStations()).map((row) => row.id), ["st2", "st1"], "the oldest removal first");
+  assert.equal(await repo.markStationRemoved("st1", later(5000)), true);
+  assert.equal(await repo.markStationRemoved("st1", later(6000)), false, "once");
+  const removed = await repo.station("st1");
+  assert.deepEqual([removed.status, removed.removalStartedAt, removed.removedAt], ["removed", later(1000).toISOString(), later(5000).toISOString()]);
+  assert.equal(await repo.stationByReportClient("s-st1"), null);
+  assert.deepEqual((await repo.removingStations()).map((row) => row.id), ["st2"]);
+  await db.transaction(async (client) => assert.equal(await repo.activeStationAt("https://st1.example", client), null));
+});
+
+test("the pending host revocation flag is false by default, set and cleared on purpose, and only on a revoked integration", async (t) => {
+  const { db, repo } = await setup(t);
+  if (!repo) return;
+  await station(repo, "st1");
+  await repo.insertIntegration(sample("i-1"));
+  assert.equal((await repo.integration("i-1")).pendingHostRevocation, false);
+  await repo.updateIntegration("i-1", { state: "revoked", pendingHostRevocation: true });
+  assert.equal((await repo.integration("i-1")).pendingHostRevocation, true);
+  assert.equal((await repo.integrationsOnStation("st1"))[0].pendingHostRevocation, true);
+  await db.transaction(async (client) => assert.equal((await repo.integrationForUpdate("i-1", client)).pendingHostRevocation, true));
+  await repo.updateIntegration("i-1", { pendingHostRevocation: false });
+  assert.equal((await repo.integration("i-1")).pendingHostRevocation, false);
+  for (const value of [undefined, null, "true", 1]) await assert.rejects(repo.updateIntegration("i-1", { pendingHostRevocation: value }), TypeError, String(value));
+  await repo.updateIntegration("i-1", { state: "revoking" });
+  await assert.rejects(repo.updateIntegration("i-1", { pendingHostRevocation: true }), { code: "23514" }, "only a revoked integration");
+});
+
+test("latestStationEvent finds a Station's newest event of one kind, or null", async (t) => {
+  const { db, repo } = await setup(t);
+  if (!repo) return;
+  const append = (stationId, kind, details) => db.transaction((client) => repo.appendEvent({ stationId, accountId: "ab1", actor: "ab1", kind, details }, client));
+  assert.equal(await repo.latestStationEvent("st1", "station_removing"), null);
+  await append("st1", "station_removing", { revoking: ["i-1"] });
+  await append("st1", "station_removing", { revoking: ["i-2"] });
+  await append("st1", "member_added", {});
+  await append("st2", "station_removing", { revoking: ["i-3"] });
+  const found = await repo.latestStationEvent("st1", "station_removing");
+  assert.deepEqual([found.kind, found.details, found.integrationId, found.accountId], ["station_removing", { revoking: ["i-2"] }, null, "ab1"]);
 });
