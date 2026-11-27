@@ -1592,3 +1592,157 @@ test("with the setting off, GET /api/v1/stations does not exist and the browser'
   assert.deepEqual(Object.keys(body).sort(), ["stale", "stations"]);
   assert.deepEqual(body.stations.map((entry) => [entry.id, entry.role]), [[built.id, "built_in"], [station.id, "owner"]]);
 });
+
+// D29 two-phase removal: the browser's DELETE answers what the service says.
+test("with the setting on, DELETE /api/stations/<id> answers the two-phase removal: removing with completeBy, or removed when nothing was left to pass on", async (t) => {
+  const integrations = await stack(t, { delegatedHostWork: true });
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const owner = await signIn(app);
+  const { station } = await registerStation(app, integrations, owner.cookie);
+  const mine = await createIntegration(app, owner.cookie, station.id);
+  await integrations.db.pool.query("UPDATE integrations SET state = 'ready' WHERE id = $1", [mine.id]);
+  const removing = await call(app.base, "/api/stations/" + station.id, { cookie: owner.cookie, method: "DELETE" });
+  const body = await removing.json();
+  assert.deepEqual([removing.status, Object.keys(body), body.removed, body.removing, typeof body.completeBy], [200, ["removed", "removing", "completeBy"], false, true, "string"]);
+  const listed = (await (await call(app.base, "/api/stations", { cookie: owner.cookie })).json()).stations;
+  assert.deepEqual(listed.map((entry) => [entry.id, entry.status]), [[station.id, "removing"]]);
+  const empty = (await registerStation(app, integrations, owner.cookie, "https://two.example")).station;
+  const removed = await call(app.base, "/api/stations/" + empty.id, { cookie: owner.cookie, method: "DELETE" });
+  assert.deepEqual([removed.status, await removed.json()], [200, { removed: true }]);
+});
+
+// D29: the stack's hourly sync also completes the removals that are done; the first sync, at ready(), included.
+test("the stack's built-in sync then completes the removals that are done: a Station removing for 26 hours is removed, its integration flagged, and pushed once more", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
+  const owner = accountId();
+  const manage = fakeManage({ delegated: true });
+  const registered = await manage.registerStation({ origin: "https://one.example", owner, reportKey: {}, actor: owner });
+  await manage.beginStationRemoval(registered.id, owner);
+  const repository = createRepository(db);
+  await repository.insertStation({ id: registered.id, origin: "https://one.example", ownerAccount: owner, reportClientId: registered.reportClientId, verifiedAt: Date.now() });
+  await repository.markStationRemoving(registered.id, Date.now() - 27 * 3600000);
+  await repository.insertIntegration({ id: "i-1", ownerAccount: owner, stationId: registered.id, kind: "custom_app", name: "App", scopes: ["agent.view"], quotaPerSecond: 200, expiresAt: Date.now() + 86400000 });
+  await repository.updateIntegration("i-1", { state: "revoking", r9Svc: R9, revokedAt: Date.now() - 27 * 3600000 });
+  const logs = [];
+  const pushes = [];
+  const integrations = createIntegrationStack({
+    db: { ...db, close: async () => {} }, manage, idp: null, log: (line) => logs.push(line), delegatedHostWork: true, authChanges: { pollMs: 3600000, minGapMs: 5 },
+    pushFetch: { async post(url) { pushes.push(url); return { status: 202 }; } }
+  });
+  try {
+    await integrations.ready();
+    // ready() does not wait for the completions: the first sync starts them, and the log line comes once one has committed.
+    await waitFor(() => logs.includes("Station removal completed after 26 hours: 1 integration pending host revocation."), "the removal the first sync completes");
+    assert.equal((await repository.station(registered.id)).status, "removed", "completed after the first sync");
+    const row = await repository.integration("i-1");
+    assert.deepEqual([row.state, row.pendingHostRevocation], ["revoked", true]);
+    assert.equal(manage.calls.filter((name) => name === "completeStationRemoval").length, 1);
+    await integrations.service._pushesIdle();
+    assert.deepEqual(pushes, ["https://one.example/agora-build/v1/changes"]);
+  } finally {
+    await integrations.close();
+  }
+});
+
+// A removing Station (D29) with one revoking integration, begun `hoursAgo` hours ago, in both Auth and the Portal's database.
+async function seedRemoving(db, manage, hoursAgo) {
+  const owner = accountId();
+  const registered = await manage.registerStation({ origin: "https://one.example", owner, reportKey: {}, actor: owner });
+  await manage.beginStationRemoval(registered.id, owner);
+  const repository = createRepository(db);
+  await repository.insertStation({ id: registered.id, origin: "https://one.example", ownerAccount: owner, reportClientId: registered.reportClientId, verifiedAt: Date.now() });
+  await repository.markStationRemoving(registered.id, Date.now() - hoursAgo * 3600000);
+  await repository.insertIntegration({ id: "i-1", ownerAccount: owner, stationId: registered.id, kind: "custom_app", name: "App", scopes: ["agent.view"], quotaPerSecond: 200, expiresAt: Date.now() + 86400000 });
+  await repository.updateIntegration("i-1", { state: "revoking", r9Svc: R9, revokedAt: Date.now() - hoursAgo * 3600000 });
+  return { repository, station: registered };
+}
+
+test("a built-in sync that fails completes no removal: Auth is not asked to complete one", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
+  const manage = fakeManage({ delegated: true });
+  const { repository, station } = await seedRemoving(db, manage, 27);
+  manage.down = true;
+  const logs = [];
+  const integrations = createIntegrationStack({
+    db: { ...db, close: async () => {} }, manage, idp: null, log: (line) => logs.push(line), delegatedHostWork: true,
+    authChanges: { pollMs: 3600000, minGapMs: 5 }, builtInSyncAfter: { ok: 3600000, failed: 3600000 }
+  });
+  try {
+    await integrations.ready();
+    assert.ok(logs.includes("Built-in Station sync failed: unavailable."));
+    assert.equal(manage.calls.includes("completeStationRemoval"), false);
+    assert.equal((await repository.station(station.id)).status, "removing");
+  } finally {
+    await integrations.close();
+  }
+});
+
+test("the hourly sync completes a removal that has become 26 hours old since the last one", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
+  const manage = fakeManage({ delegated: true });
+  const { repository, station } = await seedRemoving(db, manage, 1);
+  const integrations = createIntegrationStack({
+    db: { ...db, close: async () => {} }, manage, idp: null, log: () => {}, delegatedHostWork: true,
+    authChanges: { pollMs: 3600000, minGapMs: 5 }, builtInSyncAfter: { ok: 20, failed: 3600000 }
+  });
+  try {
+    await integrations.ready();
+    assert.equal((await repository.station(station.id)).status, "removing", "an hour old: still removing");
+    await db.pool.query("UPDATE stations SET removal_started_at = now() - interval '27 hours' WHERE id = $1", [station.id]);
+    await waitFor(async () => (await repository.station(station.id)).status === "removed", "the removal completed by the next sync");
+    assert.deepEqual([(await repository.integration("i-1")).pendingHostRevocation, manage.calls.filter((name) => name === "completeStationRemoval").length], [true, 1]);
+  } finally {
+    await integrations.close();
+  }
+});
+
+test("ready() does not wait for the removals the first sync completes: it is ready while Auth's completion is still held", { timeout: 20000 }, async (t) => {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
+  const manage = fakeManage({ delegated: true });
+  const { repository, station } = await seedRemoving(db, manage, 27);
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  const complete = manage.completeStationRemoval;
+  let asked = 0;
+  manage.completeStationRemoval = async (...args) => { asked += 1; await held; return complete(...args); };
+  const integrations = createIntegrationStack({
+    db: { ...db, close: async () => {} }, manage, idp: null, log: () => {}, delegatedHostWork: true,
+    authChanges: { pollMs: 3600000, minGapMs: 5 }
+  });
+  try {
+    // Bounded, so a ready() that waited for the held completion fails this test instead of hanging the run.
+    const expired = new Promise((resolve, reject) => setTimeout(() => reject(new Error("ready() waited for the completions")), 5000).unref());
+    assert.equal(typeof (await Promise.race([integrations.ready(), expired])).stations, "function", "ready although Auth has not answered the completion");
+    await waitFor(() => asked > 0, "the completion asked of Auth");
+    assert.equal((await repository.station(station.id)).status, "removing");
+    release();
+    await waitFor(async () => (await repository.station(station.id)).status === "removed", "the removal completed once Auth answers");
+  } finally {
+    release();
+    await integrations.close();
+  }
+});
+
+// D29: Astation finds an integration pending host revocation in its list and clears it with its native revoke.
+test("with the setting on, GET /api/v1/integrations says pendingHostRevocation and Astation's native revoke clears it", async (t) => {
+  const integrations = await stack(t, { delegatedHostWork: true });
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const owner = await signIn(app);
+  const { station } = await registerStation(app, integrations, owner.cookie);
+  const mine = await createIntegration(app, owner.cookie, station.id);
+  await integrations.db.pool.query("UPDATE integrations SET state = 'revoked', pending_host_revocation = true WHERE id = $1", [mine.id]);
+  const reader = await app.fake.issueAccessToken({ sub: owner.sub, client_id: "astation", scope: "integrations:read" });
+  const approver = await app.fake.issueAccessToken({ sub: owner.sub, client_id: "astation", scope: "integrations:approve" });
+  const listed = async () => (await (await call(app.base, "/api/v1/integrations", { bearer: reader })).json()).integrations.find((entry) => entry.id === mine.id);
+  assert.equal((await listed()).pendingHostRevocation, true);
+  const revoked = await call(app.base, "/api/v1/integrations/" + mine.id + "/revoke", { bearer: approver, method: "POST", data: { interruptRunning: true } });
+  const body = await revoked.json();
+  assert.deepEqual([revoked.status, body.state, body.interruptRunning, "pendingHostRevocation" in body], [200, "revoked", true, false]);
+  assert.equal("pendingHostRevocation" in await listed(), false);
+});

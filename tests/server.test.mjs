@@ -1,8 +1,8 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile, writeFile, mkdtemp, rm } from "node:fs/promises";
+import { readFile, readdir, stat, writeFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { createAppServer, platformAdmins } from "../scripts/serve.mjs";
 import { createModelClient, modelConfig } from "../scripts/models.mjs";
 import { createStore } from "../scripts/store.mjs";
@@ -266,6 +266,22 @@ test("production output includes six pages, platform backend, seed data, and no 
     assert.equal((await request("/stoa/", { base: built.url })).status, 200);
     assert.equal((await (await request("/api/projects", { base: built.url })).json()).projects.length, 16);
   } finally { await close(built.instance); }
+});
+test("every relative import under dist/scripts resolves to a packaged file", async () => {
+  // The image is built from dist/ alone, so a server module missing from scripts/build.mjs only fails once the container starts.
+  await import("../scripts/build.mjs");
+  const dist = resolve(root, "dist");
+  const modules = (await readdir(resolve(dist, "scripts"), { recursive: true })).filter((file) => file.endsWith(".mjs"));
+  assert.ok(modules.includes("serve.mjs"), "the build packaged the server");
+  const specifier = /(?:\bfrom\s*|\bimport\s*\(?\s*)["'](\.\.?\/[^"'\n]+)["']/g;
+  const missing = [];
+  for (const module of modules) {
+    const file = resolve(dist, "scripts", module);
+    for (const [, target] of (await readFile(file, "utf8")).matchAll(specifier)) {
+      if (!await stat(resolve(dirname(file), target)).then((info) => info.isFile(), () => false)) missing.push("scripts/" + module + " imports " + target + ", which is not in dist/");
+    }
+  }
+  assert.deepEqual(missing, []);
 });
 test("public activity API returns the feed without exposing runtime files", async () => {
   const data = { items: [{ id: "github:test", source: "github", actorName: "Public builder", action: "pushed code to", subject: "Vox", createdAt: "2026-10-04T10:00:00Z", url: "https://github.com/Agora-Build/Vox" }], github: { status: "fresh", checkedAt: "2026-10-04T12:00:00Z" }, pollAfterSeconds: 60 };

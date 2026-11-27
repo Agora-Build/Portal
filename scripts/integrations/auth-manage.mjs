@@ -57,6 +57,11 @@ export function createManageClient({ issuer: issuerSetting, clientId, clientSecr
     // The active built-in Stations, naming no account (D26): the Portal's startup and hourly sync.
     async builtInStations() { return list(await call("GET", "/built-in-stations"), "stations"); },
     async removeStation(id, actor) { await call("DELETE", "/stations/" + segment(id), { query: { actor } }); },
+    // A two-phase removal (D29; Auth answers 404 with its setting off): the owner begins it, and the answer is
+    // { status: "removing", removalStartedAt } (the same again for a removing Station); the owner, or "system" for the
+    // Portal's own check, completes it (204, again for one already removed).
+    beginStationRemoval: (id, actor) => call("POST", "/stations/" + segment(id) + "/removal", { query: { actor } }),
+    async completeStationRemoval(id, actor) { await call("POST", "/stations/" + segment(id) + "/complete-removal", { query: { actor } }); },
     members: (id, actor) => call("GET", "/stations/" + segment(id) + "/members", { query: { actor } }),
     async addMember(id, account, actor) { await call("PUT", "/stations/" + segment(id) + "/members/" + segment(account), { query: { actor } }); },
     async removeMember(id, account, actor) { await call("DELETE", "/stations/" + segment(id) + "/members/" + segment(account), { query: { actor } }); },

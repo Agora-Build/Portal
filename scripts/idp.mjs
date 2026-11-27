@@ -7,7 +7,7 @@ import { createLocalJWKSet, createRemoteJWKSet, customFetch, errors, jwtVerify }
 export const LOGOUT_EVENT = "http://schemas.openid.net/event/backchannel-logout";
 const ACCOUNT_ID = /^ab[0-9A-HJKMNP-TV-Z]{26}$/;
 // A Station report client: s- and 26 lower-case Crockford base32 characters (Auth's runtime client IDs).
-const STATION_CLIENT_ID = /^s-[0-9a-hjkmnp-tv-z]{26}$/;
+export const STATION_CLIENT_ID = /^s-[0-9a-hjkmnp-tv-z]{26}$/;
 const TRANSACTION_LIFETIME = 600000;
 const DISCOVERY_RETRY = 30000;
 const SCOPE = "openid profile email";
@@ -18,6 +18,8 @@ const KEY_COOLDOWN = 5000;
 const CONTACT_WINDOW = 30000;
 const PROBE_TIMEOUT = 2000;
 const SNAPSHOT_LIFETIME = 3600000;
+// Auth's portal.admin access tokens live exactly 60 seconds (seconds, as exp and iat are).
+const ADMIN_TOKEN_LIFE = 60;
 // Codes from openid-client/oauth4webapi that mean the ID token failed validation. Anything else from the code
 // exchange is labelled "exchange". OAUTH_INVALID_RESPONSE covers both, so its detail decides (labels only; both fail).
 const ID_TOKEN_CODES = new Set(["OAUTH_JWT_CLAIM_COMPARISON_FAILED", "OAUTH_JWT_TIMESTAMP_CHECK_FAILED", "OAUTH_KEY_SELECTION_FAILED"]);
@@ -360,6 +362,25 @@ export function createIdp({ issuer: issuerSetting, clientId = "portal", clientSe
       }
       if (typeof payload.sub !== "string" || !ACCOUNT_ID.test(payload.sub)) throw new TokenError(401, "sub");
       return { sub: payload.sub, clientId: payload.client_id, scopes };
+    },
+    // An Agora.Build admin's token for the admin API (D27): the usual checks (issuer, this Portal's audience, ES256, at+jwt,
+    // expiry) and an account as sub. Auth issues exactly 60-second tokens with one audience, so the token must also have
+    // an iat, a life (exp - iat) of at most 60 seconds, and a single string aud that is this Portal's audience (not an
+    // array that holds it). The claims the admin API's gate judges come back as they are: client_id, the scopes, acr (null
+    // unless a string) and auth_time (null unless whole seconds). scripts/admin-api.mjs decides what they allow.
+    async verifyAdminToken(token) {
+      const payload = await verify(token, { audience, typ: "at+jwt", requiredClaims: ["exp", "sub"] });
+      if (payload.aud !== audience) throw new TokenError(401, "aud");
+      if (!Number.isFinite(payload.iat)) throw new TokenError(401, "iat");
+      if (payload.exp - payload.iat > ADMIN_TOKEN_LIFE) throw new TokenError(401, "lifetime");
+      if (!plainString(payload.client_id, 200)) throw new TokenError(401, "client_id");
+      if (typeof payload.sub !== "string" || !ACCOUNT_ID.test(payload.sub)) throw new TokenError(401, "sub");
+      const scopes = typeof payload.scope === "string" ? payload.scope.split(" ").filter(Boolean) : [];
+      return {
+        sub: payload.sub, clientId: payload.client_id, scopes,
+        acr: typeof payload.acr === "string" ? payload.acr : null,
+        authTime: Number.isSafeInteger(payload.auth_time) ? payload.auth_time : null
+      };
     }
   };
 }

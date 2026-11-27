@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { AppError } from "./store.mjs";
 
+// A deposit's idempotency key, also the grammar of the admin API's form keys (D27).
+export const DEPOSIT_KEY = /^[A-Za-z0-9][A-Za-z0-9:_-]{2,199}$/;
+
 function ledger(state) {
   state.ledger ||= { balances: {}, entries: [], reservations: [], deposits: {} };
   state.ledger.debts ||= {};
@@ -71,7 +74,7 @@ export function createLedger(store, { now = Date.now } = {}) {
     },
     deposit(userId, credits, reason, idempotencyKey) {
       amount(credits);
-      if (typeof idempotencyKey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9:_-]{2,199}$/.test(idempotencyKey)) throw new AppError(422, "A valid deposit key is required.");
+      if (typeof idempotencyKey !== "string" || !DEPOSIT_KEY.test(idempotencyKey)) throw new AppError(422, "A valid deposit key is required.");
       return store.transaction((state) => {
         return depositCredits(state, userId, credits, reason, idempotencyKey);
       });

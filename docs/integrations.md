@@ -49,11 +49,11 @@ integration's service identity.
   admin site is D27 (§3.3.5).
 - **Launch, message and notify** (D28): Auth accepts the three scopes and the Portal offers them. The Station turns
   them into Atem's new signed operations only in builds with a feature that is off everywhere (§3.1.3).
-- **Delegated host work** (D29, agreed by Atem, Astation and Auth/Portal on 2026-11-08; Phase A built in Auth, the
-  Portal and the admin site, Phase B's revocation reports and the availability slice (the Station directory, the
-  checkpoint, account availability and the binding reports) in the Portal, off by default): Atem owns the tasks it
-  accepts, so they survive their sender going offline or its integration expiring, while revocation stays signed, durable
-  and race-safe; host-to-host senders use the same lifecycle (§3.11).
+- **Delegated host work** (D29, agreed by Atem, Astation and Auth/Portal on 2026-11-08; Phase A built in Auth, the Portal and
+  the admin site, Phase B's revocation reports and the availability slice (the Station directory, the checkpoint, account
+  availability and the binding reports) in the Portal, and the two-phase Station removal in Auth and the Portal, off by
+  default): Atem owns the tasks it accepts, so they survive their sender going offline or its integration expiring, while
+  revocation stays signed, durable and race-safe; host-to-host senders use the same lifecycle (§3.11).
 - **Later:** the mobile app (§3.3.3), Discord (§3.8), the assistant (§3.9), Station AI (§3.10), account deletion and
   export (§3.6), and production.
 
@@ -92,15 +92,16 @@ Notes:
 - **Launch, message and notify, Station (Astation):** the Station maps the three scopes to Atem's operations only with
   the Cargo feature `host-work-api`, which is off on every Station. Astation's consent review, signing gate and native
   launch are merged; its message inbox is not built.
-- **Delegated host work:** the design was agreed by Atem, Astation and Auth/Portal on 2026-11-08. Phase A is built in
-  Auth, the Portal and the admin site, off by default (Auth's `AUTH_DELEGATED_HOST_WORK`, the Portal's
-  `DELEGATED_HOST_WORK`, and the admin site's own `DELEGATED_HOST_WORK`, turned on in that order). Phase B, the Station's
-  revocation reports and the per-host counts, is built in the Portal, off under the same `DELEGATED_HOST_WORK`. So is the
-  availability slice: the native Station directory, the exact-cursor checkpoint, account availability (it relies on the
-  accounts baseline Auth writes with `AUTH_DELEGATED_HOST_WORK` on) and the built-in Station's two binding reports. Phase
-  C (which includes releasing a binding, waiting for D27) is not started (§3.11 says what the phases are). Atem has started
-  its shared core, and nothing new is activated until the agreed schemas, compatible verifiers and end-to-end tests are in
-  place.
+- **Delegated host work:** the design was agreed by Atem, Astation and Auth/Portal on 2026-11-08. Phase A is built in Auth,
+  the Portal and the admin site, off by default (Auth's `AUTH_DELEGATED_HOST_WORK`, the Portal's `DELEGATED_HOST_WORK`, and
+  the admin site's own `DELEGATED_HOST_WORK`, turned on in that order). Phase B, the Station's revocation reports and the
+  per-host counts, is built in the Portal, off under the same `DELEGATED_HOST_WORK`. So is the availability slice: the native
+  Station directory, the exact-cursor checkpoint, account availability (it relies on the accounts baseline Auth writes with
+  `AUTH_DELEGATED_HOST_WORK` on) and the built-in Station's two binding reports. The two-phase Station removal is built in
+  Auth and the Portal, behind both settings and off by default: a removed Station first passes its integrations' revocations
+  to the hosts (platform.md, "Removing A Station"). Phase C includes releasing a binding, which is being built as D27's slice
+  1 (§3.3.5); the rest of it is not started (§3.11 says what the phases are). Atem has started its shared core, and nothing
+  new is activated until the agreed schemas, compatible verifiers and end-to-end tests are in place.
 - **Hosted agent execution:** the dev Station image is built with the Cargo feature `hosted-agent-api`; default and
   production builds keep it closed.
 - **Production:** no production Auth, Portal or built-in Station is set up. The admin site's code accepts only its dev
@@ -669,7 +670,8 @@ owner approves; the remaining hardening is listed in
 
 #### 3.3.5 All management through the admin site (D27)
 
-Status: [Not built]
+Status: [Not built] — slice 1 (the `portal.admin` token, the admin API's gate and releasing an R9 binding) is
+being built; slice 2 is not started ("Slices" below).
 
 **Owner direction.** All system, account and user management goes through the admin site; there are no `npm` or
 script tools for it. Command-line tools may come later, built on the admin site's API. Build, test and deploy commands
@@ -693,8 +695,10 @@ What is still a command or setting today:
      `sub` = the admin, `client_id` = the admin client, `acr` = `urn:agora:mfa` with the proof's `auth_time`, lifetime
      60 seconds.
    - Auth issues it only to the admin client, only for a configured admin whose account is enabled, and only for a
-     proof whose session is live and which is at most 5 minutes old: the same checks as on `/manage/v1`, so one place
-     decides who is an admin.
+     proof whose session is live and which is at most 15 minutes old (the read window, `STEP_UP_READ_SECONDS`): the
+     same checks as on `/manage/v1`, so one place decides who is an admin. The Portal then holds a change to 300 s
+     (below). **Changed 2026-11-27:** this said 5 minutes, which would have refused every page read after five minutes
+     of a 15-minute view.
    - The Portal verifies it like every bearer token (issuer, audience, ES256, `at+jwt`), and also checks that
      `client_id` is the admin client, the scope is `portal.admin`, `acr` is the MFA level, `auth_time` is at most 300 s
      old for a change and 900 s for a read, and `sub` is one of Auth's admins (3).
@@ -731,6 +735,114 @@ What is still a command or setting today:
 6. **Order:** Auth (the `portal.admin` exchange, admins in the listing, the key routes); then the Portal (the admin
    API, the `admin_actions` migration, Stoa admins from Auth; removing `PLATFORM_ADMINS`, `grant-credits`,
    `assign-role` and `import-json`); then the admin site's pages; then removing the key commands after the dev check.
+7. **Releasing an R9 binding** (D29's release, III.5 of Atem's design; §3.11). An admin releases the built-in
+   Station's binding of an R9 account, for a person whose Agora.Build account is lost, so that a new owner can bind it.
+   It changes the built-in Station's service only, never R9 state. Detailed under "Slice 1" below.
+
+**Slices (owner decision, 2026-11-27).** D27 is built in two slices, so that the binding release, which Astation's
+delegated work (Astation #79) waits for, comes first.
+- **Slice 1:** the token (1); the admin API's checks, its `admin_actions` table and its limits (2, without the
+  account routes); Auth's `admins` in the built-in listing, kept by the Portal for checking tokens only (3, without
+  Stoa); and releasing a binding (7).
+- **Slice 2:** the account routes, plan roles and credit grants (2), Stoa admins from Auth and the removal of
+  `PLATFORM_ADMINS` (3), signing keys (4), the "Plan and credits" and "Signing keys" pages (5), and the removals.
+
+**Slice 1 in detail.**
+
+- **Auth: the exchange.** On the token endpoint, as the `station.read` exchange is, but its own grant handling:
+  - `client_id` is the admin client, and the clients file gives that client a `portalAdminAudience`: the Portal's API
+    audience, exactly (`https://dev.agora.build` on dev). Without it, the admin client gets `unauthorized_client`, as
+    before. The clients file accepts the setting on the admin client only; the admin client still lists no
+    `resources`, `stationScopes` or `exchange`.
+  - `subject_token` is the admin's step-up ID token (`subject_token_type` ID token), checked as `/manage/v1` checks
+    its `Agora-Step-Up` proof: ES256, Auth's issuer, `aud` the admin client, an ID token (no `events`), not expired,
+    `acr` `urn:agora:mfa` with `hwk` in `amr`, `auth_time` at most 900 s old (15 s of clock tolerance), `sid` live.
+    `sub` is a configured admin (the built-in Stations' `admins`), and the account exists and is enabled.
+  - `resource` is exactly the `portalAdminAudience`, and `scope` exactly `portal.admin`.
+  - Refusals, as OAuth errors: `unauthorized_client` (not the admin client, or not configured), `invalid_target`
+    (another resource), `invalid_scope` (another scope), `invalid_grant` (the proof fails a check, its session ended,
+    or the account isn't an enabled admin). An unexpected failure is `server_error`.
+  - The token: an ES256 `at+jwt` for 60 seconds, `aud` the audience, `scope` `portal.admin`, `sub` the admin,
+    `client_id` the admin client, and `acr` and `auth_time` copied from the proof. Auth's exchanged tokens carry neither
+    today; only this exchange adds them. Auth records each issue in its audit log, without the token.
+  - The `station.read` exchange is unchanged.
+- **Auth: `admins` in the listing.** `GET /manage/v1/built-in-stations` adds each built-in Station's `admins` (account
+  IDs). The Portal's built-in sync stores them on the Station's row.
+- **Portal: the admin API's gate** (`/api/admin/v1`). It exists only in PostgreSQL mode and with `PORTAL_ADMIN_CLIENT_ID`
+  set to the admin client's ID; otherwise every route is 404. A request needs a bearer token that passes the usual
+  checks (issuer, audience, ES256, `at+jwt`, `exp`) and these:
+  - `client_id` is `PORTAL_ADMIN_CLIENT_ID`, `scope` includes `portal.admin` and `acr` is `urn:agora:mfa`;
+  - `sub` is one of the admins the Portal holds from Auth's listing. Until the first sync there are none, so every
+    request is refused;
+  - `auth_time` is at most 900 s old for a read and 300 s for a change. One too old for a change is 401 with code
+    `mfa_required`, which the admin site answers with a fresh passkey sign-in, as for Auth's step-up.
+  - Other refusals: 401 `token` (missing or invalid), 403 `insufficient_scope`, 403 `not_admin`. A cookie never
+    counts here, and an admin token works on no other Portal route.
+  - The actor is `sub`. Limits per admin: 120 reads and 30 changes a minute (429).
+- **Portal: `admin_actions`** (migration 007): `id`, `at`, `actor`, `action`, `target_kind`, `target`, `reason`,
+  `outcome` (`started`, `done`, `failed`) and `details`. A change writes `started` in its own transaction once the
+  request's own fields (shape, reason, key) pass, and stops if that write fails; then `done` with what it did, or
+  `failed` with the refusal's code. A repeat answered with an existing release writes no row, unless it raced an
+  identical request and had written `started` already: it then ends `done` with `details.repeated: true`. Slice 1 has one
+  action, `binding_released`.
+- **Portal: reading bindings** (a read; `DELEGATED_HOST_WORK=1`): `GET /api/admin/v1/bindings?account=<ab…>` or
+  `?accountId=<R9 account ID>`, exactly one of them. The answer lists the built-in Stations' recorded bindings that match:
+  `{ stationId, account, accountState, accountId, genesisHash, bindingId, version, bindingState, updatedAt, releases }`.
+  `accountState` is `enabled`, `disabled` or `unknown` (the Portal's account view isn't complete and the account isn't
+  listed as disabled: "Account Availability" in platform.md). `releases` holds the binding's ten newest releases.
+- **Portal: releasing** (a change; `DELEGATED_HOST_WORK=1`): `POST /api/admin/v1/bindings/release`
+  `{ stationId, accountId, genesisHash, bindingId, version, reason, key }`.
+  - Checked in this order: the body's shape; `reason` (1 to 500 characters on one line); `key` (the ledger's deposit-key
+    grammar); `stationId` an active built-in Station; the binding recorded there (404 if none); then the key: the same
+    key with the same body answers the recorded release (200), and with another body 409 `key_reused`.
+  - Then: a pending release of this exact binding (`bindingId` and `version`) answers that release (200) and makes no
+    other; the binding's `account` is the admin's own: 403 `own_account`; not `bound`: 409 `not_bound`; `bindingId` or
+    `version` differs from the record: 409 `binding_changed` (the page reloads it).
+  - Otherwise, in one transaction under the Station event lock, with the binding re-read and locked: a
+    `binding_releases` row (`pending`), the `binding_released` change on that Station's feed, and the `admin_actions`
+    row's `done`; the Station is pushed after the commit. The answer is `{ "release": … }`: 201 for the new release,
+    and 200 for a repeat of the same key or a pending release of the same binding. A release is `{ releaseId,
+    stationId, account, accountId, genesisHash, bindingId, version, state, requestedAt, settledAt, settledVersion, actor,
+    reason }`; `settledAt` and `settledVersion` are `null` while it is pending. `releaseId` is `rl-` and a lowercase ULID.
+  - `GET /api/admin/v1/releases/<releaseId>` reads one release, with the same `{ "release": … }` wrapper.
+  - A database failure on any admin route is 503 `unavailable`. A `PORTAL_ADMIN_CLIENT_ID` that is the Portal's own
+    client ID or a Station report client's leaves the admin API off.
+  - Releases are kept forever, like the Station reports.
+- **Portal: the Station's side of it**, as posted on
+  [Portal #41](https://github.com/Agora-Build/Portal/issues/41#issuecomment-7208684880) and written into platform.md's
+  Station Builders contract:
+  - the `binding_released` change (built-in Stations only) carries `account`, `releaseId` and `binding { accountId,
+    genesisHash, bindingId, version }`;
+  - `checkpoint.pendingReleases` lists every pending release in the checkpoint's snapshot;
+  - the Station applies a release only when the binding and version match a `bound` record, applies and queues its
+    `binding_changed` report in one durable transaction, and closes what it served within 60 seconds of the Portal's
+    commit, serving binding-based service only while its last complete feed read began under 60 seconds ago (it fails
+    closed otherwise, and polls at least every 20 seconds);
+  - recording a `binding_changed` with a higher version settles each pending release of that Station's `(accountId,
+    genesisHash)` in the same transaction: `applied` if it is `released` with the same `bindingId` and names the released
+    `account`, otherwise `superseded`.
+- **Admin site** (`DELEGATED_HOST_WORK=1`): an "R9 bindings" page, searched by Agora.Build account or R9 account and
+  linked from the account page, shows each binding with its bound account and that account's state, its version and
+  last change, and its releases. "Release R9 binding" is offered on `bound` bindings only, never on the admin's own
+  account. Its form needs a reason and a tick on "The built-in Station stops serving this R9 account's hosts until a new
+  owner binds it. Nothing changes on the account's devices.", with the usual fresh passkey sign-in (4.5 minutes) and the
+  site's log before and after (migration 003: the `binding_released` action and the `binding` target). The site
+  exchanges the admin's proof for a new Portal token on every Portal call and keeps none. The page shows each release
+  as pending (with its age), applied or superseded.
+- **The third-party verifier's path** needs nothing new here: it uses the integration's own token, and the Station's
+  checks are on [Portal #41](https://github.com/Agora-Build/Portal/issues/41#issuecomment-7208684569) and in
+  platform.md's Station Builders contract.
+- **Settings and order.** Auth first (the exchange is inert until the clients file names the audience), then the
+  Portal (`PORTAL_ADMIN_CLIENT_ID`; the release needs `DELEGATED_HOST_WORK`), then the admin site (its
+  `DELEGATED_HOST_WORK` and the Portal's URL). On dev the clients file gets the admin client's `portalAdminAudience`
+  with Auth's deploy (owner-approved, 2026-11-27); the `DELEGATED_HOST_WORK` settings stay off until the joint run.
+- **Tests.** Every refusal above at Auth and the Portal; the token's claims and its life; the `station.read` exchange
+  unchanged; idempotent and concurrent releases making one release; the feed change and the push in one transaction;
+  `pendingReleases` in the snapshot; settling inside the report's transaction, including a report sent again after a
+  crash under the same or a new `reportId`; the setting off; the admin site's pages, form, refusals, step-up and log;
+  and an end-to-end run with the real Auth, Portal and admin site and a stand-in Station that binds, is released,
+  applies it and reports back. The joint run with Astation covers closing within 60 seconds, a crash between applying
+  and reporting, and a Portal outage that fails closed.
 
 ### 3.4 Native access to a Station
 
@@ -996,8 +1108,9 @@ the Station (and its operator) can use it, and that prompts with retrieved conte
 
 Status: [Partly built] — Phase A built in Auth, the Portal and the admin site, Phase B (the Station's revocation reports and
 the per-host counts) and the availability slice (the Station directory, the checkpoint, account availability and the
-binding reports) built in the Portal, all off by default (DELEGATED_HOST_WORK); Phase C (which includes releasing a binding,
-waiting for D27) not started.
+binding reports) built in the Portal, and the two-phase Station removal built in the Portal over Auth's begin and complete
+routes, all off by default (DELEGATED_HOST_WORK); releasing a binding is being built as D27's slice 1 (§3.3.5), and the
+rest of Phase C is not started.
 Agreed by Atem, Astation and Auth/Portal on 2026-11-08; Atem's build has started.
 
 **Phases.** Phase A is the first slice of Auth/Portal's part (below), built behind the settings. `interruptRunning` on
@@ -1010,8 +1123,12 @@ setting: the Station's `revocation_applied` and final `revoked` reports and the 
 (platform.md, "For Station Builders"). The availability slice is built after it, in the Portal behind the same setting:
 the native Station directory (`GET /api/v1/stations`), the exact-cursor checkpoint, account availability with its
 completeness mark (it relies on the accounts baseline Auth writes with its own setting on) and the built-in Station's
-`binding_changed` and `binding_attempt` reports (platform.md, "Routes" and "For Station Builders"). Phase C (which
-includes releasing a binding, waiting for D27) is a later slice, not started.
+`binding_changed` and `binding_attempt` reports (platform.md, "Routes" and "For Station Builders"). The two-phase Station
+removal (owner direction 2026-11-27) is built after it, in Auth and the Portal behind both settings: a removed Station
+first passes its integrations' revocations to the hosts, and an integration it couldn't confirm on every host is flagged
+pending host revocation for Astation's native revoke (platform.md, "Removing A Station"). Phase C includes
+releasing a binding, which is being built as D27's slice 1 (§3.3.5, owner decision 2026-11-27); the rest of it is not
+started.
 
 **The decision.** Atem owns accepted tasks of delegated senders: integrations a Station's control feed covers, native members, and host senders with project grants. Natural expiry and renewal don't touch accepted tasks, and each task's deadline (at most 24 h) bounds it, running turns included. A revocation cancels unstarted tasks and interrupts running ones only when the owner chooses it. An integration's pause holds its unstarted tasks; host senders have no pause, only revoke and readmit. Stops reach hosts as signed control records (from the Station for integrations, from native managers for host senders) or as device-list entries, and a host reconciles its feeds and mailbox before it starts queued remote work. R9 authorization stays with native managers, outside Agora.Build's kill switch. Agora.Build's service availability is separate: disabling an Agora.Build account suspends the built-in Station's relay and mailbox service for that account's hosts, and revokes nothing.
 
@@ -1045,19 +1162,26 @@ owner's decisions are in its Appendix A.
 - Stops reach the host as control records the Station signs with the integration's own service key; a native revoke
   in Astation is always mirrored to the Portal, so the Station's record backs it.
 - The Portal shows Revoking until every covered host has applied the revocation, or 24 hours have passed.
+- Removing a Station is two-phase: the Station is Removing while it passes the revocations to the hosts, and is removed
+  once each has its final report, or at the first hourly check at or after 26 hours from when the removal began. An
+  integration with an R9 service that is revoked without its Station's final report shows "Revoked; your hosts weren't
+  all told", and Astation offers its owner a native revoke.
 
 **Auth/Portal's part** (the design's I.9 and IV rows 6, 7 and 16; built after the shared contract and Atem's host
 work, nothing before the owner approves):
 
 - **Auth:** `interruptRunning` on a revocation (owner and admin, default false) and an admin "interrupt running
   tasks" change, both in the change feed; account-level `account_disabled` and `account_enabled` feed entries,
-  written in the same transaction ahead of the per-integration ones.
+  written in the same transaction ahead of the per-integration ones; the two-phase Station removal's begin and complete
+  routes, with a removing Station's report client kept until the completion.
 - **Portal:** the revoke dialog's question; `interruptRunning` required on `POST /api/integrations/<id>/revoke`;
   `POST /api/integrations/<id>/interrupt`; a native-app route `POST /api/v1/integrations/<id>/revoke` (scope
   `integrations:approve`); the Station feed's `interruptRunning`, `interrupt_requested`, account events (built-in
   Station only) and `binding_released`; the report kinds `revocation_applied{host, record_id}`,
   `revoked{outcome, pending_hosts}`, `binding_changed` and `binding_attempt`; the expiry, pause, host-sender and
-  mailbox copy; and the Station Builders contract in [platform.md](platform.md#for-station-builders).
+  mailbox copy; the two-phase Station removal (`removing`, its completion at the first hourly check at or after 26 hours from the begin,
+  `pendingHostRevocation` and the native revoke that clears it, 409 `station_removing`); and the Station Builders contract in
+  [platform.md](platform.md#for-station-builders).
 - **Admin site:** the revoke form's question, an "Interrupt running tasks" action, the disable confirmation ("This
   also suspends the built-in Station's relay and mailbox service for this account's hosts. It revokes nothing on the
   account's devices."), and "Release R9 binding", which needs D27's Portal admin API.
@@ -1099,7 +1223,7 @@ Status: [Partly built] — each row has its own tag.
 | D26 | A separate admin site (the private `Agora-Build/Portal-Admin`; `admin.agora.build`, dev `admin.dev.agora.build`) holds Agora.Build's admin powers. Admins sign in with a passkey at Auth, never by silent SSO reuse. Auth enforces every admin permission server-side, with a step-up ID token on each cross-account call. Pause and revoke take effect at once, including the Station's open sessions. Every action has a required reason and an audited actor. Account disabling, enabling and passkey resets are admin-site actions, not CLI commands. The Portal has no admin views. Dev only until passkeys are verified and the owner approves production (§3.3.4) | [Built] | Auth, Portal, admin site |
 | D27 | All system, account and user management goes through the admin site; no `npm` or script tools: a Portal admin API for plan roles and credit grants, called with a 60-second `portal.admin` token exchanged from the admin's step-up proof; Stoa admins taken from Auth's configured admins; signing keys listed and emergency-revoked on the admin site; `import-json` removed (§3.3.5) | [Not built] | Auth, Portal, admin site |
 | D28 | Three integration scopes for Atem's new signed operations: `agent.launch` → `launch`, `agent.message` → `message` (never makes an agent act), `agent.notify` → `notify` (needs `agent.message` and `agent.prompt`, which Auth enforces). `agent.view` stays required; existing integrations gain nothing; the Portal shows all three checkboxes. Signing gate: the Station maps the scopes only in builds with `host-work-api` (Atem supports them from v0.8.2), and Astation signs the new operations only for hosts and checkers that support them. An Astation inbox with "Start work on this" is follow-up (§3.1.3) | [Partly built] — the Station's mapping is off (`host-work-api`), the joint check on a real host has not run, and the inbox is not built | Auth, Portal, Station, Astation, Atem |
-| D29 | Atem owns accepted tasks of delegated senders: integrations a Station's control feed covers, native members, and host senders with project grants. Natural expiry and renewal don't touch accepted tasks, and each task's deadline (at most 24 h) bounds it, running turns included. A revocation cancels unstarted tasks and interrupts running ones only when the owner chooses it. An integration's pause holds its unstarted tasks; host senders have no pause, only revoke and readmit. Stops reach hosts as signed control records (from the Station for integrations, from native managers for host senders) or as device-list entries, and a host reconciles its feeds and mailbox before it starts queued remote work. R9 authorization stays with native managers, outside Agora.Build's kill switch. Agora.Build's service availability is separate: disabling an Agora.Build account suspends the built-in Station's relay and mailbox service for that account's hosts, and revokes nothing. (§3.11) | [Partly built] — agreed by Atem, Astation and Auth/Portal on 2026-11-08; Phase A is built in Auth, the Portal and the admin site, and Phase B's revocation reports and the availability slice in the Portal, off by default (§2, §3.11); Phase C (which includes releasing a binding, waiting for D27) is not started | Atem, Astation, Auth, Portal, admin site |
+| D29 | Atem owns accepted tasks of delegated senders: integrations a Station's control feed covers, native members, and host senders with project grants. Natural expiry and renewal don't touch accepted tasks, and each task's deadline (at most 24 h) bounds it, running turns included. A revocation cancels unstarted tasks and interrupts running ones only when the owner chooses it. An integration's pause holds its unstarted tasks; host senders have no pause, only revoke and readmit. Stops reach hosts as signed control records (from the Station for integrations, from native managers for host senders) or as device-list entries, and a host reconciles its feeds and mailbox before it starts queued remote work. R9 authorization stays with native managers, outside Agora.Build's kill switch. Agora.Build's service availability is separate: disabling an Agora.Build account suspends the built-in Station's relay and mailbox service for that account's hosts, and revokes nothing. (§3.11) | [Partly built] — agreed by Atem, Astation and Auth/Portal on 2026-11-08; Phase A is built in Auth, the Portal and the admin site, and Phase B's revocation reports, the availability slice and the two-phase Station removal in the Portal, off by default (§2, §3.11); releasing a binding is being built as D27's slice 1 (§3.3.5), and the rest of Phase C is not started | Atem, Astation, Auth, Portal, admin site |
 
 No decision has been replaced by a later one. D21 was revised in place, and D24's rule that admins hold the
 Station-owner rights on the built-in Station now works through the admin site (D26).
@@ -1159,11 +1283,18 @@ Grouped by area. Nothing goes to production without the owner's approval.
 
 **All management through the admin site** ([§3.3.5](#335-all-management-through-the-admin-site-d27))
 
-- Auth: the `portal.admin` token exchange; `admins` in `GET /manage/v1/built-in-stations`; `GET /manage/v1/keys` and
-  `POST /manage/v1/keys/:kid/revoke`; then remove `npm run keys` and `deploy.sh keys` after the dev check.
-- Portal: `/api/admin/v1` (account read, set plan role, grant credits) and its `admin_actions` migration; Stoa admins
-  from Auth's listing; remove `PLATFORM_ADMINS`, `grant-credits`, `assign-role` and `import-json`.
-- Admin site: "Plan and credits" on the account page and the "Signing keys" page.
+- Slice 1, being built:
+  - Auth: the `portal.admin` token exchange, and `admins` in `GET /manage/v1/built-in-stations`.
+  - Portal: the `/api/admin/v1` gate, `admin_actions`, and reading and releasing bindings, with `binding_released`,
+    `pendingReleases` and settling.
+  - Admin site: the "R9 bindings" page and "Release R9 binding".
+  - Astation: applying a release, the 60-second window and the freshness rule (Portal #41); then the joint run.
+- Slice 2:
+  - Auth: `GET /manage/v1/keys` and `POST /manage/v1/keys/:kid/revoke`; then remove `npm run keys` and `deploy.sh
+    keys` after the dev check.
+  - Portal: the account routes (account read, set plan role, grant credits); Stoa admins from Auth's listing; remove
+    `PLATFORM_ADMINS`, `grant-credits`, `assign-role` and `import-json`.
+  - Admin site: "Plan and credits" on the account page and the "Signing keys" page.
 
 **Built-in apps** ([§3.3.3](#333-built-in-apps-portal-astation-a-mobile-app))
 
@@ -1213,7 +1344,8 @@ Grouped by area. Nothing goes to production without the owner's approval.
 - Auth: `interruptRunning` and the admin interrupt change; account-level feed entries.
 - Portal: the revoke question and routes, the native-app revoke route, the Station feed and report additions, the
   copy and the Station Builders contract.
-- Admin site: the revoke question, "Interrupt running tasks", the disable copy, and "Release R9 binding" (after D27).
+- Admin site: the revoke question, "Interrupt running tasks", the disable copy, and "Release R9 binding" (D27's
+  slice 1).
 - All teams: the joint dev checks of the design's section VII, then the owner's approval.
 
 **Production**

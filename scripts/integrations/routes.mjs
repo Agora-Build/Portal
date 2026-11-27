@@ -60,22 +60,29 @@ export function createIntegrationStack({ db, manage, idp, log, stationFetch = cr
   // The built-in Stations, synced from Auth's account-less listing once the stack is ready and then hourly (P17, D26);
   // a failed sync is logged by syncBuiltIn and tried again a minute later. ready() waits for the first sync, which is
   // bounded by the management call's 10 s timeout plus the database statements of reconciling (each within
-  // statement_timeout).
+  // statement_timeout). After a sync that reached Auth, the removing Stations that are done, or 26 hours old, are completed
+  // (D29, completeRemovals; it calls Auth too, so not after a failed sync): by the hourly run before it re-arms, and by
+  // ready() once the feed has started, beside it, since nothing it returns needs them (close() waits for them).
   let builtInSync = null;
+  let completing = null;
   let closed = false;
-  const syncBuiltIn = async () => {
+  const syncBuiltIn = async ({ first = false } = {}) => {
     const synced = await service.syncBuiltIn();
-    if (closed) return;
-    builtInSync = setTimeout(syncBuiltIn, synced ? builtInSyncAfter.ok : builtInSyncAfter.failed);
-    builtInSync.unref();
+    if (synced && !first && !closed) await service.completeRemovals();
+    if (!closed) {
+      builtInSync = setTimeout(syncBuiltIn, synced ? builtInSyncAfter.ok : builtInSyncAfter.failed);
+      builtInSync.unref();
+    }
+    return synced;
   };
   function ready() {
     pending ||= (async () => {
       await db.migrate();
       await db.ensureEventPartitions();
       prepared = true;
-      await syncBuiltIn();
+      const synced = await syncBuiltIn({ first: true });
       if (!closed) feed.start();
+      if (synced && !closed) completing = service.completeRemovals().catch((error) => log("Station removals not checked: " + (error.code || "error") + "."));
       return service;
     })().catch((error) => {
       pending = null;
@@ -97,6 +104,7 @@ export function createIntegrationStack({ db, manage, idp, log, stationFetch = cr
       closed = true;
       clearInterval(partitions);
       clearTimeout(builtInSync);
+      await completing;
       await feed.stop();
       await db.close();
     }
@@ -192,7 +200,9 @@ export async function handleIntegrations({ path, method, url, read, service, cal
       if (method === "DELETE") { await service.unshare(changing(await portalUser()), id, member); return ok({ unshared: true }); }
       return null;
     }
-    if (!action && method === "DELETE") { await service.removeStation(changing(await portalUser()), id); return ok({ removed: true }); }
+    // { removed: true }, or with the setting on, while its two-phase removal runs, { removed: false, removing: true,
+    // completeBy } (D29).
+    if (!action && method === "DELETE") return ok(await service.removeStation(changing(await portalUser()), id));
     if (action === "members" && method === "GET") return ok(await service.members(listing("members", await portalUser()), id));
     if (action === "read-token" && method === "POST") {
       const accountId = await portalUser(); limit("read-token:" + accountId, 30, 60000);

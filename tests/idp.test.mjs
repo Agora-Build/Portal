@@ -25,11 +25,11 @@ const rejectsLogin = (promise, reason) => assert.rejects(promise, (error) => {
   if (reason) assert.equal(error.reason, reason);
   return true;
 });
-const rejectsToken = (promise, status = 401) => assert.rejects(promise, (error) => {
-  assert.ok(error instanceof TokenError, "expected a TokenError, got " + error?.name + ": " + error?.message);
-  assert.equal(error.status, status);
+const rejectsToken = (promise, status = 401, label) => assert.rejects(promise, (error) => {
+  assert.ok(error instanceof TokenError, (label ? label + ": " : "") + "expected a TokenError, got " + error?.name + ": " + error?.message);
+  assert.equal(error.status, status, label);
   return true;
-});
+}, label);
 afterEach(() => mock.timers.reset());
 
 test("config derives the redirect, post-logout and account URLs; bad settings are refused by name", () => {
@@ -356,6 +356,40 @@ test("bearer: wrong typ, alg none or HS256, wrong iss or aud, expiry, forged sig
     }, name);
   }
   await rejectsToken(idp.verifyAccessToken(undefined), 401);
+});
+
+// D27: the admin API's token. The usual checks are verifyAccessToken's, and Auth's exact 60-second form besides (iat, a
+// lifetime of at most 60 seconds, a single string aud); the claims the gate judges come back as they are.
+test("verifyAdminToken: the usual checks and an account as sub, then the client, scopes, acr and auth_time as they are", async () => {
+  const { fake, idp } = await setup();
+  const sub = fake.accountId();
+  const now = Math.floor(Date.now() / 1000);
+  const authTime = now - 42;
+  const minute = { iat: now, exp: now + 60 };
+  const token = await fake.issueAccessToken({ sub, client_id: "admin", scope: "portal.admin", acr: "urn:agora:mfa", auth_time: authTime, ...minute });
+  assert.deepEqual(await idp.verifyAdminToken(token), { sub, clientId: "admin", scopes: ["portal.admin"], acr: "urn:agora:mfa", authTime });
+  assert.deepEqual(await idp.verifyAdminToken(await fake.issueAccessToken({ sub, scope: undefined, acr: 5, auth_time: "1", ...minute })), { sub, clientId: "portal", scopes: [], acr: null, authTime: null });
+  assert.equal((await idp.verifyAdminToken(await fake.issueAccessToken({ sub, auth_time: 1.5, ...minute }))).authTime, null);
+  assert.equal((await idp.verifyAdminToken(await fake.issueAccessToken({ sub, iat: now, exp: now + 30 }))).sub, sub, "a shorter life is no problem");
+  const stranger = await generateKeyPair("ES256");
+  const refused = {
+    "typ JWT": fake.issueAccessToken({ sub }, { typ: "JWT" }),
+    "HS256": fake.issueAccessToken({ sub }, { alg: "HS256" }),
+    "wrong aud": fake.issueAccessToken({ sub, aud: "https://other.example" }),
+    "wrong iss": fake.issueAccessToken({ sub, iss: "https://evil.example" }),
+    "expired": fake.issueAccessToken({ sub, iat: now - 200, exp: now - 100 }),
+    "a Station's report token": fake.issueAccessToken({ sub: "s-" + "0".repeat(26), client_id: "s-" + "0".repeat(26), scope: "station.report" }),
+    "no client_id": fake.issueAccessToken({ sub }, { omit: ["client_id"] }),
+    "forged": fake.issueAccessToken({ sub }, { key: { kid: fake.keys[0].kid, privateKey: stranger.privateKey } }),
+    // Auth issues exactly 60-second tokens with an iat and a single audience; anything else is not its token.
+    "no iat": fake.issueAccessToken({ sub, exp: now + 60 }, { omit: ["iat"] }),
+    "iat not a number": fake.issueAccessToken({ sub, iat: String(now), exp: now + 60 }),
+    "a 15-minute life": fake.issueAccessToken({ sub, iat: now, exp: now + 900 }),
+    "a 61-second life": fake.issueAccessToken({ sub, iat: now, exp: now + 61 }),
+    "aud an array holding the audience": fake.issueAccessToken({ sub, iat: now, exp: now + 60, aud: [audience] }),
+    "aud an array holding the audience and another": fake.issueAccessToken({ sub, iat: now, exp: now + 60, aud: [audience, "https://other.example"] })
+  };
+  for (const [name, pending] of Object.entries(refused)) await rejectsToken(idp.verifyAdminToken(await pending), 401, name);
 });
 
 test("bearer: key rotation refetches JWKS for an unknown kid", async () => {

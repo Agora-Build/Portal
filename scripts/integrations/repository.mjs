@@ -14,7 +14,8 @@ const updatable = {
   revokedAt: "revoked_at",
   interruptRunning: "interrupt_running",
   revocationOutcome: "revocation_outcome",
-  revocationPendingHosts: "revocation_pending_hosts"
+  revocationPendingHosts: "revocation_pending_hosts",
+  pendingHostRevocation: "pending_host_revocation"
 };
 
 function iso(value) {
@@ -62,6 +63,8 @@ function stationRow(row) {
     createdAt: iso(row.created_at),
     verifiedAt: iso(row.verified_at),
     removedAt: iso(row.removed_at),
+    // When its two-phase removal began (D29, migration 008): set while it is removing, and kept once it is removed.
+    removalStartedAt: iso(row.removal_started_at) ?? null,
     builtIn: row.built_in === true,
     access: row.access ?? "members",
     integrationsEnabled: row.integrations_enabled !== false,
@@ -91,6 +94,7 @@ function integrationRow(row) {
     interruptRunning: row.interrupt_running === true,
     revocationOutcome: row.revocation_outcome ?? null,
     revocationPendingHosts: row.revocation_pending_hosts ?? null,
+    pendingHostRevocation: row.pending_host_revocation === true,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at)
   };
@@ -140,6 +144,27 @@ function bindingAttemptRow(row) {
   };
 }
 
+// A release of a built-in Station's binding (D27, binding_releases) in the admin API's shape: `account` is the Agora.Build
+// owner released and `accountId` the R9 account, as in the binding reports. Versions are bigints read back as numbers,
+// exact because only safe integers are saved.
+function releaseRow(row) {
+  return {
+    releaseId: row.release_id,
+    stationId: row.station_id,
+    account: row.account_id,
+    accountId: row.r9_account_id,
+    genesisHash: row.genesis_hash,
+    bindingId: row.binding_id,
+    version: Number(row.version),
+    state: row.state,
+    requestedAt: iso(row.requested_at),
+    settledAt: iso(row.settled_at) ?? null,
+    settledVersion: row.settled_version === null ? null : Number(row.settled_version),
+    actor: row.actor,
+    reason: row.reason
+  };
+}
+
 export function createRepository(db) {
   const run = (client, text, values) => (client || db.pool).query(text, values);
 
@@ -183,23 +208,25 @@ export function createRepository(db) {
       return rows[0] ? stationRow(rows[0]) : null;
     },
 
-    // The active Station at an origin, locked for the caller's transaction.
+    // The Station that holds an origin (active, or removing: D29), locked for the caller's transaction.
     async activeStationAt(origin, client) {
       if (!client) throw new TypeError("activeStationAt needs a transaction client.");
-      const { rows } = await client.query("SELECT * FROM stations WHERE origin = $1 AND status = 'active' FOR UPDATE", [origin]);
+      const { rows } = await client.query("SELECT * FROM stations WHERE origin = $1 AND status IN ('active', 'removing') FOR UPDATE", [origin]);
       return rows[0] ? stationRow(rows[0]) : null;
     },
 
+    // A removing Station (D29) still reads its feed and reports, with the same report client.
     async stationByReportClient(clientId, client) {
-      const { rows } = await run(client, "SELECT * FROM stations WHERE report_client_id = $1 AND status = 'active'", [clientId]);
+      const { rows } = await run(client, "SELECT * FROM stations WHERE report_client_id = $1 AND status IN ('active', 'removing')", [clientId]);
       return rows[0] ? stationRow(rows[0]) : null;
     },
 
-    // The active Stations this account may use: every built-in Station (role built_in), its own (owner) and those
-    // shared with it (member). Built-in Stations come first, as in Auth's listing.
+    // The Stations this account has: every built-in Station (role built_in), its own (owner) and those shared with it
+    // (member), active or removing (D29: the service refuses what a removing one can't do). Built-in Stations come first,
+    // as in Auth's listing.
     async stationsFor(accountId, client) {
       const { rows } = await run(client,
-        "SELECT s.*, CASE WHEN s.built_in THEN 'built_in' WHEN s.owner_account = $1 THEN 'owner' ELSE 'member' END AS role FROM stations s WHERE s.status = 'active' AND (s.built_in OR s.owner_account = $1 OR EXISTS (SELECT 1 FROM station_members m WHERE m.station_id = s.id AND m.account_id = $1 AND m.removed_at IS NULL)) ORDER BY s.built_in DESC, s.created_at, s.id",
+        "SELECT s.*, CASE WHEN s.built_in THEN 'built_in' WHEN s.owner_account = $1 THEN 'owner' ELSE 'member' END AS role FROM stations s WHERE s.status IN ('active', 'removing') AND (s.built_in OR s.owner_account = $1 OR EXISTS (SELECT 1 FROM station_members m WHERE m.station_id = s.id AND m.account_id = $1 AND m.removed_at IS NULL)) ORDER BY s.built_in DESC, s.created_at, s.id",
         [accountId]);
       return rows.map((row) => ({ ...stationRow(row), role: row.role }));
     },
@@ -241,10 +268,10 @@ export function createRepository(db) {
         "CASE WHEN s.built_in OR s.owner_account = $1 THEN NULL WHEN m.is_current THEN 'current' ELSE 'ended' END AS membership, " +
         "CASE WHEN s.built_in OR s.owner_account = $1 OR m.is_current THEN NULL ELSE m.ended_at END AS membership_ended_at " +
         "FROM stations s LEFT JOIN mine m ON m.station_id = s.id WHERE CASE " +
-        "WHEN s.built_in THEN (s.status = 'active' OR (s.status = 'removed' AND s.removed_at >= $2)) " +
-        "WHEN s.owner_account = $1 THEN (s.status = 'active' OR (s.status = 'removed' AND s.removed_at >= $2)) " +
+        "WHEN s.built_in THEN (s.status IN ('active', 'removing') OR (s.status = 'removed' AND s.removed_at >= $2)) " +
+        "WHEN s.owner_account = $1 THEN (s.status IN ('active', 'removing') OR (s.status = 'removed' AND s.removed_at >= $2)) " +
         "WHEN m.station_id IS NULL THEN false " +
-        "WHEN s.status = 'active' THEN (m.is_current OR m.ended_at >= $2) " +
+        "WHEN s.status IN ('active', 'removing') THEN (m.is_current OR m.ended_at >= $2) " +
         "WHEN m.is_current THEN s.removed_at >= $2 " +
         "ELSE LEAST(s.removed_at, m.ended_at) >= $2 END) " +
         "SELECT d.* FROM listed d" + keyset + " ORDER BY d.built_in DESC, d.created_ms, d.id LIMIT $3",
@@ -276,8 +303,23 @@ export function createRepository(db) {
       return rows[0].n;
     },
 
+    // Removes an active or removing Station; returns whether it did (false once it is removed).
     async markStationRemoved(id, now, client) {
-      await run(client, "UPDATE stations SET status = 'removed', removed_at = $2 WHERE id = $1 AND status = 'active'", [id, when(now)]);
+      const { rowCount } = await run(client, "UPDATE stations SET status = 'removed', removed_at = $2 WHERE id = $1 AND status IN ('active', 'removing')", [id, when(now)]);
+      return rowCount > 0;
+    },
+
+    // Begins a custom Station's two-phase removal (D29): active becomes removing, dated `now`. Returns whether it did (false
+    // for a Station already removing or removed, and for a built-in one).
+    async markStationRemoving(id, now, client) {
+      const { rowCount } = await run(client, "UPDATE stations SET status = 'removing', removal_started_at = $2 WHERE id = $1 AND status = 'active' AND NOT built_in", [id, timeOf(now, "now")]);
+      return rowCount > 0;
+    },
+
+    // The Stations being removed (D29), the oldest removal first: the hourly sync completes those that are done.
+    async removingStations(client) {
+      const { rows } = await run(client, "SELECT * FROM stations WHERE status = 'removing' ORDER BY removal_started_at, id");
+      return rows.map(stationRow);
     },
 
     async addMember(stationId, accountId, addedBy, now, client) {
@@ -338,6 +380,8 @@ export function createRepository(db) {
         if ((key === "ownerDisabledAt" || key === "revokedAt") && value === undefined) throw new TypeError(key + " must be a time, or null to clear it.");
         // A silent null would clear a recorded final outcome or its list of hosts: only on purpose.
         if ((key === "revocationOutcome" || key === "revocationPendingHosts") && value === undefined) throw new TypeError(key + " must be a value, or null to clear it.");
+        // The pending host revocation flag (D29) is set or cleared on purpose only.
+        if (key === "pendingHostRevocation" && typeof value !== "boolean") throw new TypeError("pendingHostRevocation must be true or false.");
         // The pending hosts are jsonb: written as JSON, and null stays an SQL null (JSON.stringify would make it a JSON null).
         values.push(key === "expiresAt" || key === "approvedAt" || key === "ownerDisabledAt" || key === "revokedAt" ? (value === null ? null : when(value)) : key === "revocationPendingHosts" && value !== null ? JSON.stringify(value) : value);
         assignments.push(updatable[key] + " = $" + values.length);
@@ -401,6 +445,13 @@ export function createRepository(db) {
     async eventsFor(integrationId, limit = 100, client) {
       const { rows } = await run(client, "SELECT id, at, integration_id, actor, kind, state, reason, details FROM integration_events WHERE integration_id = $1 ORDER BY id DESC LIMIT $2", [integrationId, limit]);
       return rows.map((row) => ({ ...eventRow(row), actor: row.actor }));
+    },
+
+    // The Station's newest event of one kind, or null: a two-phase removal's station_removing, whose details say which
+    // integrations its Station had yet to pass on (D29).
+    async latestStationEvent(stationId, kind, client) {
+      const { rows } = await run(client, "SELECT id, at, integration_id, account_id, kind, state, reason, details FROM integration_events WHERE station_id = $1 AND kind = $2 ORDER BY id DESC LIMIT 1", [stationId, kind]);
+      return rows[0] ? eventRow(rows[0]) : null;
     },
 
     async latestCursor(stationId, client) {
@@ -636,6 +687,124 @@ export function createRepository(db) {
       const { rows } = await run(client, "SELECT * FROM binding_attempts WHERE account_id = $1 AND attempted_at >= $2 ORDER BY attempted_at DESC, station_id, report_id" + (limit === undefined ? "" : " LIMIT $3"),
         limit === undefined ? [accountId, timeOf(since, "since")] : [accountId, timeOf(since, "since"), limit]);
       return rows.map(bindingAttemptRow);
+    },
+
+    // The admins Auth's built-in listing names for a built-in Station (D27), as given (the service sorts them). Only an
+    // active built-in Station's are kept. Returns whether they changed.
+    async setBuiltInAdmins(id, admins, client) {
+      if (!Array.isArray(admins) || admins.some((admin) => typeof admin !== "string")) throw new TypeError("admins must be a list of account IDs.");
+      const { rowCount } = await run(client,
+        "UPDATE stations SET admin_accounts = $2::text[] WHERE id = $1 AND built_in AND status = 'active' AND admin_accounts IS DISTINCT FROM $2::text[]",
+        [id, admins]);
+      return rowCount > 0;
+    },
+
+    // Whether the account is an admin of an active built-in Station: the admin API's admin set (D27).
+    async isPortalAdmin(accountId, client) {
+      const { rows } = await run(client, "SELECT EXISTS (SELECT 1 FROM stations WHERE built_in AND status = 'active' AND $1 = ANY (admin_accounts)) AS admin", [accountId]);
+      return rows[0].admin === true;
+    },
+
+    // binding(), read and locked for the caller's transaction (a release, D27).
+    async bindingForUpdate(stationId, r9AccountId, genesisHash, client) {
+      if (!client) throw new TypeError("bindingForUpdate needs a transaction client.");
+      const { rows } = await client.query("SELECT * FROM station_bindings WHERE station_id = $1 AND r9_account_id = $2 AND genesis_hash = $3 FOR UPDATE", [stationId, r9AccountId, genesisHash]);
+      return rows[0] ? bindingRow(rows[0]) : null;
+    },
+
+    // The active built-in Stations' recorded bindings of an Agora.Build account (`account`) or of an R9 account
+    // (`r9AccountId`), exactly one of them: by Station (oldest first), then as bindingsOn orders them.
+    async bindingsFor({ account, r9AccountId } = {}, client) {
+      if ((account === undefined) === (r9AccountId === undefined)) throw new TypeError("Name exactly one of account or r9AccountId.");
+      const column = account === undefined ? "b.r9_account_id" : "b.account_id";
+      const { rows } = await run(client,
+        "SELECT b.* FROM station_bindings b JOIN stations s ON s.id = b.station_id WHERE s.built_in AND s.status = 'active' AND " + column + " = $1 " +
+        "ORDER BY s.created_at, s.id, b.r9_account_id COLLATE \"C\", b.genesis_hash COLLATE \"C\"",
+        [account ?? r9AccountId]);
+      return rows.map(bindingRow);
+    },
+
+    // The accounts among `accountIds` that account_availability has disabled now, as a Set.
+    async disabledAmong(accountIds, client) {
+      if (!accountIds.length) return new Set();
+      const { rows } = await run(client, "SELECT account_id FROM account_availability WHERE disabled AND account_id = ANY ($1::text[])", [accountIds]);
+      return new Set(rows.map((row) => row.account_id));
+    },
+
+    // A new pending release (D27). The caller holds the event lock and has made every check (service.releaseBinding); the
+    // database refuses a second pending release of the same exact binding and a key used again.
+    async insertRelease({ releaseId, stationId, accountId, r9AccountId, genesisHash, bindingId, version, actor, reason, requestedAt, idempotencyKey, requestHash }, client) {
+      if (!Number.isSafeInteger(version) || version < 1) throw new TypeError("version must be a positive whole number.");
+      const { rows } = await run(client,
+        "INSERT INTO binding_releases (release_id, station_id, account_id, r9_account_id, genesis_hash, binding_id, version, actor, reason, requested_at, idempotency_key, request_hash) " +
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *",
+        [releaseId, stationId, accountId, r9AccountId, genesisHash, bindingId, version, actor, reason, timeOf(requestedAt, "requestedAt"), idempotencyKey, requestHash]);
+      return releaseRow(rows[0]);
+    },
+
+    async releaseById(releaseId, client) {
+      const { rows } = await run(client, "SELECT * FROM binding_releases WHERE release_id = $1", [releaseId]);
+      return rows[0] ? releaseRow(rows[0]) : null;
+    },
+
+    // The release made under an idempotency key, with the hash of the request that made it, or null.
+    async releaseByKey(key, client) {
+      const { rows } = await run(client, "SELECT * FROM binding_releases WHERE idempotency_key = $1", [key]);
+      return rows[0] ? { release: releaseRow(rows[0]), requestHash: rows[0].request_hash } : null;
+    },
+
+    // The pending release of one exact binding (its Station, R9 account, genesis, bindingId and version), or null.
+    async pendingReleaseOf({ stationId, r9AccountId, genesisHash, bindingId, version }, client) {
+      const { rows } = await run(client,
+        "SELECT * FROM binding_releases WHERE station_id = $1 AND r9_account_id = $2 AND genesis_hash = $3 AND binding_id = $4 AND version = $5 AND state = 'pending'",
+        [stationId, r9AccountId, genesisHash, bindingId, version]);
+      return rows[0] ? releaseRow(rows[0]) : null;
+    },
+
+    // A binding's releases (its Station, R9 account and genesis), the newest first, at most `limit`.
+    async releasesOf(stationId, r9AccountId, genesisHash, { limit = 10 } = {}, client) {
+      if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError("limit must be a whole number, 1 or more.");
+      const { rows } = await run(client,
+        "SELECT * FROM binding_releases WHERE station_id = $1 AND r9_account_id = $2 AND genesis_hash = $3 ORDER BY requested_at DESC, release_id COLLATE \"C\" DESC LIMIT $4",
+        [stationId, r9AccountId, genesisHash, limit]);
+      return rows.map(releaseRow);
+    },
+
+    // A Station's releases not settled yet, the oldest first: the checkpoint's pendingReleases.
+    async pendingReleasesOn(stationId, client) {
+      const { rows } = await run(client, "SELECT * FROM binding_releases WHERE station_id = $1 AND state = 'pending' ORDER BY requested_at, release_id COLLATE \"C\"", [stationId]);
+      return rows.map(releaseRow);
+    },
+
+    // Settles, for a recorded binding_changed (service.recordBinding, in its transaction), every pending release of that
+    // Station's R9 account at that genesis whose version is lower than the report's: applied when the report is released
+    // with the release's bindingId, for the Agora.Build `account` the release names (the owner it was released from),
+    // superseded otherwise. Returns the releases it settled, oldest first.
+    async settleReleases({ stationId, account, r9AccountId, genesisHash, bindingId, version, bindingState, settledAt }, client) {
+      if (typeof account !== "string" || !account) throw new TypeError("account must be the Agora.Build account the report names.");
+      if (!Number.isSafeInteger(version) || version < 1) throw new TypeError("version must be a positive whole number.");
+      const { rows } = await run(client,
+        "WITH settled AS (UPDATE binding_releases SET state = CASE WHEN $5::text = 'released' AND binding_id = $4 AND account_id = $8 THEN 'applied' ELSE 'superseded' END, " +
+        "settled_at = $7, settled_version = $6 WHERE station_id = $1 AND r9_account_id = $2 AND genesis_hash = $3 AND state = 'pending' AND version < $6 RETURNING *) " +
+        "SELECT * FROM settled ORDER BY requested_at, release_id COLLATE \"C\"",
+        [stationId, r9AccountId, genesisHash, bindingId, bindingState, version, timeOf(settledAt, "settledAt"), account]);
+      return rows.map(releaseRow);
+    },
+
+    // An admin's change as it starts (D27, admin_actions): written before the change, in its own statement, so that the
+    // change never runs if this fails.
+    async startAdminAction({ id, actor, action, targetKind, target, reason, at }, client) {
+      await run(client,
+        "INSERT INTO admin_actions (id, at, actor, action, target_kind, target, reason) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        [id, timeOf(at, "at"), actor, action, targetKind, target, reason]);
+    },
+
+    // Done with what it did, or failed with the refusal's code. Only a started one is finished; returns whether this
+    // call finished it.
+    async finishAdminAction(id, outcome, details, client) {
+      if (outcome !== "done" && outcome !== "failed") throw new TypeError("An admin action ends done or failed.");
+      const { rowCount } = await run(client, "UPDATE admin_actions SET outcome = $2, details = $3 WHERE id = $1 AND outcome = 'started'", [id, outcome, JSON.stringify(details ?? {})]);
+      return rowCount > 0;
     }
   };
 }
