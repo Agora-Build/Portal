@@ -543,10 +543,10 @@ The tables:
 
 | Table | Holds |
 | --- | --- |
-| `stations` | Auth's Station ID, origin, owner (none for a built-in Station), report client ID, `active` or `removed`, `built_in`, `access` (`members` or `any_account`), `integrations_enabled`, `name`, `admin_accounts` (a built-in Station's admins from Auth's built-in listing, migration 007) |
+| `stations` | Auth's Station ID, origin, owner (none for a built-in Station), report client ID, `active`, `removing` (a custom Station's two-phase removal, migration 008, with `DELEGATED_HOST_WORK=1` only) or `removed`, `removal_started_at` (when its removal began; migration 008), `built_in`, `access` (`members` or `any_account`), `integrations_enabled`, `name`, `admin_accounts` (a built-in Station's admins from Auth's built-in listing, migration 007) |
 | `station_members` | accounts a Station is shared with, with who added or removed them and when |
 | `station_challenges` | issued proof values, valid 10 minutes, single use |
-| `integrations` | Auth's `i-` client ID, owner, Station, scopes, state, `resume_state`, `r9_svc`, quota, expiry, `last_error`, `paused_by` (who paused it, as Auth says: `owner`, `station` or `admin`), `owner_disabled_at` (while Agora.Build has the owner's account disabled), `revoked_at` (when it was revoked; empty for one revoked before migration 004), `interrupt_running` (whether its revocation interrupts the tasks running on the owner's hosts; see below), `revocation_outcome` and `revocation_pending_hosts` (how its revocation ended, from the Station's final report: `all_applied` or `deadline_passed`, and the host ids that didn't confirm; empty until then and without the setting; migration 005) |
+| `integrations` | Auth's `i-` client ID, owner, Station, scopes, state, `resume_state`, `r9_svc`, quota, expiry, `last_error`, `paused_by` (who paused it, as Auth says: `owner`, `station` or `admin`), `owner_disabled_at` (while Agora.Build has the owner's account disabled), `revoked_at` (when it was revoked; empty for one revoked before migration 004), `interrupt_running` (whether its revocation interrupts the tasks running on the owner's hosts; see below), `revocation_outcome` and `revocation_pending_hosts` (how its revocation ended, from the Station's final report: `all_applied` or `deadline_passed`, and the host ids that didn't confirm; empty until then and without the setting; migration 005), `pending_host_revocation` (revoked, but its Station couldn't confirm the revocation on every host; the owner's native revoke in Astation clears it; migration 008, set only where the setting was on: "Removing A Station") |
 | `integration_events` | every change, kept forever; also the Stations' change feed |
 | `station_reports` | a Station's reports that carry a `reportId` (migration 005, with `DELEGATED_HOST_WORK=1` only): the id, the integration (none for a binding report), the body and the answer it got, kept forever so a retry gets the same answer; the key is the Station and the id |
 | `revocation_hosts` | the hosts that applied an integration's revocation (migration 005, with `DELEGATED_HOST_WORK=1` only): the host id, the record's id and the report's id, one row per host |
@@ -612,13 +612,24 @@ waits for any change in the middle of being recorded. The Portal fills `admin_ac
 two tables only through the admin API, so with `PORTAL_ADMIN_CLIENT_ID` unset or `DELEGATED_HOST_WORK` off they stay empty.
 Like the other rows, they are never deleted.
 
+Migration `008_two_phase_removal.sql` (D29's two-phase Station removal, "Removing A Station" below) lets `stations.status` be
+`removing` too, adds `stations.removal_started_at` (set on a removing Station, which must have it, and kept once it is
+removed) and `integrations.pending_host_revocation` (false on every existing integration, and only ever true on a revoked
+one), keeps a removing Station's origin from any other Station (the unique index on an active origin covers `removing` too,
+as Auth's migration 012 does) and indexes the removing Stations for the hourly check. It runs when the server starts,
+whatever the setting, and waits for any change in the middle of being recorded. The Portal begins a two-phase removal, and
+flags the integrations of a Station that left without one, only with `DELEGATED_HOST_WORK=1`, so with it off nothing new is
+written. A removal already begun is never cut short: whatever the setting is by then, it is still completed and its
+integrations flagged. Like the other rows, they are never deleted.
+
 **With `DELEGATED_HOST_WORK=1` (off by default):** the Portal offers delegated host work, Phase A of
 [D29](integrations.md#311-delegated-host-work-d29): a revocation says whether to interrupt the tasks running on the
 owner's hosts, those tasks can be interrupted later within 24 hours, and the built-in Station hears when an admin
 disables or enables an account. Phase B adds the Station's two revocation reports and, on a stopped integration, how many
 hosts applied the revocation ("Routes", "For Station Builders"). The third slice adds the native Station directory
 (`GET /api/v1/stations`), the exact-cursor checkpoint (`?checkpoint=1`), account availability with its completeness mark
-and the built-in Station's two binding reports (`binding_changed` and `binding_attempt`). Releasing a binding (D27's slice 1:
+and the built-in Station's two binding reports (`binding_changed` and `binding_attempt`). Removing a custom Station is
+two-phase ("Removing A Station"). Releasing a binding (D27's slice 1:
 the admin API's release, `binding_released` and the checkpoint's `pendingReleases`) needs `PORTAL_ADMIN_CLIENT_ID` too
 (below). The Portal reads the one variable when it starts; only `1` turns it on, and any other value or none is off. Off is
 today's behaviour exactly: the routes, bodies, views and feed entries below do not exist and the account page shows nothing
@@ -1032,6 +1043,21 @@ Portal keep working.
   deploy or the rollback first. After a rollback to such an image and forward again, the line shows once and nothing else
   is needed. With the setting off the guard moves the Portal to `waiting` instead, silently, and the cursor needs the
   reset once every replica runs with the setting on.
+- **Rolling back past migration 008** (the two-phase removal) leaves its column, constraint and indexes in place, which an
+  older image ignores, but an older image does not know `removing` and takes a removing Station for gone. It leaves the
+  Station out of the owner's list and of the directory (Astation sees it vanish, with no `removed` entry), refuses its report
+  client (403, which a Station takes for its stop signal, so it stops passing the revocations on) and neither completes nor
+  removes it: its integrations stay `revoking` and the Station stays `removing`, holding its origin, until a newer image runs
+  again. So before rolling back, turn the admin site's `DELEGATED_HOST_WORK` off and then the Portal's (the admin site's must
+  be off whenever the Portal's is), so no removal begins, and wait until
+  `SELECT count(*) FROM stations WHERE status = 'removing';` is 0: each completes within 26 hours of its begin, by the hourly
+  check, which runs with the setting off too (the log says `Station removal completed` for each). If the rollback can't wait,
+  the operator sees what the older image does above. After rolling forward, the first check, once the first sync with Auth is
+  done, completes each removing Station whose integrations are all revoked or whose removal began 26 hours ago, with its
+  flags; one that Auth ended itself in the meantime (its own rollback, in its `deploy/DEPLOY.md`) is completed by the owner's
+  next listing, as `auth_removed`. The flags of integrations pending host revocation stay; an older image shows none, and its
+  native revoke of a revoked integration changes nothing. After rolling forward,
+  `SELECT id FROM integrations WHERE pending_host_revocation;` lists them, and the views show them again.
 - **Rolling back past migration 007** (D27's slice 1) leaves its tables and column in place, which an older image ignores,
   but an older image does not know releases. Turn the admin site's release off first (its `DELEGATED_HOST_WORK`, the third
   in "Turning On Delegated Host Work"), keep the Portal's setting on, and wait until
@@ -1085,10 +1111,10 @@ until then it describes behaviour nothing has yet. Turn the three settings on in
    `not_found`) and nothing is released.
 
 Turn them off in the reverse order, the admin site's first and Auth's last: the admin site's setting must be off
-whenever the Portal's is. After every change of the Portal's setting from off to on while Auth's stays on, read
-`accounts_mode` as in step 2 and, if it says `waiting`, repeat step 2's reset: while the Portal's setting is off and
-Auth's is on, the Portal skips the account entries and moves to `waiting`, and the built-in Station's view of disabled
-accounts goes stale ("Account Availability").
+whenever the Portal's is, and Auth's stays on until no Station is `removing` ("Removing A Station"). After every change of
+the Portal's setting from off to on while Auth's stays on, read `accounts_mode` as in step 2 and, if it says `waiting`,
+repeat step 2's reset: while the Portal's setting is off and Auth's is on, the Portal skips the account entries and moves
+to `waiting`, and the built-in Station's view of disabled accounts goes stale ("Account Availability").
 
 Phase B's revocation reports ("For Station Builders") need nothing beyond the Portal's own setting: it takes them whenever
 it is on, whatever Auth's and the admin site's are. Turn it on before a Station sends them. With the setting off the
@@ -1124,7 +1150,102 @@ attempts recorded stay in the database too, but nothing serves them: `?checkpoin
 answers 404, a binding report is 400 `report`, and the account page has no notices. Releases stay too: a `binding_released`
 change already on a feed is served as recorded, the admin API's release routes answer 404 `not_found`, `pendingReleases` is
 not served (the checkpoint is ignored), and nothing settles (a binding report is 400 `report`). While the setting is off, the
-first account-level entry the Portal reads moves it to `waiting` ("Account Availability").
+first account-level entry the Portal reads moves it to `waiting` ("Account Availability"). A Station being removed stays
+`removing`, and its removal still completes ("Removing A Station"); the flags of integrations pending host revocation stay
+too, but no view shows them and the native revoke is 404, as it is for every integration with the setting off.
+
+### Removing A Station
+
+A custom Station's owner removes it on the account page (`DELETE /api/stations/<id>`; a built-in Station can't be removed).
+With `DELEGATED_HOST_WORK` off that is one step, as before: Auth removes the Station and revokes its report client at once,
+so it never reads its integrations' revocations, and they stay `revoking`.
+
+**With `DELEGATED_HOST_WORK=1` (off by default) and Auth's `AUTH_DELEGATED_HOST_WORK` on**, removing it is two-phase
+([D29](integrations.md#311-delegated-host-work-d29); Atem's design I.8): `active`, then `removing`, then `removed`.
+
+1. **The begin.** Auth begins it (`POST /manage/v1/stations/<id>/removal`): its integrations are revoked (reason
+   `station_removed`, no interrupt) and its report client stays. The Portal then marks the Station `removing`, dated
+   (`removal_started_at`), revokes its integrations as an indirect revocation (one still awaiting approval goes straight to
+   `revoked`, the others to `revoking`, no interrupt), records `station_removing` (the Portal's own record, which names the
+   integrations still revoking; never a change on the Station's feed) and pushes the Station. The answer is
+   `{ "removed": false, "removing": true, "completeBy": … }`, `completeBy` 26 hours after the begin. A Station with nothing
+   left to pass on (every integration on it revoked) is completed in the same call, and the answer is `{ "removed": true }`.
+   Removing a removing Station again answers the same, with the same `completeBy`, and doesn't ask Auth to begin it again; if
+   its removal is due, the repeat retries the completion instead. If Auth has the Station removing but the Portal missed the
+   begin (the owner's request failed after Auth answered), the next listing that names it begins the Portal's part as the
+   system, dated then (so its 26 hours run from then); a Station Auth lists as removing that the Portal doesn't know yet is
+   added first, and begun the same way. With the setting on, the account page's Remove Station says the Station first passes
+   the revocations to the owner's hosts and is then removed, within about a day; once begun the page says "Removal
+   started.", and the Station shows as removing, with no actions.
+2. **While removing.** The Station reads its feed and reports with its report client, as an active Station does (unless its
+   owner's account is disabled, which stops its tokens): it learns of the removal from its integrations'
+   `integration_revoked` changes, issues and serves their revocation records and sends `revocation_applied` and the final
+   `revoked` ("For Station Builders"). Interrupt running tasks still works on its integrations. Nothing else uses the
+   Station: creating an integration there, sharing it, removing a member or leaving, reading its member list and a read token
+   for it are 409 `station_removing` ("This Station is being removed."), refused before Auth is asked.
+3. **The completion**, at the first of: every integration on it is `revoked`, checked at the begin and after each `revoked`
+   report from it; or 26 hours after the begin (a Station's final comes at most 24 hours after a revocation starts, with an
+   hour's slack each way). The Portal also checks every removing Station once at start, after its first sync with Auth
+   (`ready()` does not wait for it), and then after each hourly built-in Station sync that reached Auth; a sync that failed
+   is tried again a minute later and checks nothing. The completion asks Auth to complete the removal
+   (`POST /manage/v1/stations/<id>/complete-removal`, always as `system`), which removes the Station and revokes its report
+   client. Then, in one transaction, the Portal marks the Station `removed`, revokes every integration on it that isn't
+   revoked yet and flags those with an R9 service pending host revocation (below), records `station_removed` (reason
+   `removal_completed`, with `completedBy` and `pendingHostRevocation`, the number flagged) and pushes the Station once more:
+   its token is refused from now on, which is how it learns to stop. `completedBy` has three values:
+
+   - `all_revoked`: every integration on it was revoked.
+   - `deadline`: 26 hours had passed.
+   - `auth_removed`: the Portal found that Auth had removed it already, and completed it alone, with no call to Auth. That is
+     a removing Station that Auth no longer lists (Auth completed it, or ended it in its own rollback, and the Portal's half
+     was still to do) or whose origin another Station took.
+
+   Two replicas complete a removal once. An Auth refusal, or an Auth that can't be reached, leaves the Station removing,
+   logged (`Station removal not completed: Auth <code>.`), and the next check tries again. An Auth whose setting was turned
+   off meanwhile answers 404, and the Portal then removes the Station with Auth's one-step `DELETE`, named as its owner. The
+   completion needs nothing of the Station, so a Station that reports nothing (its owner's account disabled meanwhile, say,
+   which stops its tokens) is still removed 26 hours on.
+
+**A removal already begun is never cut short**, whatever the Portal's setting is later (a removing Station exists only
+because the setting was on). With the setting off, a removing Station still shows as removing on the account page (the
+directory is 404 with the setting off), still refuses what a removing Station refuses, still reads its feed and reports, and
+a repeat remove still answers `removing`. Its removal still completes, flagging what a host may hold as below: after a
+`revoked` report without a `reportId` (with the setting off a report with one is 400 `report`), by the hourly check, or at 26
+hours.
+
+The log says how a removal ended, as counts: `Station removal completed: every integration revoked.`,
+`Station removal completed after 26 hours: <n> integrations pending host revocation.`,
+`Station removal completed: Auth has it removed; <n> integrations pending host revocation.` and, when Auth has no two-phase
+removal (it answers the begin 404: its setting is off, or it is older),
+`Station removed in one step: Auth has no two-phase removal; <n> integrations pending host revocation.` In that last case
+every integration on the Station is revoked at once, as below. A Station whose origin another Station took logs only
+`Station removed in Portal: its origin belongs to another Station at Auth.` A removal the Portal began on Auth's word logs
+`Station removal begun in Portal: Auth has it removing.`, and a check that couldn't read the removing Stations logs
+`Station removals not checked: <code>.`
+
+**Pending host revocation.** An integration whose Station couldn't confirm its revocation on every host is `revoked` with
+`pending_host_revocation`. It is set at the completion of a removal, on the integrations not yet revoked, and, with the
+setting on, whenever a Station is gone without the two phases: Auth no longer lists it, another Station took its origin, or
+it was removed in one step because Auth has no two-phase removal. Each time only an integration that has an R9 service
+(`r9_svc`, set by its approval) and wasn't revoked yet is flagged: one never approved has none, so no host holds it, and one
+whose final report already came is not flagged. Its view says `pendingHostRevocation: true` (the lists,
+`GET /api/v1/integrations` included, with the setting on), and the account page says "Revoked; your hosts weren't all told.
+Revoke it from Astation to make sure." Astation offers its owner a native `revoke`, and its call,
+`POST /api/v1/integrations/<id>/revoke` `{ interruptRunning }` (the native route, the integration's owner only), on a pending
+integration answers 200, clears the flag once and records `integration_revoked_natively` (the owner, Astation's `clientId`
+and the choice); with `interruptRunning: true` the integration's `interruptRunning` becomes true too. It asks nothing of Auth
+and pushes nothing, since the Station is gone. The browser's revoke leaves the flag.
+
+**Rollout.** Turn Auth's setting on first, on every Auth node, then the Portal's, then the admin site's, as for the rest of
+D29 ("Turning On Delegated Host Work"): a Portal with its setting on and Auth's off removes in one step (Auth's 404 to the
+begin) and flags what a host may hold, though its remove dialog describes the two phases, since the page reads only the
+Portal's setting. Never leave a replica from before migration 008 running while the setting is on: it doesn't know
+`removing`. Turn them off in the reverse order: the admin site's, then the Portal's, so no removal begins (those begun still
+complete), and Auth's only once `SELECT count(*) FROM stations WHERE status = 'removing';` is 0 on the Portal database. With
+Auth's setting off its completion answers 404, and the Portal falls back to the one-step `DELETE` named as the Station's
+owner; if that account is disabled Auth refuses it (400), and the Station stays removing, logged and tried again at each
+check. Auth's `deploy/DEPLOY.md` has the same order and its own rollback. Rolling back past migration 008 is in "Rolling
+Back, And After Restoring Auth".
 
 ### Routes
 
@@ -1137,7 +1258,7 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
 | `GET /api/stations` | browser | the account's Stations (`role` `built_in`, `owner` or `member`) |
 | `POST /api/stations/challenges` `{ origin }` | browser | issue a proof value; 201 `{ challengeId, origin, value, url, expiresAt }`; 10 per hour |
 | `POST /api/stations` `{ challengeId, reportKey }` | browser | check the proof, register with Auth; 201 with the Station |
-| `DELETE /api/stations/<id>` | browser | remove (owner only); revokes its integrations |
+| `DELETE /api/stations/<id>` | browser | remove (owner only); revokes its integrations; `{ removed: true }`, or, when it begins a two-phase removal (or repeats one that is running), `{ removed: false, removing: true, completeBy }` ("Removing A Station") |
 | `GET /api/stations/<id>/members` | browser | owner and members |
 | `PUT`, `DELETE /api/stations/<id>/members/<ab...>` | browser | share (owner only) and unshare (the owner, or a member removing themself); unsharing revokes that member's integrations there |
 | `POST /api/stations/<id>/read-token` | browser | a 5-minute `station.read` token for that Station: `{ accessToken, expiresIn, origin }` |
@@ -1189,14 +1310,14 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
 - An integration whose Station has been removed can't be interrupted: 409 `station_removed` ("This integration's Station
   has been removed, so its running tasks can't be interrupted here."). A removed Station never reads its feed again, so
   the request would reach no host. One that was already interrupted still answers 200 and changes nothing, so a retried
-  request is harmless; only a request that would change something is refused, and the 24-hour check follows. Atem's design (I.8) describes a native path for removed Stations: the Station issues
-  and serves its revocation records before the removal completes, or, if it can't, the Portal marks the integrations
-  "pending host revocation" and Astation offers the owner native `revoke` records. That path is not built in Phase A:
-  removing a Station records its integrations' revocations as indirect ones, with no interrupt, and the account page's
-  confirmation says only that tasks already running on hosts continue.
+  request is harmless; only a request that would change something is refused, and the 24-hour check follows. While its
+  Station is still `removing` it can be interrupted: a removing Station still reads its feed. An integration whose
+  Station couldn't confirm the revocation on every host is offered for Astation's native revoke instead ("Removing A
+  Station").
 - The native revoke is for the integration's owner only: any other account, the custom Station's owner included, gets 404.
-  Errors, answer and limit are the browser's; the event records the app's client ID. A token on the unversioned path gets
-  the usual `/api/v1` 404, and a token without `integrations:approve` 403 `insufficient_scope`.
+  Errors, answer and limit are the browser's; the event records the app's client ID. On an integration pending host
+  revocation it clears the flag instead ("Removing A Station"). A token on the unversioned path gets the usual `/api/v1`
+  404, and a token without `integrations:approve` 403 `insufficient_scope`.
 - **A revoke of an integration that is already revoking or revoked**, from either route, answers as below and revokes
   nothing again, but its choice is not lost, so Astation's mirror of a manager's "revoke and interrupt" converges even
   when another actor's revoke without the interrupt reached the Portal first. A 409 `too_late` or `station_removed` from
@@ -1219,8 +1340,9 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
     carries its own choice to the hosts. 409 `station_removed` is final too: a removed Station reads its feed no more,
     so the record could reach no host.
 - A revoking or revoked integration's view (the lists, and the answers above) also has `revokedAt` (its time, or null) and
-  `interruptRunning`, and `stationRemoved: true` when its Station has been removed (the account page then offers no
-  Interrupt running tasks).
+  `interruptRunning`, `stationRemoved: true` when its Station has been removed (the account page then offers no
+  Interrupt running tasks), and `pendingHostRevocation: true` when its Station couldn't confirm the revocation on every
+  host ("Removing A Station").
 - **The Station's two revocation reports** (D29 Phase B). With the setting on, `POST /api/v1/stations/reports` also takes
   these, each with a `reportId`; when to send them is in "For Station Builders":
   - `{ "integrationId", "state": "revocation_applied", "reportId", "host", "recordId" }`: the host `host` has applied the
@@ -1245,8 +1367,8 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
   16 KB body. The entries are checked against the host grammar (`host`) before the combination (`outcome`). The Portal
   checks only the characters and length of `reportId`; it is opaque to it.
 - **What each report does.** The answer to every accepted report is the integration as its Station sees it, as for today's
-  reports, without `role`, `pausedBy`, `revokedAt`, `interruptRunning`, `stationRemoved` or `revocation`. A refusal because of
-  the integration's state is 409 `invalid_state`.
+  reports, without `role`, `pausedBy`, `revokedAt`, `interruptRunning`, `stationRemoved`, `pendingHostRevocation` or
+  `revocation`. A refusal because of the integration's state is 409 `invalid_state`.
   - `revocation_applied` needs the integration to be `revoking` or `revoked` ("This integration isn't revoked."). Each host
     is counted once: the first report for a host records it with its `recordId` and `reportId`; a later report for it,
     under another `reportId`, is 200, counts nothing again and is kept under its own id. One that comes after a
@@ -1383,15 +1505,37 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
     }
     ```
 
+    A Station being removed, as its owner's directory lists it:
+
+    ```json example:directory-removing
+    {
+      "id": "st01KB4Q2J8W4Y0D6N3S9V7A5ZR1",
+      "origin": "https://leaving.example.net",
+      "name": null,
+      "builtIn": false,
+      "access": "members",
+      "role": "owner",
+      "status": "removing",
+      "removedAt": null,
+      "removalStartedAt": "2026-11-22T10:00:01.000Z",
+      "completeBy": "2026-11-23T12:00:01.000Z",
+      "membership": null,
+      "membershipEndedAt": null,
+      "integrationsEnabled": false,
+      "createdAt": "2026-11-04T08:00:00.000Z"
+    }
+    ```
+
   - **Fields.**
     - `id` is the Station's stable identity, and `origin` the normalized origin, the one Auth and the Portal compare.
     - `name` is `null` for a custom Station. `access` is `any_account` (the built-in Station) or `members`.
-    - `role` is `built_in`, `owner` or `member`. `status` is `active` or `removed`, and `removedAt` is set when it is
-      `removed`.
+    - `role` is `built_in`, `owner` or `member`. `status` is `active`, `removing` or `removed`. `removedAt` is set when it
+      is `removed`. A `removing` Station also has `removalStartedAt` and `completeBy` (26 hours later, when its removal
+      completes at the latest), which no other entry has ("Removing A Station").
     - `membership` is `current` or `ended` for a member, and `null` for the owner and the built-in Station.
       `membershipEndedAt` is set when it is `ended`.
-    - `integrationsEnabled` says whether an integration can be created there now. It is `false` on a removed Station and
-      for a member whose membership ended.
+    - `integrationsEnabled` says whether an integration can be created there now. It is `false` on a removing or removed
+      Station and for a member whose membership ended.
     - It never carries the Station's report client, its owner, its members or anything of R9. There is no `suspended`
       status: Agora.Build disabling an account is account-level, and such an account gets no token.
   - **Which Stations.** Every Station the account can use now (the built-in Station, those it owns and those it is a
@@ -1399,7 +1543,8 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
     Station it owned or belonged to that was removed is `status: "removed"` with `removedAt`, and one whose membership
     ended (it was removed, or it left) is `membership: "ended"` with `membershipEndedAt`. A removed built-in Station is
     listed the same way. The loss is dated when the account lost it: for a member, the earlier of its leaving and the
-    Station's removal. After the 30 days a Station may be omitted, and an omission never means "remove".
+    Station's removal. After the 30 days a Station may be omitted, and an omission never means "remove". A Station being
+    removed is not lost yet: it is listed to its owner and its members as `removing`, until it is `removed`.
   - **Order and pages.** Built-in Stations first, then `createdAt`, then `id`. `nextCursor` is `null` on the last page.
   - **`stale` and `complete`.** `stale: true` means Auth was unreachable (503), so the list is the Portal's last copy.
     `complete` is `true` only on the last page of a list that is not stale. Anything else, a failed page too, is
@@ -1410,7 +1555,11 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
 - **The browser's list** `GET /api/stations` also answers `notices` with the setting on: the account's refused binding
   attempts of the last 30 days, the 50 newest, newest first, each `{ kind: "binding_attempt", accountId, genesisHash,
   reason, attemptedAt }` with `accountId` the R9 account, never the other Agora.Build account. The page shows each as a
-  line above the Stations. It ignores `limit` and `cursor`, which are the directory's.
+  line above the Stations. It ignores `limit` and `cursor`, which are the directory's. A removing Station in it has
+  `status: "removing"`, `removalStartedAt`, `completeBy`, `integrationsEnabled: false` and `removalProgress`
+  `{ done, total }`: of the integrations its removal waits for (those still revoking when it began), how many are revoked
+  now; its owner counts them all, a member only its own. The page shows "Removing: passing the revocations to your hosts
+  (n of m done)" and no actions.
 
   ```json example:notices
   {
@@ -1676,7 +1825,7 @@ account from using a large share of it. If Auth answers 429, it shows as 503
 Common error codes: `not_found` (404), `forbidden` (403), `invalid_state` and
 `expired` (409, the action does not fit the current state), `revoked` (409),
 `origin_taken` and `duplicate_key` (409, from Auth), `challenge` (400, expired or
-used), `proof` (422), `station` (403, the report client is not a registered Station), `exchange` (403, Auth refused the read token), `unavailable` (503, Auth unreachable), `built_in` (409, the built-in Station can't be removed, shared or left), `not_supported` (409, integrations are off on the built-in Station), `plan_limit` (403, the plan's limit on the built-in Station), `admin_paused` (409, Agora.Build paused the integration; only Agora.Build resumes it), `owner_disabled` (409, Agora.Build disabled the owner's account; the integration resumes when it is enabled again); with `DELEGATED_HOST_WORK=1`, `interrupt_running` (400, a revoke without a true or false `interruptRunning`), `too_late` (409, more than 24 hours since the revocation), `station_removed` (409, the integration's Station has been removed), `report_id_reused` (409, a Station's `reportId` already used for another report) and `binding_version` (409, a binding report's version is not newer than the one recorded; `forbidden` is also 403 for a binding report from a custom Station); too many challenges or requests are 429. Field mistakes are
+used), `proof` (422), `station` (403, the report client is not a registered Station), `exchange` (403, Auth refused the read token), `unavailable` (503, Auth unreachable), `built_in` (409, the built-in Station can't be removed, shared or left), `not_supported` (409, integrations are off on the built-in Station), `plan_limit` (403, the plan's limit on the built-in Station), `admin_paused` (409, Agora.Build paused the integration; only Agora.Build resumes it), `owner_disabled` (409, Agora.Build disabled the owner's account; the integration resumes when it is enabled again); with `DELEGATED_HOST_WORK=1`, `interrupt_running` (400, a revoke without a true or false `interruptRunning`), `too_late` (409, more than 24 hours since the revocation), `station_removed` (409, the integration's Station has been removed), `station_removing` (409, the Station is being removed: "Removing A Station"), `report_id_reused` (409, a Station's `reportId` already used for another report) and `binding_version` (409, a binding report's version is not newer than the one recorded; `forbidden` is also 403 for a binding report from a custom Station); too many challenges or requests are 429. Field mistakes are
 400 with `name`, `scopes`, `quota`, `expiry`, `jwk`, `private_key`, `account`,
 `report_key`, `r9_svc`, `reason`, `state`, `report` or `cursor`; with `DELEGATED_HOST_WORK=1` also `report_id`, `host`,
 `record_id` and `outcome` (a Station's revocation reports, in "Routes"), `limit` (the Station directory), and
@@ -1699,7 +1848,11 @@ Admin API", above).
 **With `DELEGATED_HOST_WORK=1` (off by default):** a `revoking` integration stays `revoking` while its hosts report
 `revocation_applied`. The Station's final `revoked` report, one with a `reportId`, moves it to `revoked` and records how it
 ended; a legacy `revoked` report still moves it at once, and a final may follow it. The Portal runs no 24-hour clock of its
-own: only a Station's report ends `revoking`, so an integration whose Station never sends a final stays `revoking`.
+own: only a Station's report ends `revoking`, so an integration whose Station never sends a final stays `revoking`. The
+exception is a Station that is gone and can send nothing more: its two-phase removal completes at the latest 26 hours after
+it began and revokes what is still revoking, and one Auth removed any other way (a one-step removal, a listing that no
+longer has it, its origin taken by another Station) has what is still revoking revoked at once, each time with the
+integrations a host may hold flagged ("Removing A Station").
 
 The Portal never sets `ready` itself. Pause is allowed from `awaiting_approval`, `provisioning`,
 `waiting_for_host` and `ready` (not when expired); a report received while paused updates the state to return to.
@@ -1871,7 +2024,13 @@ open sessions and streams (that is API access only: for `expired`, see the notes
 on delegated host work below, where expiry doesn't stop work a host has already
 accepted); its tokens are never trusted past their 300-second lifetime anyway. A
 removed Station cannot read its feed any more (its report client is gone at
-Auth), so it never sees its own `station_removed`.
+Auth), so it never sees its own `station_removed`. With `DELEGATED_HOST_WORK=1` a Station being removed keeps its report
+client and reads its feed and reports as before until its removal completes ("Removing A Station"), unless its owner's
+account is disabled, which stops its tokens. It learns that the removal began only from its integrations'
+`integration_revoked` changes (reason `station_removed`, `interruptRunning: false`; there is no new kind), and issues and
+serves their revocation records and sends `revocation_applied` and the final `revoked` as for any revocation. Its
+directory entry says `removing`, with `completeBy`. At the completion it is pushed once more, and its token is then
+refused (Auth's 401 `invalid_client`, the Portal's 403): that is its stop signal ("The push nudge").
 
 **With `DELEGATED_HOST_WORK=1` (off by default):** the feed also says what to do about tasks already running on the
 Station's hosts ([D29](integrations.md#311-delegated-host-work-d29)). With the setting off, what was recorded while it
@@ -2313,9 +2472,9 @@ over the same guarded HTTPS fetch with a 3-second timeout; one push per Station
 is in flight, and changes meanwhile collapse into one more. The nudge is unsigned
 by design: it carries only a cursor and no authority, so the Station treats it
 only as a reason to poll the feed with its own token, and never acts on its
-content. A failed nudge never fails the change; polling covers it. A removed
-Station is nudged once more; the feed then refuses its token (401 or 403),
-which is how it learns to stop.
+content. A failed nudge never fails the change; polling covers it. A Station
+being removed is nudged as before, and a removed one once more; the feed then
+refuses its token (401 or 403), which is how it learns to stop.
 
 **Browser details.** The browser asks the Portal for
 `POST /api/stations/<id>/read-token`, then calls

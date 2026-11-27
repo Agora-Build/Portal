@@ -15,7 +15,7 @@ import { fakeManage } from "./helpers/fake-manage.mjs";
 import { testDatabase } from "./helpers/test-db.mjs";
 
 const NAMES = [
-  "directory", "directory-page", "notices", "checkpoint", "checkpoint-custom", "account-changes",
+  "directory", "directory-page", "directory-removing", "notices", "checkpoint", "checkpoint-custom", "account-changes",
   "binding-changed-request", "binding-changed-answer", "binding-version-error", "binding-attempt-request", "binding-attempt-answer",
   "admin-bindings", "admin-release-request", "admin-release-answer", "admin-release-error", "binding-released-change"
 ];
@@ -100,6 +100,13 @@ test("the example answers in platform.md are what the Portal gives", async (t) =
   const page = await service.directory(OWNER, { limit: "1" });
   assert.equal(JSON.stringify(JSON.parse(Buffer.from(examples["directory-page"].nextCursor, "base64url"))), JSON.stringify([true, examples.directory.stations[0].createdAt, examples.directory.stations[0].id]), "the example cursor is [builtIn, createdAt, id] of the page's last Station");
   assert.deepEqual(JSON.parse(Buffer.from(page.nextCursor, "base64url")), [true, page.stations[0].createdAt, page.stations[0].id]);
+
+  // A Station whose two-phase removal is under way (D29), with an approved integration still revoking: its directory entry.
+  const leaving = await register(OWNER, "https://leaving.example.net");
+  const staying = await service.createIntegration(OWNER, { stationId: leaving.id, name: "Leaving", scopes: [], publicJwk: publicJwk() });
+  await service.approve(OWNER, staying.id, { r9Svc: R9 });
+  assert.equal((await service.removeStation(OWNER, leaving.id)).removing, true);
+  assertMatches("directory-removing", (await service.directory(OWNER, {})).stations.find((entry) => entry.id === leaving.id));
 
   // The checkpoint of the built-in Station: a ready integration, a revoking one that interrupts, Auth's baseline, a disabled
   // account and a binding.
