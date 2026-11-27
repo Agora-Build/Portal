@@ -1084,3 +1084,140 @@ test("directoryFor refuses what it cannot page by: a missing lostSince, a bad li
   await repo.directoryFor("ab1", { ...good, after: null });
   for (const bad of [{ ...after, builtIn: "false" }, { ...after, createdAt: "soon" }, { ...after, createdAt: undefined }, { ...after, id: 5 }, { ...after, id: undefined }, "st-1", []]) await assert.rejects(repo.directoryFor("ab1", { ...good, after: bad }), TypeError, JSON.stringify(bad));
 });
+
+// D27 slice 1 (migration 007): the built-in Stations' admins, releases of their bindings, and the admin API's actions.
+const GENESIS = "b".repeat(64);
+const OWNER_AB = "ab" + "0".repeat(25) + "1";
+const OTHER_AB = "ab" + "0".repeat(25) + "3";
+const ADMIN_AB = "ab" + "0".repeat(25) + "4";
+const releaseIdOf = (n) => "rl-" + String(n).padStart(26, "0");
+const releaseOf = (n, extra = {}) => ({
+  releaseId: releaseIdOf(n), stationId: "stb", accountId: OWNER_AB, r9AccountId: "r9-a", genesisHash: GENESIS, bindingId: "bind-1",
+  version: 3, actor: ADMIN_AB, reason: "Lost account", requestedAt: later(n * 1000), idempotencyKey: "key-" + n,
+  requestHash: String(n % 10).repeat(64), ...extra
+});
+const builtInStation = (repo, id) => repo.insertStation({ id, origin: "https://" + id + ".example", reportClientId: "s-" + id, verifiedAt: NOW, builtIn: true, name: "Station " + id });
+
+test("a built-in Station's admins are kept sorted as given; the admin set is every active built-in Station's", async (t) => {
+  const { repo } = await setup(t);
+  if (!repo) return;
+  await builtInStation(repo, "stb");
+  await builtInStation(repo, "stc");
+  await station(repo, "st1", OWNER_AB);
+  assert.equal(await repo.isPortalAdmin(ADMIN_AB), false, "none before any are kept");
+  assert.equal(await repo.setBuiltInAdmins("stb", [ADMIN_AB, OTHER_AB]), true);
+  assert.equal(await repo.setBuiltInAdmins("stb", [ADMIN_AB, OTHER_AB]), false, "the same list changes nothing");
+  assert.equal(await repo.setBuiltInAdmins("stc", [OWNER_AB]), true);
+  assert.deepEqual([await repo.isPortalAdmin(ADMIN_AB), await repo.isPortalAdmin(OTHER_AB), await repo.isPortalAdmin(OWNER_AB), await repo.isPortalAdmin("ab9")], [true, true, true, false]);
+  assert.equal(await repo.setBuiltInAdmins("st1", [OWNER_AB]), false, "a custom Station is never given admins");
+  await repo.markStationRemoved("stc", later(1000));
+  assert.equal(await repo.isPortalAdmin(OWNER_AB), false, "a removed Station's admins don't count");
+  assert.equal(await repo.setBuiltInAdmins("stc", [ADMIN_AB]), false, "nor are they followed");
+  await assert.rejects(repo.setBuiltInAdmins("stb", "ab1"), TypeError);
+});
+
+test("releases: in the admin API's shape, found by id, by key with the request's hash, and pending by their exact binding", async (t) => {
+  const { repo } = await setup(t);
+  if (!repo) return;
+  await builtInStation(repo, "stb");
+  const made = await repo.insertRelease(releaseOf(1));
+  assert.deepEqual(made, {
+    releaseId: releaseIdOf(1), stationId: "stb", account: OWNER_AB, accountId: "r9-a", genesisHash: GENESIS, bindingId: "bind-1", version: 3,
+    state: "pending", requestedAt: later(1000).toISOString(), settledAt: null, settledVersion: null, actor: ADMIN_AB, reason: "Lost account"
+  });
+  assert.deepEqual(Object.keys(made), ["releaseId", "stationId", "account", "accountId", "genesisHash", "bindingId", "version", "state", "requestedAt", "settledAt", "settledVersion", "actor", "reason"]);
+  assert.deepEqual(await repo.releaseById(releaseIdOf(1)), made);
+  assert.equal(await repo.releaseById(releaseIdOf(9)), null);
+  assert.deepEqual(await repo.releaseByKey("key-1"), { release: made, requestHash: "1".repeat(64) });
+  assert.equal(await repo.releaseByKey("key-9"), null);
+  const exact = { stationId: "stb", r9AccountId: "r9-a", genesisHash: GENESIS, bindingId: "bind-1", version: 3 };
+  assert.deepEqual(await repo.pendingReleaseOf(exact), made);
+  for (const other of [{ bindingId: "bind-2" }, { version: 2 }, { r9AccountId: "r9-b" }, { genesisHash: "c".repeat(64) }, { stationId: "st9" }]) {
+    assert.equal(await repo.pendingReleaseOf({ ...exact, ...other }), null, JSON.stringify(other));
+  }
+  // The database holds the rules too: one pending release of one exact binding, one release per key, and the grammars.
+  await assert.rejects(repo.insertRelease(releaseOf(2)), { code: "23505" }, "a second pending release of the same exact binding");
+  await assert.rejects(repo.insertRelease(releaseOf(3, { bindingId: "bind-3", idempotencyKey: "key-1" })), { code: "23505" }, "a key used again");
+  for (const bad of [{ releaseId: "rl-BAD" }, { actor: "admin" }, { reason: "" }, { reason: "x".repeat(501) }, { idempotencyKey: "-key" }, { requestHash: "nope" }]) {
+    await assert.rejects(repo.insertRelease(releaseOf(4, { bindingId: "bind-4", ...bad })), { code: "23514" }, JSON.stringify(bad));
+  }
+  await assert.rejects(repo.insertRelease(releaseOf(5, { version: 0 })), TypeError);
+});
+
+test("releasesOf lists a binding's newest first, pendingReleasesOn a Station's pending ones oldest first, and settleReleases settles the older pending ones of one R9 account at one genesis", async (t) => {
+  const { db, repo } = await setup(t);
+  if (!repo) return;
+  await builtInStation(repo, "stb");
+  for (let n = 1; n <= 12; n += 1) await repo.insertRelease(releaseOf(n, { bindingId: "bind-" + n, version: n }));
+  await repo.insertRelease(releaseOf(13, { r9AccountId: "r9-b", version: 1 }));
+  assert.deepEqual((await repo.releasesOf("stb", "r9-a", GENESIS)).map((release) => release.releaseId), [12, 11, 10, 9, 8, 7, 6, 5, 4, 3].map(releaseIdOf));
+  assert.deepEqual((await repo.releasesOf("stb", "r9-a", GENESIS, { limit: 2 })).map((release) => release.version), [12, 11]);
+  assert.deepEqual(await repo.releasesOf("stb", "r9-a", "c".repeat(64)), []);
+  assert.deepEqual((await repo.pendingReleasesOn("stb")).map((release) => release.releaseId), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map(releaseIdOf));
+  // A released bind-5 at version 6: the one for bind-5 is applied, the older others superseded, the newer ones left.
+  const settledAt = later(99000);
+  const settled = await repo.settleReleases({ stationId: "stb", r9AccountId: "r9-a", genesisHash: GENESIS, account: OWNER_AB, bindingId: "bind-5", version: 6, bindingState: "released", settledAt });
+  assert.deepEqual(settled.map((release) => [release.version, release.state, release.settledVersion, release.settledAt]), [
+    [1, "superseded", 6, settledAt.toISOString()], [2, "superseded", 6, settledAt.toISOString()], [3, "superseded", 6, settledAt.toISOString()],
+    [4, "superseded", 6, settledAt.toISOString()], [5, "applied", 6, settledAt.toISOString()]
+  ]);
+  assert.deepEqual(await repo.settleReleases({ stationId: "stb", r9AccountId: "r9-a", genesisHash: GENESIS, account: OWNER_AB, bindingId: "bind-5", version: 6, bindingState: "released", settledAt }), [], "nothing older is pending any more");
+  // The same bindingId but bound is not the release: superseded.
+  const bound = await repo.settleReleases({ stationId: "stb", r9AccountId: "r9-a", genesisHash: GENESIS, account: OWNER_AB, bindingId: "bind-7", version: 8, bindingState: "bound", settledAt });
+  assert.deepEqual(bound.map((release) => [release.version, release.state]), [[6, "superseded"], [7, "superseded"]]);
+  // Released with the release's bindingId, but for another Agora.Build account than the release names: not that release.
+  const other = await repo.settleReleases({ stationId: "stb", account: OTHER_AB, r9AccountId: "r9-a", genesisHash: GENESIS, bindingId: "bind-9", version: 10, bindingState: "released", settledAt });
+  assert.deepEqual(other.map((release) => [release.version, release.state]), [[8, "superseded"], [9, "superseded"]]);
+  await assert.rejects(repo.settleReleases({ stationId: "stb", r9AccountId: "r9-a", genesisHash: GENESIS, bindingId: "bind-11", version: 12, bindingState: "released", settledAt }), TypeError, "the account is required");
+  assert.equal((await repo.releaseById(releaseIdOf(13))).state, "pending", "another R9 account is not touched");
+  assert.deepEqual((await repo.pendingReleasesOn("stb")).map((release) => release.version), [10, 11, 12, 1]);
+  await assert.rejects(db.pool.query("UPDATE binding_releases SET state = 'applied', settled_at = now(), settled_version = 1 WHERE release_id = $1", [releaseIdOf(12)]), { code: "23514" }, "a release settles only at a higher version");
+  await assert.rejects(db.pool.query("UPDATE binding_releases SET state = 'applied' WHERE release_id = $1", [releaseIdOf(12)]), { code: "23514" }, "a settled release has its time and version");
+});
+
+test("bindingsFor finds the active built-in Stations' bindings of an account or an R9 account, bindingForUpdate locks one, and disabledAmong reads availability", async (t) => {
+  const { db, repo } = await setup(t);
+  if (!repo) return;
+  await builtInStation(repo, "stb");
+  await builtInStation(repo, "stc");
+  const save = (stationId, r9AccountId, genesisHash, accountId, n) => repo.saveBinding({ stationId, r9AccountId, genesisHash, accountId, bindingId: "bind-" + n, version: 1, bindingState: "bound", reportId: "rep-" + n });
+  await save("stb", "r9-b", GENESIS, OWNER_AB, 1);
+  await save("stb", "r9-a", "c".repeat(64), OWNER_AB, 2);
+  await save("stb", "r9-a", GENESIS, OWNER_AB, 3);
+  await save("stc", "r9-a", GENESIS, OTHER_AB, 4);
+  await save("stb", "r9-z", GENESIS, OTHER_AB, 5);
+  const listed = (rows) => rows.map((row) => [row.stationId, row.r9AccountId, row.genesisHash.slice(0, 1), row.accountId]);
+  assert.deepEqual(listed(await repo.bindingsFor({ account: OWNER_AB })), [["stb", "r9-a", "b", OWNER_AB], ["stb", "r9-a", "c", OWNER_AB], ["stb", "r9-b", "b", OWNER_AB]]);
+  assert.deepEqual(listed(await repo.bindingsFor({ r9AccountId: "r9-a" })), [["stb", "r9-a", "b", OWNER_AB], ["stb", "r9-a", "c", OWNER_AB], ["stc", "r9-a", "b", OTHER_AB]]);
+  await repo.markStationRemoved("stc", later(1000));
+  assert.deepEqual(listed(await repo.bindingsFor({ r9AccountId: "r9-a" })).map((row) => row[0]), ["stb", "stb"], "a removed Station's are not listed");
+  await assert.rejects(repo.bindingsFor({}), TypeError);
+  await assert.rejects(repo.bindingsFor({ account: OWNER_AB, r9AccountId: "r9-a" }), TypeError);
+  await assert.rejects(repo.bindingForUpdate("stb", "r9-a", GENESIS), TypeError);
+  await db.transaction(async (client) => {
+    assert.equal((await repo.bindingForUpdate("stb", "r9-a", GENESIS, client)).bindingId, "bind-3");
+    assert.equal(await repo.bindingForUpdate("stb", "r9-q", GENESIS, client), null);
+    await assert.rejects(db.pool.query("SELECT 1 FROM station_bindings WHERE station_id = 'stb' AND r9_account_id = 'r9-a' AND genesis_hash = $1 FOR UPDATE NOWAIT", [GENESIS]), { code: "55P03" }, "locked until the transaction ends");
+  });
+  await repo.setAvailability(OWNER_AB, true, "YzE", NOW);
+  await repo.setAvailability(OTHER_AB, false, "YzI", NOW);
+  assert.deepEqual(await repo.disabledAmong([OWNER_AB, OTHER_AB, "ab9"]), new Set([OWNER_AB]));
+  assert.deepEqual(await repo.disabledAmong([]), new Set());
+});
+
+test("an admin action is written started, then finished once, done or failed, with its details", async (t) => {
+  const { db, repo } = await setup(t);
+  if (!repo) return;
+  const id = "pa-" + "0".repeat(26);
+  const target = JSON.stringify(["stb", "r9-a", GENESIS]);
+  await repo.startAdminAction({ id, actor: ADMIN_AB, action: "binding_released", targetKind: "binding", target, reason: "Lost account", at: NOW });
+  const row = async () => (await db.pool.query("SELECT actor, action, target_kind, target, reason, outcome, details, at FROM admin_actions WHERE id = $1", [id])).rows[0];
+  assert.deepEqual(await row(), { actor: ADMIN_AB, action: "binding_released", target_kind: "binding", target, reason: "Lost account", outcome: "started", details: {}, at: new Date(NOW) });
+  assert.equal(await repo.finishAdminAction(id, "done", { releaseId: releaseIdOf(1) }), true);
+  assert.equal(await repo.finishAdminAction(id, "failed", { code: "error" }), false, "finished once");
+  assert.deepEqual([(await row()).outcome, (await row()).details], ["done", { releaseId: releaseIdOf(1) }]);
+  await assert.rejects(repo.finishAdminAction(id, "started", {}), TypeError);
+  for (const bad of [{ id: "pa-1" }, { actor: "admin" }, { action: "account_disabled" }, { targetKind: "account" }, { reason: "" }]) {
+    await assert.rejects(repo.startAdminAction({ id: "pa-" + "1".repeat(26), actor: ADMIN_AB, action: "binding_released", targetKind: "binding", target: "t", reason: "r", at: NOW, ...bad }), { code: "23514" }, JSON.stringify(bad));
+  }
+});

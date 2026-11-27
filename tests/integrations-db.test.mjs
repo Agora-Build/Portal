@@ -9,10 +9,10 @@ test("migrate applies each migration once, even when two instances race", async 
   const first = open();
   const second = open();
   const results = await Promise.all([first.migrate(), second.migrate()]);
-  assert.deepEqual(results.flat(), ["001_integrations.sql", "002_built_in_stations.sql", "003_auth_changes.sql", "004_delegated_host_work.sql", "005_station_reports.sql", "006_availability_bindings.sql"]);
+  assert.deepEqual(results.flat(), ["001_integrations.sql", "002_built_in_stations.sql", "003_auth_changes.sql", "004_delegated_host_work.sql", "005_station_reports.sql", "006_availability_bindings.sql", "007_admin_releases.sql"]);
   assert.deepEqual(await first.migrate(), []);
   const { rows } = await first.pool.query("SELECT version FROM portal_migrations");
-  assert.deepEqual(rows.map((row) => row.version), ["001_integrations.sql", "002_built_in_stations.sql", "003_auth_changes.sql", "004_delegated_host_work.sql", "005_station_reports.sql", "006_availability_bindings.sql"]);
+  assert.deepEqual(rows.map((row) => row.version), ["001_integrations.sql", "002_built_in_stations.sql", "003_auth_changes.sql", "004_delegated_host_work.sql", "005_station_reports.sql", "006_availability_bindings.sql", "007_admin_releases.sql"]);
 });
 
 test("migration 002 leaves an existing database's custom Stations, integrations and events as they were", async (t) => {
@@ -38,7 +38,7 @@ test("migration 002 leaves an existing database's custom Stations, integrations 
     events: (await db.pool.query("SELECT * FROM integration_events ORDER BY id")).rows
   });
   const before = await snapshot();
-  assert.deepEqual(await db.migrate(), ["002_built_in_stations.sql", "003_auth_changes.sql", "004_delegated_host_work.sql", "005_station_reports.sql", "006_availability_bindings.sql"]);
+  assert.deepEqual(await db.migrate(), ["002_built_in_stations.sql", "003_auth_changes.sql", "004_delegated_host_work.sql", "005_station_reports.sql", "006_availability_bindings.sql", "007_admin_releases.sql"]);
   assert.deepEqual(await snapshot(), before);
   const { rows: [row] } = await db.pool.query("SELECT owner_account, status, built_in, access, integrations_enabled, name FROM stations WHERE id = 'st1'");
   assert.deepEqual(row, { owner_account: "ab1", status: "active", built_in: false, access: "members", integrations_enabled: true, name: null });
@@ -165,7 +165,7 @@ test("migration 003 adds who paused and when the owner was disabled, keeps every
   await db.pool.query("INSERT INTO integration_events (at, station_id, integration_id, account_id, actor, kind, state) VALUES ('2026-10-03T00:00:00Z', 'st1', 'i-1', 'ab1', 'ab1', 'integration_paused', 'paused')");
   const integrations = (await db.pool.query("SELECT * FROM integrations")).rows;
   const events = (await db.pool.query("SELECT * FROM integration_events")).rows;
-  assert.deepEqual(await db.migrate(), ["003_auth_changes.sql", "004_delegated_host_work.sql", "005_station_reports.sql", "006_availability_bindings.sql"]);
+  assert.deepEqual(await db.migrate(), ["003_auth_changes.sql", "004_delegated_host_work.sql", "005_station_reports.sql", "006_availability_bindings.sql", "007_admin_releases.sql"]);
   const after = (await db.pool.query("SELECT * FROM integrations")).rows;
   assert.deepEqual(after.map(({ paused_by, owner_disabled_at, revoked_at, interrupt_running, revocation_outcome, revocation_pending_hosts, ...rest }) => rest), integrations);
   assert.deepEqual(after.map((row) => [row.paused_by, row.owner_disabled_at]), [[null, null]], "a pause from before 003 names nobody");
@@ -230,7 +230,7 @@ test("migration 006 makes an event's account optional on the table and on every 
   const events = (await db.pool.query("SELECT * FROM integration_events ORDER BY id")).rows;
   assert.equal(events.length, 2);
 
-  assert.deepEqual(await db.migrate(), ["006_availability_bindings.sql"]);
+  assert.deepEqual(await db.migrate(), ["006_availability_bindings.sql", "007_admin_releases.sql"]);
   assert.deepEqual(await nullability(db), [
     { relname: "integration_events", attnotnull: false },
     { relname: "integration_events_default", attnotnull: false },
@@ -352,7 +352,7 @@ test("migration 006 makes a Portal that had already read Auth's feed wait for a 
       }
     });
     await db.pool.query("UPDATE auth_change_feed SET cursor = $1", [cursor]);
-    assert.deepEqual(await db.migrate(), ["006_availability_bindings.sql"]);
+    assert.deepEqual(await db.migrate(), ["006_availability_bindings.sql", "007_admin_releases.sql"]);
     assert.deepEqual((await db.pool.query("SELECT cursor, accounts_cursor, accounts_mode, accounts_epoch FROM auth_change_feed")).rows, [{ cursor, accounts_cursor: cursor, accounts_mode: mode, accounts_epoch: "0" }], String(cursor));
   }
 });
@@ -384,7 +384,7 @@ test("migration 006 keeps the reports a database had, each with its integration"
   });
   await db.pool.query("INSERT INTO station_reports (station_id, report_id, integration_id, body, answer) VALUES ('st1', 'r-1', 'i-1', '{\"a\":1}', '{\"b\":2}')");
   const before = (await db.pool.query("SELECT * FROM station_reports")).rows;
-  assert.deepEqual(await db.migrate(), ["006_availability_bindings.sql"]);
+  assert.deepEqual(await db.migrate(), ["006_availability_bindings.sql", "007_admin_releases.sql"]);
   assert.deepEqual((await db.pool.query("SELECT * FROM station_reports")).rows, before);
   await db.pool.query("INSERT INTO station_reports (station_id, report_id, body, answer) VALUES ('st1', 'r-2', '{}', '{}')");
   assert.deepEqual((await db.pool.query("SELECT report_id, integration_id FROM station_reports ORDER BY report_id")).rows, [{ report_id: "r-1", integration_id: "i-1" }, { report_id: "r-2", integration_id: null }], "after 006 a report may name no integration");
@@ -419,9 +419,61 @@ test("migration 006 waits for the event lock before it locks any table, so it ca
     // The append goes on to write its event. With the migration already holding integration_events this would deadlock.
     await appender.query("INSERT INTO integration_events (station_id, account_id, actor, kind) VALUES ('st1', 'ab2', 'ab1', 'member_added')");
     await appender.query("COMMIT");
-    assert.deepEqual(await migrating, ["006_availability_bindings.sql"]);
+    assert.deepEqual(await migrating, ["006_availability_bindings.sql", "007_admin_releases.sql"]);
     assert.deepEqual((await db.pool.query("SELECT account_id FROM station_members")).rows, [{ account_id: "ab2" }], "the appender's rows are there");
     assert.equal((await db.pool.query("SELECT count(*)::int AS n FROM integration_events")).rows[0].n, 1);
+  } finally {
+    await appender.query("ROLLBACK").catch(() => {});
+    appender.release();
+  }
+});
+
+// D27 slice 1: a built-in Station's admins, an admin's actions and the releases of the built-in Station's bindings.
+test("migration 007 gives every Station an empty admin list that only a built-in Station may fill, and indexes the lookups", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) return t.skip("PORTAL_TEST_DATABASE_URL is not set");
+  await db.pool.query(
+    "INSERT INTO stations (id, origin, owner_account, report_client_id, status, verified_at) VALUES ('st1', 'https://a.example', 'ab1', 's-st1', 'active', now())");
+  assert.deepEqual((await db.pool.query("SELECT admin_accounts FROM stations")).rows, [{ admin_accounts: [] }]);
+  await assert.rejects(db.pool.query("UPDATE stations SET admin_accounts = '{ab2}' WHERE id = 'st1'"), { code: "23514" }, "a custom Station has no admins");
+  const { rows } = await db.pool.query(
+    "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND tablename IN ('binding_releases', 'station_bindings', 'admin_actions') ORDER BY indexname");
+  assert.deepEqual(rows.map((row) => row.indexname), [
+    "admin_actions_actor_idx", "admin_actions_pkey", "binding_releases_binding_idx", "binding_releases_idempotency_key_key",
+    "binding_releases_one_pending_idx", "binding_releases_pending_idx", "binding_releases_pkey", "station_bindings_account_idx",
+    "station_bindings_pkey", "station_bindings_r9_account_idx"
+  ]);
+});
+
+// 007 alters stations, a row of which an appender may hold (activeStationAt locks one FOR UPDATE after the event lock). The
+// migration takes the event lock first, as 006 does, so it waits for the whole append instead of deadlocking with it.
+test("migration 007 waits for the event lock before it alters stations", async (t) => {
+  const open = await emptySchema(t);
+  if (!open) return t.skip("PORTAL_TEST_DATABASE_URL is not set");
+  const db = open();
+  await db.transaction(async (client) => {
+    await client.query("CREATE TABLE portal_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())");
+    for (const file of ["001_integrations.sql", "002_built_in_stations.sql", "003_auth_changes.sql", "004_delegated_host_work.sql", "005_station_reports.sql", "006_availability_bindings.sql"]) {
+      await client.query(await readFile(new URL("../migrations/" + file, import.meta.url), "utf8"));
+      await client.query("INSERT INTO portal_migrations (version) VALUES ($1)", [file]);
+    }
+  });
+  await db.pool.query(
+    "INSERT INTO stations (id, origin, owner_account, report_client_id, status, verified_at) VALUES ('st1', 'https://a.example', 'ab1', 's-st1', 'active', now())");
+  const appender = await db.pool.connect();
+  try {
+    await appender.query("BEGIN");
+    await appender.query("SELECT pg_advisory_xact_lock(hashtext('portal_integration_events'))");
+    await appender.query("SELECT * FROM stations WHERE id = 'st1' FOR UPDATE");
+    let settled = false;
+    const migrating = db.migrate().finally(() => { settled = true; });
+    await new Promise((done) => setTimeout(done, 300));
+    assert.equal(settled, false, "the migration waits for the append in flight");
+    await appender.query("INSERT INTO integration_events (station_id, account_id, actor, kind) VALUES ('st1', 'ab1', 'ab1', 'station_removed')");
+    await appender.query("UPDATE stations SET status = 'removed', removed_at = now() WHERE id = 'st1'");
+    await appender.query("COMMIT");
+    assert.deepEqual(await migrating, ["007_admin_releases.sql"]);
+    assert.deepEqual((await db.pool.query("SELECT status, admin_accounts FROM stations")).rows, [{ status: "removed", admin_accounts: [] }]);
   } finally {
     await appender.query("ROLLBACK").catch(() => {});
     appender.release();

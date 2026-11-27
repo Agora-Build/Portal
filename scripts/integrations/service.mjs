@@ -1,9 +1,11 @@
 // Business flows for Stations and integrations. Auth is called first and Portal writes its rows only after Auth answers
 // success; every Auth change names the signed-in account as `actor`. Rows are never deleted (D19).
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { TokenError } from "../idp.mjs";
+import { DEPOSIT_KEY } from "../ledger.mjs";
 import { builtInIntegrationLimit } from "../plans.mjs";
 import { ACCOUNT_ID, AppError } from "../store.mjs";
+import { ulid } from "../ulid.mjs";
 import { ManageError } from "./auth-manage.mjs";
 import { checkProof, createStationFetch, ProofError, stationOrigin, WELL_KNOWN_PATH } from "./proof.mjs";
 import { AUTH_CURSOR } from "./repository.mjs";
@@ -46,6 +48,18 @@ const ATTEMPT_REASONS = ["bound_elsewhere", "owner_disabled"];
 const ATTEMPTS_SHOWN_FOR = 30 * DAY;
 const NOTICES_SHOWN = 50;
 const ATTEMPT_CLOCK_SKEW = 3600000;
+// D27 slice 1: an admin's release of a built-in Station's binding (POST /api/admin/v1/bindings/release). The body
+// has exactly these fields. The release writes this kind on the Station's feed and in admin_actions.
+const RELEASE_FIELDS = ["stationId", "accountId", "genesisHash", "bindingId", "version", "reason", "key"];
+const RELEASE_KIND = "binding_released";
+// A release's id: rl- and a lowercase ULID. A binding's page shows its ten newest releases.
+const RELEASE_ID = /^rl-[0-9a-hjkmnp-tv-z]{26}$/;
+const RELEASES_SHOWN = 10;
+// An admin's reason, as Auth checks one (Auth's checkReason): trimmed, 1 to 500 characters of text on one line, not only
+// zero-width characters, and no control characters, line or paragraph separators, or bidirectional marks.
+const ADMIN_REASON_MAX = 500;
+const ADMIN_REASON_CONTROLS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+const ZERO_WIDTH = /[\u200b-\u200d\ufeff]/g;
 const CURSOR = /^\d{1,15}$/;
 const FEED_LIMIT = 500;
 // The Station directory (D29, GET /api/v1/stations): pages of at most 100 Stations, and a Station lost within 30 days (the
@@ -79,6 +93,18 @@ const attemptReasonInvalid = () => failure(400, "Send the reason as bound_elsewh
 const attemptedAtInvalid = () => failure(400, "Send attemptedAt as an ISO time.", "attempted_at");
 const builtInOnly = () => failure(403, "Only the built-in Station reports bindings.", "forbidden");
 const bindingNotNewer = () => failure(409, "This binding's version is not newer than the one recorded.", "binding_version");
+// The admin API's refusals (D27). The binding's own fields reuse the binding reports' errors above.
+const adminNotFound = () => failure(404, "This admin route was not found.", "not_found");
+const releaseBodyInvalid = () => failure(400, "Send { " + RELEASE_FIELDS.join(", ") + " }.", "body");
+const adminReasonInvalid = () => failure(400, "Give a reason of 1 to 500 characters on one line.", "reason");
+const releaseKeyInvalid = () => failure(400, "Send the form's key: 3 to 200 letters, digits, ':', '_' or '-', starting with a letter or digit.", "key");
+const bindingMissing = () => failure(404, "No binding is recorded for this R9 account on that built-in Station.", "binding");
+const releaseMissing = () => failure(404, "This release was not found.", "release");
+const bindingsQueryInvalid = () => failure(400, "Search by exactly one of account (an ab… account ID) or accountId (an R9 account ID).", "query");
+const releaseKeyReused = () => failure(409, "This key was already used for another release request.", "key_reused");
+const ownAccount = () => failure(403, "You can't release a binding of your own account.", "own_account");
+const notBound = () => failure(409, "Only a bound binding can be released.", "not_bound");
+const bindingChanged = () => failure(409, "This binding has changed since it was loaded. Load it again.", "binding_changed");
 const hostInvalid = () => failure(400, "Name the host by its id: " + IDENTIFIER, "host");
 const recordIdInvalid = () => failure(400, "Send the recordId as the record's lowercase UUID.", "record_id");
 const outcomeInvalid = () => failure(400, "Send all_applied with no pendingHosts, or deadline_passed with the hosts that didn't confirm.", "outcome");
@@ -299,6 +325,33 @@ function bindingBody(body, now) {
   return { state, reportId, account, accountId, genesisHash, reason, attemptedAt };
 }
 
+function adminReason(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text.replace(ZERO_WIDTH, "").trim() || !text.isWellFormed() || [...text].length > ADMIN_REASON_MAX || ADMIN_REASON_CONTROLS.test(text)) throw adminReasonInvalid();
+  return text;
+}
+
+// A release request's own fields, the ones checked before anything is written: exactly the seven fields, the reason and the
+// key (the ledger's deposit-key grammar). What comes back is the normalised request (the reason trimmed), which is also what
+// is hashed to tell a retry from a key used for another request.
+function releaseRequest(body) {
+  if (!plainObject(body) || Object.keys(body).length !== RELEASE_FIELDS.length || !RELEASE_FIELDS.every((name) => Object.hasOwn(body, name))) throw releaseBodyInvalid();
+  const reason = adminReason(body.reason);
+  if (typeof body.key !== "string" || !DEPOSIT_KEY.test(body.key)) throw releaseKeyInvalid();
+  const { stationId, accountId, genesisHash, bindingId, version, key } = body;
+  return { stationId, accountId, genesisHash, bindingId, version, reason, key };
+}
+
+// The binding's fields of a release, checked as the binding reports check them (bindingBody), in the same order: the error,
+// or null.
+function releaseFieldError({ accountId, genesisHash, bindingId, version }) {
+  if (typeof accountId !== "string" || !ID_GRAMMAR.test(accountId)) return bindingAccountIdInvalid();
+  if (typeof genesisHash !== "string" || !GENESIS_HASH.test(genesisHash)) return genesisHashInvalid();
+  if (typeof bindingId !== "string" || !ID_GRAMMAR.test(bindingId)) return bindingIdInvalid();
+  if (!Number.isSafeInteger(version) || version < 1) return bindingVersionInvalid();
+  return null;
+}
+
 // A report's body: only integrationId, state and reason; `error` needs a reason, any other report may carry one. With the
 // setting on (`delegated`, D29 Phase B) a report with a reportId is one of the two revocation reports, validated in this
 // order: its shape (which fields may come together, and with which state), the state, the reportId, then the kind's
@@ -426,7 +479,7 @@ export function createIntegrationService({
   // event or in neither, and every change committed later has a larger id (ids are taken in commit order, appendEvent).
   // It takes no lock, so it never waits for a writer. Each integration is in the feed's shape (the effective state as of
   // `at`) with its id, and a stopped one says when it was revoked. Only the built-in Station has the accounts (whether
-  // the Portal's view is complete, and the disabled ones) and the bindings it last reported.
+  // the Portal's view is complete, and the disabled ones), the bindings it last reported and the pending releases (D27).
   async function checkpointOf(station) {
     const snapshot = await db.transaction(async (client) => ({
       cursor: await repository.latestCursor(station.id, client),
@@ -434,7 +487,8 @@ export function createIntegrationService({
       ...(station.builtIn ? {
         complete: await repository.baselineApplied(client),
         disabled: await repository.disabledAccountList(client),
-        bindings: await repository.bindingsOn(station.id, client)
+        bindings: await repository.bindingsOn(station.id, client),
+        pending: await repository.pendingReleasesOn(station.id, client)
       } : {})
     }), { isolation: "repeatable read", readOnly: true });
     const at = now();
@@ -445,6 +499,8 @@ export function createIntegrationService({
     if (station.builtIn) {
       checkpoint.accounts = { complete: snapshot.complete, disabled: snapshot.disabled };
       checkpoint.bindings = snapshot.bindings.map((row) => ({ account: row.accountId, accountId: row.r9AccountId, genesisHash: row.genesisHash, bindingId: row.bindingId, version: row.version, bindingState: row.bindingState }));
+      // D27: every release not settled yet, oldest first, in the same snapshot as the cursor (Portal #41).
+      checkpoint.pendingReleases = snapshot.pending.map(({ releaseId, account, accountId, genesisHash, bindingId, version, requestedAt }) => ({ releaseId, account, accountId, genesisHash, bindingId, version, requestedAt }));
     }
     return { changes: [], cursor: snapshot.cursor, checkpoint };
   }
@@ -750,6 +806,18 @@ export function createIntegrationService({
     }
   }
 
+  // The admins Auth's built-in listing names for a built-in Station (D27), kept only to check the admin API's tokens: in
+  // the Portal an admin is still an ordinary account. Only this listing has them; one without them (an Auth from before
+  // D27) means none, so nobody passes the gate. Entries that aren't account IDs are ignored and counted, never echoed.
+  async function followAdmins(entry) {
+    const listed = Array.isArray(entry.admins) ? entry.admins : [];
+    const valid = listed.filter((id) => typeof id === "string" && ACCOUNT_ID.test(id));
+    const ignored = listed.length - valid.length;
+    if (ignored) log("Built-in Station admins: ignored " + ignored + (ignored === 1 ? " entry that is not an account ID." : " entries that are not account IDs."));
+    const admins = [...new Set(valid)].sort();
+    if (await repository.setBuiltInAdmins(entry.id, admins)) log("Built-in Station admins followed from Auth: " + admins.length + (admins.length === 1 ? " admin." : " admins."));
+  }
+
   // How the Portal follows Auth's accounts (D29, the setting on). It is in one of three modes, kept with its place in
   // Auth's feed (repository.accountSync):
   // * rebuilding: from the feed's first entry, into tables of its own (a first start, a reset, or Auth restored). The
@@ -974,7 +1042,8 @@ export function createIntegrationService({
   // genesis only if its version is higher than the recorded one; the same version with the identical binding (account,
   // bindingId, bindingState) is the same news again and changes nothing, and any other not-newer one is refused, which
   // rolls the transaction back (its id stays free). The answer is the recorded binding. Neither is an event or a push: the
-  // checkpoint reads the bindings, and the page reads the attempts.
+  // checkpoint reads the bindings, and the page reads the attempts. A newer binding also settles the pending releases of
+  // its R9 account and genesis (D27).
   async function recordBinding(station, report, client) {
     if (report.state === "binding_attempt") {
       await repository.saveBindingAttempt({ stationId: station.id, reportId: report.reportId, accountId: report.account, r9AccountId: report.accountId, genesisHash: report.genesisHash, reason: report.reason, attemptedAt: report.attemptedAt }, client);
@@ -983,6 +1052,14 @@ export function createIntegrationService({
     const recorded = await repository.binding(station.id, report.accountId, report.genesisHash, client);
     if (!recorded || recorded.version < report.version) {
       await repository.saveBinding({ stationId: station.id, r9AccountId: report.accountId, genesisHash: report.genesisHash, accountId: report.account, bindingId: report.bindingId, version: report.version, bindingState: report.bindingState, reportId: report.reportId }, client);
+      // D27: the newer binding settles each pending release of this R9 account at this genesis, in this transaction:
+      // applied when it is that release (released, the same bindingId, from the same Agora.Build account), superseded
+      // otherwise. A report sent again (the same reportId, or the same version under a new one) never comes here, so a
+      // release settles once.
+      await repository.settleReleases({
+        stationId: station.id, account: report.account, r9AccountId: report.accountId, genesisHash: report.genesisHash, bindingId: report.bindingId,
+        version: report.version, bindingState: report.bindingState, settledAt: now()
+      }, client);
     } else if (recorded.version !== report.version || recorded.accountId !== report.account || recorded.bindingId !== report.bindingId || recorded.bindingState !== report.bindingState) {
       throw bindingNotNewer();
     }
@@ -1039,6 +1116,41 @@ export function createIntegrationService({
       await repository.saveStationReport({ stationId: station.id, reportId, integrationId, body: report, answer }, client);
       return answer;
     });
+  }
+
+  // A release request's verdict on what is recorded now (D27): { refusal }, { repeat } (the release to answer with), or the
+  // { station, binding } to release. Checked in the contract's order after the request's own fields: the binding's fields,
+  // the Station and its binding (404), the key (the same request answers its release, another is key_reused), a pending
+  // release of this exact binding, the admin's own account, bound, and the bindingId and version. With `client` (the
+  // release's transaction, under the event lock) the binding is read and locked, and every read goes through the client: a
+  // transaction waiting for the event lock holds a connection, so it must never need a second one.
+  async function releaseVerdict(actor, request, hash, client) {
+    const fieldError = releaseFieldError(request);
+    if (fieldError) return { refusal: fieldError };
+    const { stationId, accountId, genesisHash, bindingId, version, key } = request;
+    const station = typeof stationId === "string" && ID_GRAMMAR.test(stationId) ? await repository.station(stationId, client) : null;
+    if (!station?.builtIn || station.status !== "active") return { refusal: bindingMissing() };
+    const binding = client ? await repository.bindingForUpdate(station.id, accountId, genesisHash, client) : await repository.binding(station.id, accountId, genesisHash);
+    if (!binding) return { refusal: bindingMissing() };
+    const kept = await repository.releaseByKey(key, client);
+    if (kept) return kept.requestHash === hash ? { repeat: kept.release } : { refusal: releaseKeyReused() };
+    const pending = await repository.pendingReleaseOf({ stationId: station.id, r9AccountId: accountId, genesisHash, bindingId, version }, client);
+    if (pending) return { repeat: pending };
+    if (binding.accountId === actor) return { refusal: ownAccount() };
+    if (binding.bindingState !== "bound") return { refusal: notBound() };
+    if (binding.bindingId !== bindingId || binding.version !== version) return { refusal: bindingChanged() };
+    return { station, binding };
+  }
+
+  // An admin action whose change threw is marked failed, as Auth's withAdminAction does: best effort, logged when it can't
+  // be. A row left started means nothing was released: the done (or a failed found under the lock) commits with the release
+  // and its feed change, and finishing touches only a started row, so a commit that did happen is never marked failed.
+  async function actionFailed(id) {
+    try {
+      await repository.finishAdminAction(id, "failed", { code: "error" });
+    } catch {
+      log("Admin action not marked failed: error.");
+    }
   }
 
   // The Portal half of a change Auth has already made: under the row lock `apply` re-checks the current row and returns
@@ -1505,6 +1617,102 @@ export function createIntegrationService({
       return reportAnswer(updated, station);
     },
 
+    // An Agora.Build admin releases a built-in Station's binding of an R9 account (D27 slice 1, the setting on): the admin
+    // API's POST /bindings/release, with the token's sub as `actor`. The request's own fields (its shape, the reason and the
+    // key) are checked first and write nothing. The rest is read once without a lock: a repeat (the same key and body, or a
+    // pending release of this exact binding) answers 200 with that release and writes nothing. Otherwise the action is
+    // written started, in its own statement, and nothing more happens if that fails; a refusal ends it failed with its code.
+    // The release is one transaction under the event lock, with every check made again and the binding locked: the
+    // binding_releases row, the binding_released change on that Station's feed and the action's done commit together, and
+    // the Station is pushed after the commit. A repeat found only then (identical requests at the same moment) answers 200
+    // too, its action done with repeated: true. Returns { status: 201 | 200, release }.
+    async releaseBinding(actor, body) {
+      if (!delegatedHostWork) throw adminNotFound();
+      const request = releaseRequest(body);
+      const hash = createHash("sha256").update(canonical(request)).digest("hex");
+      const first = await releaseVerdict(actor, request, hash);
+      if (first.repeat) return { status: 200, release: first.repeat };
+      const id = "pa-" + ulid(now()).toLowerCase();
+      await repository.startAdminAction({
+        id, actor, action: RELEASE_KIND, targetKind: "binding", target: JSON.stringify([request.stationId, request.accountId, request.genesisHash]),
+        reason: request.reason, at: now()
+      });
+      if (first.refusal) {
+        await repository.finishAdminAction(id, "failed", { code: first.refusal.details.code });
+        throw first.refusal;
+      }
+      let done;
+      try {
+        done = await appending(async (client) => {
+          const verdict = await releaseVerdict(actor, request, hash, client);
+          if (verdict.refusal) {
+            await repository.finishAdminAction(id, "failed", { code: verdict.refusal.details.code }, client);
+            return verdict;
+          }
+          if (verdict.repeat) {
+            await repository.finishAdminAction(id, "done", { releaseId: verdict.repeat.releaseId, repeated: true }, client);
+            return verdict;
+          }
+          const { station, binding } = verdict;
+          const release = await repository.insertRelease({
+            releaseId: "rl-" + ulid(now()).toLowerCase(), stationId: station.id, accountId: binding.accountId, r9AccountId: binding.r9AccountId,
+            genesisHash: binding.genesisHash, bindingId: binding.bindingId, version: binding.version, actor, reason: request.reason, requestedAt: now(),
+            idempotencyKey: request.key, requestHash: hash
+          }, client);
+          await repository.appendEvent({
+            stationId: station.id, integrationId: null, accountId: binding.accountId, actor, kind: RELEASE_KIND, state: null, reason: request.reason,
+            details: { admin: true, releaseId: release.releaseId, binding: { accountId: binding.r9AccountId, genesisHash: binding.genesisHash, bindingId: binding.bindingId, version: binding.version } }
+          }, client);
+          await repository.finishAdminAction(id, "done", { releaseId: release.releaseId }, client);
+          return { created: release };
+        });
+      } catch (error) {
+        await actionFailed(id);
+        throw error;
+      }
+      if (done.refusal) throw done.refusal;
+      if (done.repeat) return { status: 200, release: done.repeat };
+      changed(done.created.stationId);
+      return { status: 201, release: done.created };
+    },
+
+    // The admin site's "R9 bindings" page (D27, the setting on): the active built-in Stations' recorded bindings of one
+    // Agora.Build account (`account`) or one R9 account (`accountId`), exactly one of them (else 400 query), each with its
+    // owner's state and its ten newest releases, newest first, all read in one snapshot. accountState is disabled while
+    // the account is listed disabled, enabled while the Portal's account view is complete, and unknown otherwise
+    // (platform.md, "Account Availability").
+    async adminBindings({ account, accountId } = {}) {
+      if (!delegatedHostWork) throw adminNotFound();
+      const byAccount = account !== undefined;
+      if (byAccount === (accountId !== undefined)) throw bindingsQueryInvalid();
+      const valid = byAccount ? typeof account === "string" && ACCOUNT_ID.test(account) : typeof accountId === "string" && ID_GRAMMAR.test(accountId);
+      if (!valid) throw bindingsQueryInvalid();
+      const snapshot = await db.transaction(async (client) => {
+        const rows = await repository.bindingsFor(byAccount ? { account } : { r9AccountId: accountId }, client);
+        const disabled = await repository.disabledAmong([...new Set(rows.map((row) => row.accountId))], client);
+        const complete = await repository.baselineApplied(client);
+        const releases = [];
+        for (const row of rows) releases.push(await repository.releasesOf(row.stationId, row.r9AccountId, row.genesisHash, { limit: RELEASES_SHOWN }, client));
+        return { rows, disabled, complete, releases };
+      }, { isolation: "repeatable read", readOnly: true });
+      return {
+        bindings: snapshot.rows.map((row, index) => ({
+          stationId: row.stationId, account: row.accountId,
+          accountState: snapshot.disabled.has(row.accountId) ? "disabled" : snapshot.complete ? "enabled" : "unknown",
+          accountId: row.r9AccountId, genesisHash: row.genesisHash, bindingId: row.bindingId, version: row.version, bindingState: row.bindingState,
+          updatedAt: row.updatedAt, releases: snapshot.releases[index]
+        }))
+      };
+    },
+
+    // One release by its id (D27, the setting on): { release }, or 404 release.
+    async release(releaseId) {
+      if (!delegatedHostWork) throw adminNotFound();
+      const found = typeof releaseId === "string" && RELEASE_ID.test(releaseId) ? await repository.releaseById(releaseId) : null;
+      if (!found) throw releaseMissing();
+      return { release: found };
+    },
+
     // This Station's changes after `cursor`, oldest first, each with its integration's current settings. From cursor 0
     // the answer also lists every integration on the Station, so a Station starting fresh has a snapshot.
     //
@@ -1524,6 +1732,16 @@ export function createIntegrationService({
       const at = now();
       const current = new Map(rows.map((row) => [row.id, row]));
       const changes = events.map(({ id, at: when, integrationId, accountId, kind, state, reason, details }) => {
+        // An Agora.Build admin's release of a binding (D27): the owner released, the release and the binding as the Station
+        // last reported it. The admin and reason stay in the Portal's event and the release. Served as recorded, as the
+        // account changes are, even if the setting has been turned off since.
+        if (kind === RELEASE_KIND) {
+          const { releaseId, binding } = details;
+          return {
+            id, at: when, integrationId: null, kind, state: null, reason: AGORA_BUILD, account: accountId, releaseId,
+            binding: { accountId: binding.accountId, genesisHash: binding.genesisHash, bindingId: binding.bindingId, version: binding.version }
+          };
+        }
         // An admin's disabling or enabling of an account: the admin and their reason stay in the Portal's event. Served as
         // recorded, as Auth does, even if the setting has been turned off since. The baseline and the incomplete signal
         // name no account.
@@ -1549,8 +1767,8 @@ export function createIntegrationService({
 
     // The built-in Stations as Auth lists them naming no account (GET /manage/v1/built-in-stations, spec §3.3.4), so
     // their report clients are known before anyone signs in. Only the built-in part of reconcile runs: nothing is
-    // removed or revoked on absence. Never throws; returns whether it synced. Run by the stack at ready(), hourly, and
-    // a minute after a failure.
+    // removed or revoked on absence. Each Station's `admins` are kept too (followAdmins, D27). Never throws; returns whether
+    // it synced. Run by the stack at ready(), hourly, and a minute after a failure.
     async syncBuiltIn() {
       try {
         const listed = (await manage.builtInStations()).filter((entry) => entry.builtIn === true);
@@ -1558,7 +1776,10 @@ export function createIntegrationService({
         for (const station of await repository.builtInStations()) {
           if (!known.has(station.id)) log("Built-in Station absent from Auth's listing: left as it is.");
         }
-        for (const entry of listed) await reconcileBuiltIn(entry);
+        for (const entry of listed) {
+          await reconcileBuiltIn(entry);
+          await followAdmins(entry);
+        }
         return true;
       } catch (error) {
         log("Built-in Station sync failed: " + (error instanceof ManageError ? error.code : error.code || "error") + ".");
@@ -1728,6 +1949,9 @@ export function createIntegrationService({
     },
 
     notify: (stationId) => changed(stationId),
+
+    // Whether the account is one of the admins Auth lists for an active built-in Station (D27): the admin API's gate.
+    isPortalAdmin: (accountId) => repository.isPortalAdmin(accountId),
 
     // For tests: resolves once no push is in flight.
     async _pushesIdle() {

@@ -70,6 +70,8 @@ export function fakeManage({ now = Date.now, delegated = false } = {}) {
     integrationRecords: integrations,
     feed,
     onNudge: null,
+    // D27: whether the built-in listing carries each Station's admins (false: an Auth from before D27).
+    adminsListed: true,
     find(id) {
       const station = stations.find((entry) => entry.id === id && entry.status === "active");
       if (!station) fail(404, "not_found");
@@ -129,10 +131,12 @@ export function fakeManage({ now = Date.now, delegated = false } = {}) {
       const active = stations.filter((entry) => entry.status === "active");
       return [...active.filter((entry) => entry.builtIn), ...active.filter((entry) => !entry.builtIn && uses(entry, account))].map(listedStation);
     },
-    // GET /manage/v1/built-in-stations: the active built-in Stations, for any management client, naming no account.
+    // GET /manage/v1/built-in-stations: the active built-in Stations, for any management client, naming no account; each
+    // with its admins, sorted (D27; only this listing has them).
     async builtInStations() {
       await auth.open("builtInStations");
-      return stations.filter((entry) => entry.builtIn && entry.status === "active").map(listedStation);
+      return stations.filter((entry) => entry.builtIn && entry.status === "active")
+        .map((entry) => ({ ...listedStation(entry), ...(auth.adminsListed ? { admins: [...entry.admins].sort() } : {}) }));
     },
     async removeStation(id, actor) {
       await auth.gate("removeStation", actor);

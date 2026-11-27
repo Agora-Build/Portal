@@ -543,7 +543,7 @@ The tables:
 
 | Table | Holds |
 | --- | --- |
-| `stations` | Auth's Station ID, origin, owner (none for a built-in Station), report client ID, `active` or `removed`, `built_in`, `access` (`members` or `any_account`), `integrations_enabled`, `name` |
+| `stations` | Auth's Station ID, origin, owner (none for a built-in Station), report client ID, `active` or `removed`, `built_in`, `access` (`members` or `any_account`), `integrations_enabled`, `name`, `admin_accounts` (a built-in Station's admins from Auth's built-in listing, migration 007) |
 | `station_members` | accounts a Station is shared with, with who added or removed them and when |
 | `station_challenges` | issued proof values, valid 10 minutes, single use |
 | `integrations` | Auth's `i-` client ID, owner, Station, scopes, state, `resume_state`, `r9_svc`, quota, expiry, `last_error`, `paused_by` (who paused it, as Auth says: `owner`, `station` or `admin`), `owner_disabled_at` (while Agora.Build has the owner's account disabled), `revoked_at` (when it was revoked; empty for one revoked before migration 004), `interrupt_running` (whether its revocation interrupts the tasks running on the owner's hosts; see below), `revocation_outcome` and `revocation_pending_hosts` (how its revocation ended, from the Station's final report: `all_applied` or `deadline_passed`, and the host ids that didn't confirm; empty until then and without the setting; migration 005) |
@@ -557,6 +557,8 @@ The tables:
 | `account_baseline` | migration 006, with the setting on only: one row, the last `accounts_baseline` applied and whether the Portal's view of the accounts is complete |
 | `station_bindings` | migration 006, with the setting on only: the built-in Station's last reported binding for each R9 account and genesis hash: the Agora.Build account, the binding id, the version and the state |
 | `binding_attempts` | migration 006, with the setting on only: the built-in Station's refused binding attempts, kept forever; the account page shows the last 30 days |
+| `admin_actions` | migration 007: every change an Agora.Build admin asks of the admin API, written `started` before it and then `done` or `failed`: the admin, the action (`binding_released`), the target, the reason and the details; never deleted |
+| `binding_releases` | migration 007, written only by the admin API's release (`PORTAL_ADMIN_CLIENT_ID` and `DELEGATED_HOST_WORK=1`): each admin release of a built-in Station's binding: the binding as last reported, `pending`, `applied` or `superseded`, when it was asked and settled, the admin, the reason, and the form's key with the request's hash; kept forever |
 
 Rows are never deleted: Stations get `removed_at`, members get `removed_at`,
 integrations end in `revoked`, and the event log only grows. `integration_events`
@@ -603,19 +605,40 @@ entries; a new one starts in `rebuilding`. The Portal writes to the new tables o
 it off they stay empty; the one exception is the setting-off rule in "Account Availability". Like the other rows, they are
 never deleted: a rebuild empties only its own two copies.
 
+Migration `007_admin_releases.sql` (D27's slice 1) adds the tables `admin_actions` and `binding_releases`, the column
+`stations.admin_accounts` (empty on every Station until the built-in sync fills a built-in Station's) and two indexes on
+`station_bindings`, by Agora.Build account and by R9 account. It runs when the server starts, whatever the settings, and
+waits for any change in the middle of being recorded. The Portal fills `admin_accounts` whatever the settings, and writes the
+two tables only through the admin API, so with `PORTAL_ADMIN_CLIENT_ID` unset or `DELEGATED_HOST_WORK` off they stay empty.
+Like the other rows, they are never deleted.
+
 **With `DELEGATED_HOST_WORK=1` (off by default):** the Portal offers delegated host work, Phase A of
 [D29](integrations.md#311-delegated-host-work-d29): a revocation says whether to interrupt the tasks running on the
 owner's hosts, those tasks can be interrupted later within 24 hours, and the built-in Station hears when an admin
 disables or enables an account. Phase B adds the Station's two revocation reports and, on a stopped integration, how many
 hosts applied the revocation ("Routes", "For Station Builders"). The third slice adds the native Station directory
 (`GET /api/v1/stations`), the exact-cursor checkpoint (`?checkpoint=1`), account availability with its completeness mark
-and the built-in Station's two binding reports (`binding_changed` and `binding_attempt`). Releasing a binding
-(`binding_released`, and the admin site's release) waits for D27 and is not built. The Portal reads the one variable when it
-starts; only `1` turns it on, and any other value or none is off. Off is today's behaviour exactly: the routes, bodies,
-views and feed entries below do not exist and the account page shows nothing new (the one internal exception is the
-setting-off rule in "Account Availability"). On, `GET /api/me` also answers
+and the built-in Station's two binding reports (`binding_changed` and `binding_attempt`). Releasing a binding (D27's slice 1:
+the admin API's release, `binding_released` and the checkpoint's `pendingReleases`) needs `PORTAL_ADMIN_CLIENT_ID` too
+(below). The Portal reads the one variable when it starts; only `1` turns it on, and any other value or none is off. Off is
+today's behaviour exactly: the routes, bodies, views and feed entries below do not exist and the account page shows nothing
+new (the one internal exception is the setting-off rule in "Account Availability"). On, `GET /api/me` also answers
 `"delegatedHostWork": true`, for the browser session only (the page reads it); the token route `GET /api/v1/me` is
 unchanged. Turn it on in the order, and with the precondition, in "Turning On Delegated Host Work".
+
+**The admin API** ([D27](integrations.md#335-all-management-through-the-admin-site-d27), off by default):
+`PORTAL_ADMIN_CLIENT_ID` is the ID of Auth's admin client (the one with `firstParty` and `manage`). With it set, and the Portal
+database and Auth settings above (the Stations and integrations stack), the Portal serves `/api/admin/v1` to the admin site
+("The Admin API" under "Routes"); unset or empty, every `/api/admin/v1` path answers 404 as it does today. A value that can't
+be the admin client's ID leaves the admin API off in the same way, with one log line when the Portal starts that names the
+setting and why, never the value: one that isn't a client ID (1 to 200 characters of `[A-Za-z0-9._:-]`), the Portal's own
+client ID (`PORTAL_CLIENT_ID`) or a Station report client's ID (`s-…`), whose ordinary tokens would otherwise count as admin
+tokens and be refused on every other route. Its routes so far release a built-in Station's R9 binding, and also need
+`DELEGATED_HOST_WORK=1`: with that off the gate still checks every request, and every route behind it is 404 `not_found`.
+Auth issues the tokens only once its clients file gives the admin client `portalAdminAudience`, the Portal's API audience
+exactly (`https://dev.agora.build` on dev). Set it up in this order: Auth's clients file, then `PORTAL_ADMIN_CLIENT_ID`, then
+the admin site's `PORTAL_ORIGIN`; the release also follows the order of the three `DELEGATED_HOST_WORK` settings ("Turning On
+Delegated Host Work").
 
 ### The Built-in Station
 
@@ -641,11 +664,15 @@ unchanged. Turn it on in the order, and with the precondition, in "Turning On De
   a creation and for renewing an expired integration alike. With the setting off a `revoking` integration holds its place
   until the Station reports `revoked`, as before; turning the setting off again counts the ones still `revoking` once more.
 - **Admins.** Agora.Build admins act on the admin site (`https://admin.agora.build`, dev
-  `https://admin.dev.agora.build`; [D26](integrations.md#334-the-admin-site-d26)), which calls Auth, never in the Portal. In the Portal an admin is just
+  `https://admin.dev.agora.build`; [D26](integrations.md#334-the-admin-site-d26)), which calls Auth (and, to release an R9
+  binding, the Portal's admin API, "The Admin API" under "Routes"), never in the Portal. In the Portal an admin is just
   another account: every listing shows an account its own integrations and those on custom Stations it owns, another
   account's integration on the built-in Station is 404 for everyone but its owner, and Auth refuses the Portal's
   management calls that act across accounts. Their changes reach the Portal through Auth's change feed (see "Admin
-  Changes From Auth").
+  Changes From Auth"). The Portal also keeps each built-in Station's `admins` from Auth's built-in listing
+  (`GET /manage/v1/built-in-stations`), whatever the settings, but only to check the admin API's tokens (D27, "The Admin API"
+  under "Routes"). A listing without `admins` (an Auth from before D27) leaves the Station with none, and an account's own
+  listing never changes them.
 - **With `DELEGATED_HOST_WORK=1` (off by default):** the mailbox notice. Where Astation shows the built-in Station's trust
   notice, it adds: "On the built-in Station, Agora.Build's server stores the sealed messages your hosts send each other for
   up to 24 hours. It can't read or change them. It can see which of your hosts exchange messages, and when, but not what
@@ -657,16 +684,16 @@ unchanged. Turn it on in the order, and with the precondition, in "Turning On De
   Crockford base32 characters, and the scope includes `station.report`. It reaches only the two report routes (403
   elsewhere) and is never a Portal account. Its feed lists every integration on it, each with `ownerAccount`, and
   nothing else; push hints go to its origin. With `DELEGATED_HOST_WORK=1` (off by default) its feed also carries the
-  account changes, its checkpoint the accounts and its bindings, and it may send the two binding reports; a custom Station
-  gets none of these ("For Station Builders").
+  account changes and the `binding_released` change of an admin's release, its checkpoint the accounts, its bindings and its
+  `pendingReleases`, and it may send the two binding reports; a custom Station gets none of these ("For Station Builders").
 - **Sync.** The Portal learns of built-in Stations from Auth itself: when the Stations and integrations stack becomes
   ready (the server prepares it in the background as soon as it listens; a request to one of their routes waits for
-  it) and then hourly, it reads Auth's listing of
-  built-in Stations, which names no account (`GET /manage/v1/built-in-stations`), and adds or updates them, never
-  removing one. With Auth unreachable, or an Auth without that listing (404), the log says so by reason and the sync
-  is tried again a minute later (hourly again once it succeeds); every account's own listing also syncs them. The
-  first sync holds the first request for up to Auth's 10-second management timeout plus the database writes it makes.
-  A report client the Portal does not know answers 403 `station`.
+  it) and then hourly, it reads Auth's listing of built-in Stations, which is not for any one account
+  (`GET /manage/v1/built-in-stations`), and adds or updates them (and keeps their `admins`, above), never removing one. With
+  Auth unreachable, or an Auth without that listing (404), the log says so by reason and the sync is tried again a minute
+  later (hourly again once it succeeds); every account's own listing also syncs them. The first sync holds the first request
+  for up to Auth's 10-second management timeout plus the database writes it makes. A report client the Portal does not know
+  answers 403 `station`.
 - **Retiring it.** A built-in Station Auth retires (`"retired": true`) without another Station at its origin stays
   listed in the Portal, since absence or retirement never removes one here. After Auth has retired it (which revokes
   its report client and integrations there), an operator marks it removed in the Portal database:
@@ -1005,6 +1032,22 @@ Portal keep working.
   deploy or the rollback first. After a rollback to such an image and forward again, the line shows once and nothing else
   is needed. With the setting off the guard moves the Portal to `waiting` instead, silently, and the cursor needs the
   reset once every replica runs with the setting on.
+- **Rolling back past migration 007** (D27's slice 1) leaves its tables and column in place, which an older image ignores,
+  but an older image does not know releases. Turn the admin site's release off first (its `DELEGATED_HOST_WORK`, the third
+  in "Turning On Delegated Host Work"), keep the Portal's setting on, and wait until
+  `SELECT count(*) FROM binding_releases WHERE state = 'pending';` is 0: each pending release is settled by its Station's
+  next report for that binding, and with the Portal's setting off nothing settles. An older image serves a recorded
+  `binding_released` change without `account`, `releaseId` or `binding`, with the reason masked as `agora_build` (this image
+  stores the change marked as an admin's, so the older image's generic rule hides the admin's reason too), sends no
+  `pendingReleases` and settles nothing: a binding report it records moves `station_bindings` on and leaves every release
+  pending. After rolling forward, find the releases left pending although the binding moved on with:
+  `SELECT r.release_id FROM binding_releases r JOIN station_bindings b USING (station_id, r9_account_id, genesis_hash) WHERE r.state = 'pending' AND b.version > r.version;`
+  Such a release was not necessarily refused: the Station may have applied it while the older image ran. The Portal settles
+  it only when the Station next sends a `binding_changed` for that binding with a higher version than the binding's now (a
+  report with the same or a lower version settles nothing), so until then it stays `pending` on the admin site and in the
+  checkpoint's `pendingReleases`. To tell what happened, compare the binding's row (`b.binding_state`, `b.binding_id`,
+  `b.account_id`, `b.version`) with the release's and with what the Station itself reports for that binding: `released`
+  with the release's `binding_id` and `account_id` is an applied release, anything else a superseded one.
 
 #### Turning On Delegated Host Work
 
@@ -1036,7 +1079,10 @@ until then it describes behaviour nothing has yet. Turn the three settings on in
    On the first turn-on that is, on each built-in Station, one `account_disabled` for each account that
    `SELECT count(*) FROM account_availability WHERE disabled;` counts, and one `accounts_baseline` (no `account_disabled`
    rows, if Auth has disabled none; no baseline, if Auth has written none).
-3. **Then the admin site's** `DELEGATED_HOST_WORK`.
+3. **Then the admin site's** `DELEGATED_HOST_WORK`. Releasing a binding (D27) also needs `PORTAL_ADMIN_CLIENT_ID` on the
+   Portal and the admin site's `PORTAL_ORIGIN`, after Auth's clients file gives the admin client `portalAdminAudience`
+   ("Database And Settings"). With the Portal's `DELEGATED_HOST_WORK` off, the admin site's release is refused (404
+   `not_found`) and nothing is released.
 
 Turn them off in the reverse order, the admin site's first and Auth's last: the admin site's setting must be off
 whenever the Portal's is. After every change of the Portal's setting from off to on while Auth's stays on, read
@@ -1075,8 +1121,10 @@ skip kinds they don't know. The hosts, final outcomes and report ids recorded st
 the setting is read before the id is looked up. A final report refused then leaves its integration `revoking`, because the
 Portal runs no clock; a legacy `revoked` report with no `reportId` ends it. The account availability, bindings and binding
 attempts recorded stay in the database too, but nothing serves them: `?checkpoint=1` is ignored, `GET /api/v1/stations`
-answers 404, a binding report is 400 `report`, and the account page has no notices. While the setting is off, the first
-account-level entry the Portal reads moves it to `waiting` ("Account Availability").
+answers 404, a binding report is 400 `report`, and the account page has no notices. Releases stay too: a `binding_released`
+change already on a feed is served as recorded, the admin API's release routes answer 404 `not_found`, `pendingReleases` is
+not served (the checkpoint is ignored), and nothing settles (a binding report is 400 `report`). While the setting is off, the
+first account-level entry the Portal reads moves it to `waiting` ("Account Availability").
 
 ### Routes
 
@@ -1429,6 +1477,165 @@ the Portal has one, `"code"` (and for a failed proof, `"reason"`).
   The other refusals are 409 `report_id_reused` ("This reportId was already used for another report.") and 409
   `binding_version` ("This binding's version is not newer than the one recorded."), below.
 
+**The Admin API** ([D27](integrations.md#335-all-management-through-the-admin-site-d27) slice 1, with `PORTAL_ADMIN_CLIENT_ID`;
+"Database And Settings"). The admin site calls `/api/admin/v1` for an Agora.Build admin; nothing else may.
+
+- **The token.** Each call carries `Authorization: Bearer` with a token Auth's admin client gets for it by exchanging the
+  admin's passkey step-up ID token (RFC 8693, `resource` the Portal's API audience, `scope=portal.admin`; Auth's
+  `docs/integrating.md`). It lives 60 seconds, and the admin site keeps none. The Portal checks it as every bearer token
+  (issuer, audience, ES256, `typ` `at+jwt`, expiry) and as Auth issues it (an `iat`, at most 60 seconds from `iat` to `exp`,
+  and `aud` one string, not a list), then that `client_id` is `PORTAL_ADMIN_CLIENT_ID`, `scope` includes
+  `portal.admin`, `acr` is `urn:agora:mfa`, `sub` is an admin, and `auth_time` (whole seconds) is at most 900 s old for a
+  `GET` and 300 s for any other method. The admins are those Auth's built-in listing names for the active built-in Stations.
+  There are none until the Portal's first built-in sync, and an admin Auth stops listing is refused from the next sync on
+  (Auth's exchange already refuses them at once). If Auth stops listing a whole built-in Station, its stored admins keep
+  counting until the Station is marked removed, while Auth's own exchange refuses a non-admin at once. The actor of every
+  change is `sub`, never a field of the body.
+- **Nothing else counts.** A cookie is never read here. An admin token (one whose scope has `portal.admin`, or, with the
+  setting, any token of the admin client) is refused on every other `/api/` route with 403 "An Agora.Build admin token works
+  only on the admin API, /api/admin/v1.", and never makes a Portal account.
+- **Limits.** 120 reads (`GET`) and 30 changes a minute for each admin, in each Portal process, counted once a request has
+  passed every token check.
+- **Errors** are `{ "error", "code" }`, checked in this order (the `auth_time` checks of `token` come after
+  `insufficient_scope`):
+
+  | Code | Status | Refused when |
+  | --- | --- | --- |
+  | `token` | 401 | no bearer token, or one that fails the usual checks, names no account as `sub`, or has no `auth_time` that is a whole number of seconds (0 or more) or one more than 30 s ahead of the Portal's clock (`WWW-Authenticate: Bearer error="invalid_token"`) |
+  | `insufficient_scope` | 403 | `client_id` isn't `PORTAL_ADMIN_CLIENT_ID`, `scope` lacks `portal.admin`, or `acr` isn't `urn:agora:mfa` |
+  | `not_admin` | 403 | `sub` isn't an admin |
+  | `mfa_required` | 401 | `auth_time` is more than 900 s old for a `GET`, or 300 s for a change (`WWW-Authenticate: Bearer error="insufficient_user_authentication", …, max_age=900` or `300`, RFC 9470): sign in again with a passkey |
+  | `rate_limited` | 429 | over the admin's limit (`Retry-After: 60`) |
+  | `unavailable` | 503 | Auth's keys can't be reached, or the Portal database fails at any point on an admin route, even after the Portal has started: never a 500, and the log names only the error's plain code, or `error` |
+  | `not_found` | 404 | no such admin route, or one that needs `DELEGATED_HOST_WORK=1` while it is off |
+
+**With `DELEGATED_HOST_WORK=1` as well**, three routes release a built-in Station's R9 binding (D29's release, Atem's design
+III.5), for a person whose Agora.Build account is lost, so that a new owner can bind it. A release changes the built-in
+Station's service only, never R9 state:
+
+| Route | What |
+| --- | --- |
+| `GET /api/admin/v1/bindings?account=<ab…>` or `?accountId=<R9 account ID>` | the active built-in Stations' recorded bindings of that Agora.Build account or that R9 account |
+| `POST /api/admin/v1/bindings/release` `{ stationId, accountId, genesisHash, bindingId, version, reason, key }` | release one bound binding: `{ "release": … }`, 201 for a new release, or 200 with the release it repeats (the same key and body) or the pending release of that binding |
+| `GET /api/admin/v1/releases/<releaseId>` | one release: `{ "release": … }`, or 404 `release` ("This release was not found.") |
+
+- **Reading.** Exactly one query parameter, `account` (an `ab…` ID) or `accountId` (1 to 128 characters of
+  `[A-Za-z0-9._:-]`); anything else is 400 `query` ("Search by exactly one of account (an ab… account ID) or accountId (an
+  R9 account ID)."). Bindings are listed by Station (oldest first), then by `accountId` and `genesisHash`. `accountState` is
+  `disabled` while the account is listed as disabled, `enabled` while the Portal's account view is complete and it isn't
+  ("Account Availability"), and `unknown` otherwise. `releases` holds the binding's ten newest releases, newest first. All of
+  it is one snapshot.
+
+  ```json example:admin-bindings
+  {
+    "bindings": [
+      {
+        "stationId": "st01KB4K8W3Z5Q7R2T9X1C6D4FGH",
+        "account": "ab01KB4M7Q2X9R5T3WJ8V6C0YNDA",
+        "accountState": "enabled",
+        "accountId": "acct-7f3a2c91",
+        "genesisHash": "3c9a5e81b07d24f6c1a8e5d3b9f20476a1c8d5e29b3f7061c4a8e2d5b9f1037a",
+        "bindingId": "bind-5d1e",
+        "version": 3,
+        "bindingState": "bound",
+        "updatedAt": "2026-11-22T09:58:00.000Z",
+        "releases": [
+          {
+            "releaseId": "rl-01m81b5h80b7k2q9x4z6c3d5fh",
+            "stationId": "st01KB4K8W3Z5Q7R2T9X1C6D4FGH",
+            "account": "ab01KB4M7Q2X9R5T3WJ8V6C0YNDA",
+            "accountId": "acct-7f3a2c91",
+            "genesisHash": "3c9a5e81b07d24f6c1a8e5d3b9f20476a1c8d5e29b3f7061c4a8e2d5b9f1037a",
+            "bindingId": "bind-5d1e",
+            "version": 3,
+            "state": "pending",
+            "requestedAt": "2026-11-22T10:00:00.000Z",
+            "settledAt": null,
+            "settledVersion": null,
+            "actor": "ab01KB4R2T6W9Y3Z5A7C1E4G8HJK",
+            "reason": "The owner lost their Agora.Build account; support ticket 4821."
+          }
+        ]
+      }
+    ]
+  }
+  ```
+
+- **A release** names the binding as the Portal last recorded it, the admin (`actor`) and their `reason`. `state` is
+  `pending` until the Station's report settles it, `applied` or `superseded` ("Releasing a binding" in "For Station
+  Builders"); `settledAt` and `settledVersion` (the settling report's) are `null` until then. `releaseId` is `rl-` and a
+  lowercase ULID. Releases are kept forever, like the Station reports.
+- **Releasing.** The request; `key` is one per rendered form, and a retry sends the same one:
+
+  ```json example:admin-release-request
+  {
+    "stationId": "st01KB4K8W3Z5Q7R2T9X1C6D4FGH",
+    "accountId": "acct-7f3a2c91",
+    "genesisHash": "3c9a5e81b07d24f6c1a8e5d3b9f20476a1c8d5e29b3f7061c4a8e2d5b9f1037a",
+    "bindingId": "bind-5d1e",
+    "version": 3,
+    "reason": "The owner lost their Agora.Build account; support ticket 4821.",
+    "key": "release-form:01m81b5h80q4w7x2c9d3f6g8hj"
+  }
+  ```
+
+  It is checked in this order:
+
+  | Check | Refused with |
+  | --- | --- |
+  | the body is a JSON object with exactly these seven fields | 400 `body` ("Send { stationId, accountId, genesisHash, bindingId, version, reason, key }."); a request not sent as `application/json` is 415 `body`, one over 16 KB 413 `body` |
+  | `reason` is 1 to 500 characters on one line, as Auth checks an admin's reason: trimmed, not only zero-width characters, no control characters, line separators or bidirectional marks | 400 `reason` ("Give a reason of 1 to 500 characters on one line.") |
+  | `key` has the ledger's deposit-key grammar, `^[A-Za-z0-9][A-Za-z0-9:_-]{2,199}$` | 400 `key` ("Send the form's key: 3 to 200 letters, digits, ':', '_' or '-', starting with a letter or digit.") |
+  | `accountId`, `genesisHash`, `bindingId` and `version` have the binding reports' grammars (above) | 400 `account_id`, `genesis_hash`, `binding_id` or `version`, with the binding reports' messages |
+  | `stationId` is an active built-in Station with a binding recorded for `accountId` at `genesisHash` | 404 `binding` ("No binding is recorded for this R9 account on that built-in Station.") |
+  | a release already made under `key`: with the same body (in any key order, the reason trimmed) it answers that release, 200; with another body | 409 `key_reused` ("This key was already used for another release request.") |
+  | a pending release of this exact binding (`bindingId` and `version`) answers that release, 200, under any key and for any admin | — |
+  | the binding's `account` is the admin's own | 403 `own_account` ("You can't release a binding of your own account.") |
+  | the binding is `bound` | 409 `not_bound` ("Only a bound binding can be released.") |
+  | `bindingId` and `version` are the recorded ones | 409 `binding_changed`: the page reloads the binding |
+
+  ```json example:admin-release-error
+  {
+    "error": "This binding has changed since it was loaded. Load it again.",
+    "code": "binding_changed"
+  }
+  ```
+
+  Otherwise, in one transaction under the event lock (the one every append to a Station's feed takes), with every check made
+  again and the binding locked, the Portal writes the release (`pending`), the `binding_released` change on that built-in
+  Station's feed and the action's `done`, and then pushes the Station. Requests at the same moment make one release. The
+  answer is `{ "release": … }`, the same wrapper as `GET /api/admin/v1/releases/<releaseId>`: 201 for a new release, and 200,
+  with that release, for a repeat or a pending release of the same binding:
+
+  ```json example:admin-release-answer
+  {
+    "release": {
+      "releaseId": "rl-01m81b5h80b7k2q9x4z6c3d5fh",
+      "stationId": "st01KB4K8W3Z5Q7R2T9X1C6D4FGH",
+      "account": "ab01KB4M7Q2X9R5T3WJ8V6C0YNDA",
+      "accountId": "acct-7f3a2c91",
+      "genesisHash": "3c9a5e81b07d24f6c1a8e5d3b9f20476a1c8d5e29b3f7061c4a8e2d5b9f1037a",
+      "bindingId": "bind-5d1e",
+      "version": 3,
+      "state": "pending",
+      "requestedAt": "2026-11-22T10:00:00.000Z",
+      "settledAt": null,
+      "settledVersion": null,
+      "actor": "ab01KB4R2T6W9Y3Z5A7C1E4G8HJK",
+      "reason": "The owner lost their Agora.Build account; support ticket 4821."
+    }
+  }
+  ```
+
+- **`admin_actions`.** Once the body, `reason` and `key` pass, the release is written to `admin_actions` as `started`, in its
+  own statement (its `target` is the binding as the request named it); if that write fails nothing else happens. It ends
+  `done` (`details` `{ releaseId }`) or `failed` (`{ code }`: the refusal's, or `error` when something broke). A repeat the
+  Portal finds before it writes `started` writes no row. A request racing an identical one may already have written
+  `started`: it finds the release only inside the transaction, answers 200 with it, and ends `done` with
+  `{ releaseId, repeated: true }`. The `done` (or a `failed` found inside the transaction) commits with the release and its
+  feed change, so a row left `started` (the process died, or the database could not be written to) means nothing was
+  released.
+
 Apps and Stations that send an access token use `/api/v1/` only: a bearer
 token on the unversioned `/api/...` path gets 404 naming the `/api/v1` path.
 Browser routes use `/api/...` with the cookie and do not accept tokens, except
@@ -1474,7 +1681,8 @@ used), `proof` (422), `station` (403, the report client is not a registered Stat
 `report_key`, `r9_svc`, `reason`, `state`, `report` or `cursor`; with `DELEGATED_HOST_WORK=1` also `report_id`, `host`,
 `record_id` and `outcome` (a Station's revocation reports, in "Routes"), `limit` (the Station directory), and
 `account_id`, `genesis_hash`, `binding_id`, `version`, `binding_state` and `attempted_at` (the binding reports, in
-"Routes"; their `account`, `reason` and `report_id` are the codes above).
+"Routes"; their `account`, `reason` and `report_id` are the codes above). The admin API's codes are in its own tables ("The
+Admin API", above).
 
 ### Lifecycle
 
@@ -1754,6 +1962,17 @@ off none of this exists: `?checkpoint=1` is ignored and a binding report is 400 
         "version": 3,
         "bindingState": "bound"
       }
+    ],
+    "pendingReleases": [
+      {
+        "releaseId": "rl-01m81b5h80b7k2q9x4z6c3d5fh",
+        "account": "ab01KB4M7Q2X9R5T3WJ8V6C0YNDA",
+        "accountId": "acct-7f3a2c91",
+        "genesisHash": "3c9a5e81b07d24f6c1a8e5d3b9f20476a1c8d5e29b3f7061c4a8e2d5b9f1037a",
+        "bindingId": "bind-5d1e",
+        "version": 3,
+        "requestedAt": "2026-11-22T10:00:00.000Z"
+      }
     ]
   }
 }
@@ -1788,19 +2007,22 @@ A custom Station's checkpoint has `at` and `integrations` only:
   after applying every change up to `cursor`, and no later one. Resume with `?cursor=<cursor>`: the feed then delivers
   every later change and no earlier one.
 - **One snapshot.** The Portal reads the whole answer in one `REPEATABLE READ`, read-only transaction. It takes no lock, so
-  it never waits for a writer, and `cursor`, `integrations`, `accounts` and `bindings` are as of one moment: a change is
-  in the answer with its event or in neither. `at` is the Portal's clock when it answered, and each `state` is the
-  effective one as of `at`, so an integration past its expiry reads `expired`.
+  it never waits for a writer, and `cursor`, `integrations`, `accounts`, `bindings` and `pendingReleases` are as of one
+  moment: a change is in the answer with its event or in neither. `at` is the Portal's clock when it answered, and each
+  `state` is the effective one as of `at`, so an integration past its expiry reads `expired`.
 - **`integrations`** lists every integration on the Station in any state, revoked and stopped ones included, oldest
   first, in the feed's integration shape (`ownerAccount`, `state`, `scopes`, `r9Svc`, `expiresAt`, `quotaPerSecond`) plus
   its `id`. A stopped one (`revoking` or `revoked`) also has `interruptRunning` and `revokedAt`. `revokedAt` is `null` for
   a revocation from before migration 004, which did not record when.
-- **`accounts` and `bindings` appear on the built-in Station only.** A custom Station gets neither, ever.
+- **`accounts`, `bindings` and `pendingReleases` appear on the built-in Station only.** A custom Station gets none of them,
+  ever.
   - `accounts.disabled` lists the Agora.Build account IDs disabled now, in account order. What it means depends on
     `accounts.complete` (below).
   - `bindings` is the built-in Station's own last reported binding for each R9 account and genesis hash, ordered by
     `accountId` and then `genesisHash`, and empty until it reports some. A binding report writes no change to the feed,
-    so a Station reads its bindings here. A pending release is not carried: the release waits for D27 (below).
+    so a Station reads its bindings here.
+  - `pendingReleases` lists every release not settled yet, oldest first, each `{ releaseId, account, accountId, genesisHash,
+    bindingId, version, requestedAt }` ("Releasing a binding", below), and is empty when there are none.
 - **No pages.** It is one answer, because pages could not share one exact snapshot. If sizes ever call for it, there will
   be a snapshot export, not pages that can't agree.
 - **A cursor beside it.** The parameter is checked (a malformed one is still 400 `cursor`) and ignored, and 409
@@ -1861,8 +2083,7 @@ Changes From Auth") and keeps them in one durable table.
 - **Reconnect or reset.** After 409 `cursor_ahead`, a restore, or any doubt, read the checkpoint again.
 - **Turning the setting off.** If Auth's setting is turned off, Auth writes no account entries meanwhile. The next start
   with it on writes the corrections and a new baseline. For the Portal's own setting, see "Account Availability".
-- These account changes are final from Auth's and the Portal's side. Only the grammar of the binding reports' fields
-  stays provisional (below).
+- These account changes are final from Auth's and the Portal's side.
 
 **The built-in Station's binding reports.** The ownership rules stay the Station's, as Atem's design (III.5) says: the
 native-manager proof and challenge bytes, consent for transfers, refusals, and closing routes and channels. The Portal
@@ -1957,13 +2178,134 @@ are retried (with a fresh token for a 401); 409 `binding_version`, 409 `report_i
 with an operator alert. A 403 is the stop class; for a binding report it can also mean that the sender is not the
 built-in Station (403 `forbidden`).
 
-**Releasing a binding is not built.** `binding_released` (the Portal telling the built-in Station to release a binding,
-which the Station applies only when `bindingId` and `version` match its record, so a delayed release can't remove a later
-binding) and the admin site's "Release R9 binding" wait for D27's Portal admin API, which is not built. Until then the
-Portal sends no `binding_released`, and the checkpoint carries no pending release. The two reports above do not wait for
-it.
+**Releasing a binding** (D27's slice 1; with `PORTAL_ADMIN_CLIENT_ID` and `DELEGATED_HOST_WORK=1`;
+[Portal #41](https://github.com/Agora-Build/Portal/issues/41#issuecomment-7208684880)). An Agora.Build admin releases a built-in
+Station's `bound` binding on the admin site, through the admin API ("The Admin API" under "Routes"), for a person whose
+Agora.Build account is lost, so that a new owner can bind the R9 account. The release names the binding the Portal last
+recorded from your `binding_changed`, by `bindingId` and `version`. The Portal refuses one that isn't `bound`, one bound to the
+admin's own account, and one that changed since the admin loaded it. Transfers stay yours, reported through `binding_changed`:
+there is no inbound transfer change. A custom Station never gets any of this.
 
-Provisional until Astation and Atem confirm: the grammar of `genesisHash`, `accountId`, `bindingId` and `version` above.
+- **The change.** The release and one change on the built-in Station's feed commit in one transaction, and the Station is
+  pushed as usual, so the cursor moves with every release:
+
+  ```json example:binding-released-change
+  {
+    "id": 4812,
+    "at": "2026-11-22T10:00:00.000Z",
+    "integrationId": null,
+    "kind": "binding_released",
+    "state": null,
+    "reason": "agora_build",
+    "account": "ab01KB4M7Q2X9R5T3WJ8V6C0YNDA",
+    "releaseId": "rl-01m81b5h80b7k2q9x4z6c3d5fh",
+    "binding": {
+      "accountId": "acct-7f3a2c91",
+      "genesisHash": "3c9a5e81b07d24f6c1a8e5d3b9f20476a1c8d5e29b3f7061c4a8e2d5b9f1037a",
+      "bindingId": "bind-5d1e",
+      "version": 3
+    }
+  }
+  ```
+
+  `releaseId` names the release and never changes. `account` is the owner being released, and `binding` the record being
+  released, as you last reported it. The admin and their reason stay in the Portal. A change recorded while the setting was
+  on stays on the feed if it is turned off.
+- **The checkpoint's `pendingReleases`** lists every release not settled yet, in the same snapshot as `cursor` ("The
+  checkpoint", above), so a Station that recovers, or starts after the change, still applies it.
+- **The 60-second window and feed freshness** (the Station's side, as Astation accepted it on
+  [Portal #41](https://github.com/Agora-Build/Portal/issues/41#issuecomment-7208758672); the joint test is pending):
+  - The window starts when the Portal commits the release. From 60 seconds after that commit the built-in Station serves
+    nothing for the released binding: no new routes or channels, and the existing ones are closed.
+  - The Station records `freshAt`, the time a feed read began, and sets it only once that read has reached the end of the feed
+    (a page that isn't full) and every change in it has been applied, including closing what those changes no longer serve.
+    A read that begins after a commit sees that change, so a view whose read began less than 60 seconds ago includes every
+    release committed 60 seconds ago or more. No Portal clock is involved.
+  - It serves anything that rests on a binding only while `now − freshAt` is under 60 seconds on its UTC-synchronized clock:
+    routes and channels for a bound R9 account, delegated admissions and the verifier routes (below).
+  - At 60 seconds or more it fails closed: it refuses new binding-based service and closes the existing with
+    `service_suspended` until a fresh read completes, whatever the cause: the Portal unreachable or reads failing, a replica
+    that can't read the shared state, or a Station just started that hasn't completed a read.
+  - It polls the feed at least every 20 seconds while the setting is on, and at once on a nudge, well within the feed's 120
+    reads a minute. A Portal outage of up to about 40 seconds then goes unnoticed; a longer one suspends binding-based service
+    until reads resume.
+  - `freshAt` belongs to the shared applied state. A replica relies on it only once it has closed its own routes and channels
+    that the read's changes no longer serve.
+- **Applying a release, idempotently** (accepted by Astation in the same comment):
+  1. In one durable transaction: check that your record matches `bindingId` and `version` and is `bound`; then set it to
+     `released` with the same `bindingId` and a higher `version`, record the `releaseId` as applied, and queue the
+     `binding_changed` report in a durable outbox.
+  2. After the commit, close the routes and channels it served. Admission reads the durable record, so a restart can't
+     readmit them.
+  3. Send the outbox report: `bindingState` `released`, `account` the released owner, and the new `version`, with a
+     `reportId` derived from the change's identity (for example `binding_changed:` and a hash of `accountId`, `genesisHash` and
+     `version`), never from time or a counter.
+  4. A release already applied (the same `releaseId`, or a record whose version is past the release's) changes nothing: only
+     make sure its outbox report is sent.
+  5. A stale release (`bindingId` or `version` doesn't match, or the record isn't `bound`) is refused silently: your own newer
+     `binding_changed` settles it at the Portal.
+- **Restarts and crashes.**
+  - A crash before that transaction commits changes nothing: the release is still on the feed after your saved cursor, or in
+    `pendingReleases`, and you apply it then.
+  - A crash after the commit and before the report leaves the report in the outbox, and you send it on restart. The same
+    `reportId` and body get the recorded 200; under a new `reportId` the same `version` with an identical binding is 200 too.
+  - The same release delivered again (a re-read, the checkpoint, a second nudge) is step 4.
+  - A Station restored from a backup taken before the release: the checkpoint's `bindings` holds what you reported last,
+    `released` at a higher version. Never serve a restored record older than that; take the checkpoint's.
+- **Settling.** A release stays `pending` until a `binding_changed` for its `(accountId, genesisHash)` arrives from that
+  Station with a higher `version`. Recording that report settles every pending release of it, in the same transaction and
+  once: the same report sent again, under its `reportId` or under a new one, settles nothing more.
+  - `applied`: the report is `released`, with the release's `bindingId`, and names the same Agora.Build `account` that was
+    released;
+  - `superseded`: anything else with a higher version, such as a transfer or a new binding that came first.
+
+  Every pending release settles: the Portal releases only a binding it last recorded as `bound`, so a Station that refuses
+  a release holds a newer version, and reports it. A report with the same or a lower version settles nothing. The admin site
+  shows each release as pending (with its age), applied or superseded.
+
+**The third-party verifier** ([Portal #41](https://github.com/Agora-Build/Portal/issues/41#issuecomment-7208684569)). The
+process that holds an externally held R9 service key is an approved integration, and needs nothing new from Auth or the
+Portal. It gets its token as every integration does (client `i-…`, `private_key_jwt`, `resource` the Station's origin): an
+ES256 `at+jwt` for 5 minutes with `aud` the Station's origin, `client_id` the integration, `sub` its owner and `r9_svc` the R9
+service fingerprint recorded at approval. Auth issues none before approval. Its scope is `agent.view`, which every integration
+has; no scope is new or widened. On the challenge and report routes, which are the Station's to define, `agent.view` lets the
+integration fetch and answer only its own process's challenges. On every challenge fetch and every report the Station checks,
+server-side (a failed check refuses the call and records nothing, and a challenge of another integration answers 404, as if
+unknown):
+
+1. the token: ES256 against Auth's JWKS, `typ` `at+jwt`, `iss` Auth's issuer, not expired;
+2. the Station: `aud` is exactly its own origin;
+3. the integration: `client_id` is an integration on this Station's own feed, and `sub` equals its `ownerAccount`;
+4. the scope: `agent.view` is present;
+5. the service key: `r9_svc` is present and equals the feed's current `integration.r9Svc`; a token without it, or with any
+   other value, is refused;
+6. the state: the integration's effective `state` isn't `paused`, `revoking`, `revoked` or `expired` (an owner Agora.Build
+   disabled shows as `paused`);
+7. the challenge: issued by this Station for exactly this integration, this `r9_svc` and this process slot, not expired and
+   not used; a report answers only a challenge fetched by the same integration with the same key, and spends it;
+8. freshness: the Station's feed view is fresh under the rule above, or the call is refused.
+
+The verifier's own requirements (the SDK signature, the consumer's own challenge and the membership head) stay on top of these.
+
+- **Pause, revoke, expiry and a disabled owner.** Auth stops issuing the integration's tokens at once; one issued before can
+  live up to 5 minutes. The Station doesn't wait for that: when its feed shows the new state (`integration_paused`,
+  `integration_revoked`, an `integration.state` of `expired`, or Agora.Build's pause for a disabled owner) it cancels every
+  outstanding challenge for the integration and refuses its tokens on these routes, within 60 seconds of the Portal's commit
+  under the freshness rule even if a nudge is lost. A report that arrives after the cancellation counts nothing; a resume
+  starts fresh challenges and revives no old one.
+- **Service key replacement.** The Portal records `r9Svc` once, at approval, and has no route to replace an approved
+  integration's key: a new key means a new integration. A change made at Auth reaches the feed as `integration_reconciled`
+  with the new `integration.r9Svc`, so compare every change's `integration.r9Svc` with your record, whatever its kind. When it
+  changes, cancel every challenge issued for the old key and refuse every token whose `r9_svc` is the old value, on these
+  routes and every other route that relies on the service key, for the rest of its 5-minute life. A client-key rotation
+  (`integration_key_added`) changes nothing here.
+- **Direct service members without a Portal integration** have no Auth client and get no Auth token; their path is R9-native,
+  Atem's and Astation's.
+
+The grammar of `genesisHash`, `accountId`, `bindingId` and `version` above is confirmed: by Astation
+([Portal #41](https://github.com/Agora-Build/Portal/issues/41#issuecomment-7095767036), confirming
+[the proposal](https://github.com/Agora-Build/Portal/issues/41#issuecomment-7078161205)) and by Atem
+([comment](https://github.com/Agora-Build/Portal/issues/41#issuecomment-7208892757)).
 
 **The push nudge.** After a committed change the Portal sends
 `POST <origin>/agora-build/v1/changes` with `{ "cursor": <n> }` to the Station,
@@ -2009,8 +2351,10 @@ the lifecycle states, proof of control and its address checks, the Auth
 management client, Station registration and sharing, integration changes,
 reports, the change feed and push, the reader of Auth's change feed, the nudge route and applying admin changes, the
 routes and the account page; with `DELEGATED_HOST_WORK=1` also the Station directory, the exact-cursor checkpoint, account
-availability and its rebuild, and the binding reports. `tests/platform-docs.test.mjs` checks that the example answers in
-this document are what the Portal gives. The ones that need PostgreSQL use the same variable and run in throwaway schemas.
+availability and its rebuild, and the binding reports; and, with `PORTAL_ADMIN_CLIENT_ID` too, the admin API's gate and the
+releases of bindings (`tests/admin-api.test.mjs`, `tests/integrations-releases.test.mjs`). `tests/platform-docs.test.mjs`
+checks that the example answers in this document are what the Portal gives. The ones that need PostgreSQL use the same
+variable and run in throwaway schemas.
 
 `npm run test:e2e` runs the real Portal against the real auth.agora.build, loaded
 from an Agora-Build/Auth checkout (`AUTH_REPO`, default `../Auth`, with
