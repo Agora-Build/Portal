@@ -371,3 +371,318 @@ test("a Station removed by another path while the one-step removal ran gets no s
   assert.deepEqual(await s.service.removeStation(OWNER, s.station.id), { removed: true });
   assert.deepEqual([await s.events("station_removed"), s.notified, s.logs.some((line) => line.startsWith("Station removed in one step"))], [[], [], false]);
 });
+
+test("26 hours after the removal began the hourly check completes it: the integrations still revoking are revoked, those with an R9 service flagged, and the Station pushed once more", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const done = await s.integration();
+  const silent = await s.integration(MEMBER);
+  const paused = await s.integration(OWNER, { approved: false });
+  await s.service.pause(OWNER, paused);
+  await s.service.removeStation(OWNER, s.station.id);
+  assert.equal((await s.row(paused)).state, "revoking", "paused before approval: revoking, with no R9 service");
+  await s.final(done);
+  s.clock.now += 26 * HOUR - 1;
+  assert.equal(await s.service.completeRemovals(), 0, "not yet: 26 hours less a millisecond");
+  assert.equal((await s.repository.station(s.station.id)).status, "removing");
+  s.clock.now += 1;
+  s.notified.length = 0;
+  assert.equal(await s.service.completeRemovals(), 1);
+  const removed = await s.repository.station(s.station.id);
+  assert.deepEqual([removed.status, removed.removedAt], ["removed", iso(s.clock.now)]);
+  assert.deepEqual([s.authStation().status, s.authStation().reportClientRevoked], ["removed", true]);
+  assert.deepEqual([await s.flag(done), await s.flag(silent), await s.flag(paused)], [["revoked", false], ["revoked", true], ["revoked", false]],
+    "the one with its final: nothing pending; the silent one: pending; the one never approved has no R9 service, so no host holds it");
+  const [completed] = await s.events("station_removed");
+  assert.deepEqual([completed.actor, completed.reason, completed.details], ["system", "removal_completed", { completedBy: "deadline", pendingHostRevocation: 1 }]);
+  const ended = (await s.events("integration_revoked")).filter((event) => event.details.finalReport === false);
+  assert.deepEqual(ended.map((event) => [event.integration_id, event.actor, event.reason, event.state]), [[silent, "system", "station_removed", "revoked"], [paused, "system", "station_removed", "revoked"]]);
+  assert.deepEqual(s.notified, [s.station.id]);
+  assert.ok(s.logs.includes("Station removal completed after 26 hours: 1 integration pending host revocation."));
+  assert.equal(await s.service.completeRemovals(), 0, "nothing more to do");
+});
+
+test("two replicas completing the same removal at once complete it once: one station_removed, each integration revoked and flagged once, one more push", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const id = await s.integration();
+  await s.service.removeStation(OWNER, s.station.id);
+  s.clock.now += 26 * HOUR;
+  const replica = s.open();
+  s.notified.length = 0;
+  // The event lock is held meanwhile, so both have found the Station removing and had Auth's answer before either commits.
+  const holder = await s.db.pool.connect();
+  let counts;
+  try {
+    await holder.query("BEGIN");
+    await holder.query("SELECT pg_advisory_xact_lock(hashtext('portal_integration_events'))");
+    const running = Promise.all([s.service.completeRemovals(), replica.completeRemovals()]);
+    const until = Date.now() + 5000;
+    while (s.asked("completeStationRemoval") < 2) {
+      if (Date.now() > until) throw new Error("both replicas should have asked Auth");
+      await new Promise((done) => setTimeout(done, 5));
+    }
+    await holder.query("COMMIT");
+    counts = await running;
+  } finally {
+    await holder.query("ROLLBACK").catch(() => {});
+    holder.release();
+  }
+  assert.deepEqual(counts.sort(), [0, 1], "one of them completed it");
+  assert.equal((await s.events("station_removed")).length, 1);
+  assert.deepEqual(await s.flag(id), ["revoked", true]);
+  assert.equal((await s.events("integration_revoked")).filter((event) => event.details.finalReport === false).length, 1);
+  assert.deepEqual(s.notified, [s.station.id], "pushed once more, once");
+  assert.equal(s.asked("completeStationRemoval"), 2, "each asked Auth, which answers 204 again for a removed Station");
+});
+
+test("the hourly check leaves a Station removing while Auth refuses to complete it, and completes it once Auth accepts", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await s.integration();
+  await s.service.removeStation(OWNER, s.station.id);
+  s.clock.now += 27 * HOUR;
+  s.manage.failNext.completeStationRemoval = { status: 503, code: "unavailable" };
+  assert.equal(await s.service.completeRemovals(), 0);
+  assert.equal((await s.repository.station(s.station.id)).status, "removing");
+  assert.ok(s.logs.includes("Station removal not completed: Auth unavailable."));
+  assert.equal(await s.service.completeRemovals(), 1);
+  assert.equal((await s.repository.station(s.station.id)).status, "removed");
+});
+
+test("an Auth whose setting was turned off while a Station was removing (404) completes it with its one-step DELETE, named as the owner", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const id = await s.integration();
+  await s.service.removeStation(OWNER, s.station.id);
+  s.clock.now += 26 * HOUR;
+  s.manage.failNext.completeStationRemoval = { status: 404, code: "not_found" };
+  assert.equal(await s.service.completeRemovals(), 1);
+  assert.deepEqual([s.asked("completeStationRemoval"), s.asked("removeStation"), s.authStation().status], [1, 1, "removed"]);
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, ...await s.flag(id)], ["removed", "revoked", true]);
+});
+
+test("a removal Auth began that the Portal missed is followed by the next listing: removing, its integrations revoked, as the system; never with the setting off", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const id = await s.integration();
+  // Auth began it, but the owner's request failed before the Portal wrote anything.
+  await s.manage.beginStationRemoval(s.station.id, OWNER);
+  s.notified.length = 0;
+  await s.service.stations(OWNER);
+  const here = await s.repository.station(s.station.id);
+  assert.deepEqual([here.status, here.removalStartedAt], ["removing", iso(s.clock.now)]);
+  assert.equal((await s.row(id)).state, "revoking");
+  const [begun] = await s.events("station_removing");
+  assert.deepEqual([begun.actor, begun.details], ["system", { revoking: [id] }]);
+  assert.deepEqual(s.notified, [s.station.id]);
+  assert.ok(s.logs.includes("Station removal begun in Portal: Auth has it removing."));
+  await s.service.stations(MEMBER);
+  assert.equal((await s.events("station_removing")).length, 1, "once");
+
+  const off = await setup(t, { delegatedHostWork: false, authDelegated: true });
+  await off.manage.beginStationRemoval(off.station.id, OWNER);
+  await off.service.stations(OWNER);
+  assert.equal((await off.repository.station(off.station.id)).status, "active", "with the setting off the Portal leaves it as today");
+});
+
+test("a Station Auth no longer lists, or whose origin another Station took, is gone without the two phases: everything revoked at once, only integrations with an R9 service flagged", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const approved = await s.integration();
+  const waiting = await s.integration(OWNER, { approved: false });
+  const revoking = await s.integration();
+  await s.service.revoke(OWNER, revoking, { interruptRunning: false });
+  const finished = await s.integration();
+  await s.service.revoke(OWNER, finished, { interruptRunning: false });
+  await s.final(finished);
+  s.authStation().status = "removed";
+  await s.service.stations(OWNER);
+  assert.equal((await s.repository.station(s.station.id)).status, "removed");
+  assert.deepEqual([await s.flag(approved), await s.flag(waiting), await s.flag(revoking), await s.flag(finished)], [["revoked", true], ["revoked", false], ["revoked", true], ["revoked", false]],
+    "a live one and one still revoking are flagged; one never approved, or revoked with its final, is not");
+  assert.deepEqual((await s.events("station_removed")).map((event) => [event.actor, event.reason]), [["system", "reconciled"]]);
+  // Another account's Station registered at the origin of one Auth has removed behind the Portal's back retires it.
+  const second = await s.register(OWNER, "https://two.example");
+  const there = await s.integration(OWNER, { stationId: second.id });
+  const unapproved = await s.integration(OWNER, { stationId: second.id, approved: false });
+  s.authStation(second.id).status = "removed";
+  const successor = await s.register(STRANGER, "https://two.example");
+  assert.deepEqual([(await s.repository.station(second.id)).status, (await s.repository.station(successor.id)).status], ["removed", "active"]);
+  assert.deepEqual([await s.flag(there), await s.flag(unapproved)], [["revoked", true], ["revoked", false]]);
+  assert.ok(s.logs.includes("Station removed in Portal: its origin belongs to another Station at Auth."));
+});
+
+test("with the setting off, a Station Auth no longer lists is removed as today: one revoking stays revoking, nothing is flagged", async (t) => {
+  const s = await setup(t, { delegatedHostWork: false, authDelegated: false });
+  if (!s) return;
+  const approved = await s.integration();
+  const revoking = await s.integration();
+  await s.service.revoke(OWNER, revoking);
+  s.authStation().status = "removed";
+  await s.service.stations(OWNER);
+  assert.deepEqual([await s.flag(approved), await s.flag(revoking)], [["revoked", false], ["revoking", false]]);
+  assert.equal(await s.service.completeRemovals(), 0, "nothing to complete");
+});
+
+test("with the Portal's setting turned off meanwhile, the removals it began still complete: after a legacy final report, and at the hourly check", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const reported = await s.integration();
+  const second = await s.register(OWNER, "https://two.example");
+  const silent = await s.integration(OWNER, { stationId: second.id });
+  await s.service.removeStation(OWNER, s.station.id);
+  await s.service.removeStation(OWNER, second.id);
+  const off = s.open({ delegatedHostWork: false });
+  // With the setting off a report with a reportId is 400; the legacy revoked report ends the revocation, and the removal.
+  assert.equal((await off.report(s.station.reportClientId, { integrationId: reported, state: "revoked" })).state, "revoked");
+  assert.equal((await s.repository.station(s.station.id)).status, "removed");
+  assert.deepEqual(await s.flag(reported), ["revoked", false]);
+  s.clock.now += 26 * HOUR;
+  assert.equal(await off.completeRemovals(), 1);
+  assert.equal((await s.repository.station(second.id)).status, "removed");
+  assert.deepEqual(await s.flag(silent), ["revoked", true], "flagged in the Portal's record; shown once the setting is on again");
+  assert.equal(Object.hasOwn((await off.integrations(OWNER)).integrations.find((entry) => entry.id === silent), "pendingHostRevocation"), false, "with the setting off no view shows it");
+});
+
+test("a removal completes 26 hours after it began without the Station reporting, also when the owner's account is disabled meanwhile", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const id = await s.integration();
+  await s.service.removeStation(OWNER, s.station.id);
+  // Auth refuses the owner as actor now, and issues the Station's report client no token: it can report nothing.
+  s.manage.setOwnerDisabled(OWNER, true);
+  s.clock.now += 26 * HOUR;
+  assert.equal(await s.service.completeRemovals(), 1, "completed as the system");
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, s.authStation().status, ...await s.flag(id)], ["removed", "removed", "revoked", true]);
+});
+
+test("an integration still live on a removing Station (one Auth created at the instant of the begin) holds the removal to the 26 hours, and the completion revokes it", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const revoking = await s.integration();
+  await s.service.removeStation(OWNER, s.station.id);
+  // The owner's listing brings in an integration Auth created as the removal began: it is live in the Portal.
+  await s.repository.insertIntegration({ id: "i-late", ownerAccount: OWNER, stationId: s.station.id, kind: "custom_app", name: "Late", scopes: ["agent.view"], quotaPerSecond: 200, expiresAt: s.clock.now + 30 * 24 * HOUR });
+  await s.repository.updateIntegration("i-late", { state: "provisioning", r9Svc: R9 });
+  await s.final(revoking);
+  assert.equal((await s.repository.station(s.station.id)).status, "removing", "the live one is not revoked yet");
+  s.clock.now += 26 * HOUR;
+  assert.equal(await s.service.completeRemovals(), 1);
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, ...await s.flag("i-late"), ...await s.flag(revoking)], ["removed", "revoked", true, "revoked", false]);
+});
+
+test("a removing Station Auth no longer lists (it completed the removal, the Portal's half failed) is completed by the owner's next listing: flagged where a host may hold it, one station_removed", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const silent = await s.integration();
+  const never = await s.integration(OWNER, { approved: false });
+  const done = await s.integration(MEMBER);
+  await s.service.removeStation(OWNER, s.station.id);
+  await s.final(done);
+  s.authStation().status = "removed";
+  s.notified.length = 0;
+  await s.service.stations(OWNER);
+  const removed = await s.repository.station(s.station.id);
+  assert.deepEqual([removed.status, removed.removedAt], ["removed", iso(s.clock.now)]);
+  assert.deepEqual([await s.flag(silent), await s.flag(never), await s.flag(done)], [["revoked", true], ["revoked", false], ["revoked", false]], "the one still revoking is flagged, the one with its final is not");
+  assert.deepEqual((await s.events("station_removed")).map((event) => [event.actor, event.reason, event.details]), [["system", "removal_completed", { completedBy: "auth_removed", pendingHostRevocation: 1 }]], "the removal completed, not a Station reconciled away");
+  assert.equal(s.asked("completeStationRemoval"), 0, "Auth has it removed: nothing to ask");
+  assert.deepEqual(s.notified, [s.station.id]);
+  assert.ok(s.logs.includes("Station removal completed: Auth has it removed; 1 integration pending host revocation."));
+  await s.service.stations(OWNER);
+  assert.deepEqual([(await s.events("station_removed")).length, await s.service.completeRemovals()], [1, 0], "once");
+});
+
+test("a removing Station Auth no longer lists is completed with the setting off too, and the hourly check finds nothing left", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const silent = await s.integration();
+  await s.service.removeStation(OWNER, s.station.id);
+  s.authStation().status = "removed";
+  const off = s.open({ delegatedHostWork: false });
+  await off.stations(OWNER);
+  assert.equal((await s.repository.station(s.station.id)).status, "removed");
+  assert.deepEqual(await s.flag(silent), ["revoked", true], "flagged in the Portal's record, shown once the setting is on again");
+  assert.deepEqual((await s.events("station_removed")).map((event) => event.reason), ["removal_completed"]);
+  assert.equal(await off.completeRemovals(), 0);
+});
+
+test("a member's listing without a Station the Portal has removing never records member_removed: the owner's listing completes the removal", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const theirs = await s.integration(MEMBER);
+  await s.service.removeStation(OWNER, s.station.id);
+  s.authStation().status = "removed";
+  s.notified.length = 0;
+  // Auth would also leave it out of a member's listing if the member had left just before the removal began: the member's
+  // listing cannot say which, so it changes nothing.
+  await s.service.stations(MEMBER);
+  assert.deepEqual(await s.events("member_removed"), [], "the Station is going, not the member");
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, await s.flag(theirs), s.notified], ["removing", ["revoking", false], []]);
+  assert.equal((await s.repository.currentMembers(s.station.id)).some((member) => member.accountId === MEMBER), true);
+  await s.service.stations(OWNER);
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, await s.flag(theirs)], ["removed", ["revoked", true]]);
+  assert.deepEqual([(await s.events("member_removed")).length, (await s.events("station_removed")).length], [0, 1]);
+});
+
+test("a removing Station whose origin another Station took at Auth is retired as gone: its revoking integrations flagged, no second event for the removal", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const silent = await s.integration();
+  await s.service.removeStation(OWNER, s.station.id);
+  s.authStation().status = "removed";
+  const successor = await s.register(STRANGER, "https://one.example");
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, (await s.repository.station(successor.id)).status], ["removed", "active"]);
+  assert.deepEqual(await s.flag(silent), ["revoked", true]);
+  assert.deepEqual((await s.events("station_removed")).map((event) => [event.actor, event.reason]), [["system", "reconciled"]]);
+  await s.service.stations(OWNER);
+  assert.equal((await s.events("station_removed")).length, 1, "the owner's listing finds it removed already");
+});
+
+test("two listings finding the same Station gone record it removed once", async (t) => {
+  // Both listings read the account's Stations before either commits, so each finds the Station active and absent from Auth.
+  const barrier = { on: false, reads: 0, release: null, open: null };
+  barrier.open = new Promise((release) => { barrier.release = release; });
+  const s = await setup(t, {
+    wrap: (repository) => ({
+      ...repository,
+      async stationsFor(...args) {
+        const found = await repository.stationsFor(...args);
+        if (barrier.on && ++barrier.reads === 2) barrier.release();
+        if (barrier.on) await barrier.open;
+        return found;
+      }
+    })
+  });
+  if (!s) return;
+  const id = await s.integration();
+  s.authStation().status = "removed";
+  s.notified.length = 0;
+  barrier.on = true;
+  await Promise.all([s.service.stations(OWNER), s.open().stations(OWNER)]);
+  barrier.on = false;
+  assert.deepEqual([(await s.events("station_removed")).length, await s.flag(id), s.notified], [1, ["revoked", true], [s.station.id]]);
+});
+
+test("the hourly check never throws: a database failure reading the removing Stations is logged by its code, and one Station's failed completion leaves the others to complete", async (t) => {
+  const armed = { on: true };
+  const s = await setup(t, { wrap: failingOnce("removingStations", armed) });
+  if (!s) return;
+  const first = await s.integration();
+  const second = await s.register(OWNER, "https://two.example");
+  const other = await s.integration(OWNER, { stationId: second.id });
+  await s.service.removeStation(OWNER, s.station.id);
+  await s.service.removeStation(OWNER, second.id);
+  s.clock.now += 26 * HOUR;
+  assert.equal(await s.service.completeRemovals(), 0);
+  assert.ok(s.logs.includes("Station removals not checked: 57P01."));
+  assert.equal(s.logs.some((line) => line.includes("secret detail")), false, "only the code is logged");
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, (await s.repository.station(second.id)).status], ["removing", "removing"]);
+  // Auth refuses the first Station's completion: the second is still completed.
+  s.manage.failNext.completeStationRemoval = { status: 503, code: "unavailable" };
+  assert.equal(await s.service.completeRemovals(), 1);
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, (await s.repository.station(second.id)).status], ["removing", "removed"]);
+  assert.equal(await s.service.completeRemovals(), 1, "the first is completed by the next check");
+  assert.deepEqual([await s.flag(first), await s.flag(other)], [["revoked", true], ["revoked", true]]);
+});

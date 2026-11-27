@@ -1611,3 +1611,90 @@ test("with the setting on, DELETE /api/stations/<id> answers the two-phase remov
   const removed = await call(app.base, "/api/stations/" + empty.id, { cookie: owner.cookie, method: "DELETE" });
   assert.deepEqual([removed.status, await removed.json()], [200, { removed: true }]);
 });
+
+// D29: the stack's hourly sync also completes the removals that are done; the first sync, at ready(), included.
+test("the stack's built-in sync then completes the removals that are done: a Station removing for 26 hours is removed, its integration flagged, and pushed once more", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
+  const owner = accountId();
+  const manage = fakeManage({ delegated: true });
+  const registered = await manage.registerStation({ origin: "https://one.example", owner, reportKey: {}, actor: owner });
+  await manage.beginStationRemoval(registered.id, owner);
+  const repository = createRepository(db);
+  await repository.insertStation({ id: registered.id, origin: "https://one.example", ownerAccount: owner, reportClientId: registered.reportClientId, verifiedAt: Date.now() });
+  await repository.markStationRemoving(registered.id, Date.now() - 27 * 3600000);
+  await repository.insertIntegration({ id: "i-1", ownerAccount: owner, stationId: registered.id, kind: "custom_app", name: "App", scopes: ["agent.view"], quotaPerSecond: 200, expiresAt: Date.now() + 86400000 });
+  await repository.updateIntegration("i-1", { state: "revoking", r9Svc: R9, revokedAt: Date.now() - 27 * 3600000 });
+  const logs = [];
+  const pushes = [];
+  const integrations = createIntegrationStack({
+    db: { ...db, close: async () => {} }, manage, idp: null, log: (line) => logs.push(line), delegatedHostWork: true, authChanges: { pollMs: 3600000, minGapMs: 5 },
+    pushFetch: { async post(url) { pushes.push(url); return { status: 202 }; } }
+  });
+  try {
+    await integrations.ready();
+    assert.equal((await repository.station(registered.id)).status, "removed", "completed after the first sync");
+    const row = await repository.integration("i-1");
+    assert.deepEqual([row.state, row.pendingHostRevocation], ["revoked", true]);
+    assert.equal(manage.calls.filter((name) => name === "completeStationRemoval").length, 1);
+    assert.ok(logs.includes("Station removal completed after 26 hours: 1 integration pending host revocation."));
+    await integrations.service._pushesIdle();
+    assert.deepEqual(pushes, ["https://one.example/agora-build/v1/changes"]);
+  } finally {
+    await integrations.close();
+  }
+});
+
+// A removing Station (D29) with one revoking integration, begun `hoursAgo` hours ago, in both Auth and the Portal's database.
+async function seedRemoving(db, manage, hoursAgo) {
+  const owner = accountId();
+  const registered = await manage.registerStation({ origin: "https://one.example", owner, reportKey: {}, actor: owner });
+  await manage.beginStationRemoval(registered.id, owner);
+  const repository = createRepository(db);
+  await repository.insertStation({ id: registered.id, origin: "https://one.example", ownerAccount: owner, reportClientId: registered.reportClientId, verifiedAt: Date.now() });
+  await repository.markStationRemoving(registered.id, Date.now() - hoursAgo * 3600000);
+  await repository.insertIntegration({ id: "i-1", ownerAccount: owner, stationId: registered.id, kind: "custom_app", name: "App", scopes: ["agent.view"], quotaPerSecond: 200, expiresAt: Date.now() + 86400000 });
+  await repository.updateIntegration("i-1", { state: "revoking", r9Svc: R9, revokedAt: Date.now() - hoursAgo * 3600000 });
+  return { repository, station: registered };
+}
+
+test("a built-in sync that fails completes no removal: Auth is not asked to complete one", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
+  const manage = fakeManage({ delegated: true });
+  const { repository, station } = await seedRemoving(db, manage, 27);
+  manage.down = true;
+  const logs = [];
+  const integrations = createIntegrationStack({
+    db: { ...db, close: async () => {} }, manage, idp: null, log: (line) => logs.push(line), delegatedHostWork: true,
+    authChanges: { pollMs: 3600000, minGapMs: 5 }, builtInSyncAfter: { ok: 3600000, failed: 3600000 }
+  });
+  try {
+    await integrations.ready();
+    assert.ok(logs.includes("Built-in Station sync failed: unavailable."));
+    assert.equal(manage.calls.includes("completeStationRemoval"), false);
+    assert.equal((await repository.station(station.id)).status, "removing");
+  } finally {
+    await integrations.close();
+  }
+});
+
+test("the hourly sync completes a removal that has become 26 hours old since the last one", async (t) => {
+  const db = await testDatabase(t);
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return; }
+  const manage = fakeManage({ delegated: true });
+  const { repository, station } = await seedRemoving(db, manage, 1);
+  const integrations = createIntegrationStack({
+    db: { ...db, close: async () => {} }, manage, idp: null, log: () => {}, delegatedHostWork: true,
+    authChanges: { pollMs: 3600000, minGapMs: 5 }, builtInSyncAfter: { ok: 20, failed: 3600000 }
+  });
+  try {
+    await integrations.ready();
+    assert.equal((await repository.station(station.id)).status, "removing", "an hour old: still removing");
+    await db.pool.query("UPDATE stations SET removal_started_at = now() - interval '27 hours' WHERE id = $1", [station.id]);
+    await waitFor(async () => (await repository.station(station.id)).status === "removed", "the removal completed by the next sync");
+    assert.deepEqual([(await repository.integration("i-1")).pendingHostRevocation, manage.calls.filter((name) => name === "completeStationRemoval").length], [true, 1]);
+  } finally {
+    await integrations.close();
+  }
+});

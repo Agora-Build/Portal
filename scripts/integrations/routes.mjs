@@ -58,13 +58,15 @@ export function createIntegrationStack({ db, manage, idp, log, stationFetch = cr
   }, PARTITION_INTERVAL);
   partitions.unref();
   // The built-in Stations, synced from Auth's account-less listing once the stack is ready and then hourly (P17, D26);
-  // a failed sync is logged by syncBuiltIn and tried again a minute later. ready() waits for the first sync, which is
-  // bounded by the management call's 10 s timeout plus the database statements of reconciling (each within
-  // statement_timeout).
+  // a failed sync is logged by syncBuiltIn and tried again a minute later. After a sync that reached Auth, the removing
+  // Stations that are done, or 26 hours old, are completed (D29, completeRemovals; it calls Auth too, so not after a failed
+  // one). ready() waits for the first sync and those completions, each bounded by the management call's 10 s timeout plus
+  // its database statements (each within statement_timeout).
   let builtInSync = null;
   let closed = false;
   const syncBuiltIn = async () => {
     const synced = await service.syncBuiltIn();
+    if (synced && !closed) await service.completeRemovals();
     if (closed) return;
     builtInSync = setTimeout(syncBuiltIn, synced ? builtInSyncAfter.ok : builtInSyncAfter.failed);
     builtInSync.unref();
