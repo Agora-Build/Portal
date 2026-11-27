@@ -153,8 +153,9 @@ test("with the setting on the page offers the revoke choice, Interrupt running t
   assert.ok(script.includes(exact("INDIRECT_NOTE", "Tasks already running on hosts continue. Within 24 hours, the owner of each revoked integration can still interrupt them.")));
   // The Portal records a request; it can't know the outcome on the hosts.
   assert.ok(script.includes(exact("INTERRUPTED_NOTE", "Running tasks: an interrupt was requested.")));
-  // A removed Station never reads its feed again, so its removal offers no interrupt: only that running tasks continue.
-  assert.ok(script.includes(exact("REMOVED_NOTE", "Tasks already running on hosts continue.")));
+  // Removing a Station is two-phase (D29): the dialog says how it goes, and a pending integration says what to do.
+  assert.ok(script.includes(exact("REMOVAL_NOTE", "Every integration on this Station is revoked. The Station first passes the revocations to your hosts, then is removed, within about a day. Tasks already running on hosts continue unless you interrupt them.")));
+  assert.ok(script.includes(exact("PENDING_NOTE", "Revoked; your hosts weren't all told. Revoke it from Astation to make sure.")));
   // The checkbox sits in the confirmation before its form, hidden and unticked; the host-senders line follows the description.
   const checkbox = "<label id=\"integration-confirm-option\" class=\"checkbox-label\" hidden><input id=\"integration-confirm-check\" type=\"checkbox\"><span id=\"integration-confirm-option-text\"></span></label>";
   const dialog = html.match(/<dialog id="integration-confirm"[\s\S]*?<\/dialog>/)?.[0] || "";
@@ -197,7 +198,7 @@ test("with the setting on the page offers the revoke choice, Interrupt running t
   assert.equal(interruptible({ interruptRunning: false, revokedAt: "not a date" }), false);
   assert.equal(interruptible({ interruptRunning: true, revokedAt: ago(1) }), false, "already asked for");
   // The notes: pause and expiry, and that running tasks were interrupted, as muted notes after the Agora.Build lock note.
-  assert.match(script, /const notes = !hostWork \? \[\] : \[state === "paused" && PAUSE_NOTE, state === "expired" && EXPIRY_NOTE, STOPPED\.includes\(state\) && integration\.interruptRunning && INTERRUPTED_NOTE, appliedNote\(integration\), unconfirmedNote\(integration\)\]\.filter\(Boolean\);/);
+  assert.match(script, /const notes = !hostWork \? \[\] : \[state === "paused" && PAUSE_NOTE, state === "expired" && EXPIRY_NOTE, STOPPED\.includes\(state\) && integration\.interruptRunning && INTERRUPTED_NOTE, appliedNote\(integration\), unconfirmedNote\(integration\), state === "revoked" && integration\.pendingHostRevocation && PENDING_NOTE\]\.filter\(Boolean\);/);
   assert.match(script, /\.\.\.\(owner && locked \? \[el\("p", \{ class: "muted", text: LOCKED_NOTE \}\)\] : \[\]\),\n\s*\.\.\.notes\.map\(\(note\) => el\("p", \{ class: "muted", text: note \}\)\),/);
   // How a revocation went on the hosts (the `revocation` on a stopped integration's view), one named function per sentence:
   // a revoking integration says how many hosts applied it; a revoked one whose final report said deadline_passed says how
@@ -234,20 +235,20 @@ test("with the setting on the page offers the revoke choice, Interrupt running t
   assert.equal(indirect(null)("Text."), "Text.");
   assert.equal(indirect({ account: {} })("Text."), "Text.");
   assert.equal(indirect({ delegatedHostWork: true })("Text."), "Text. NOTE");
-  // Remove Station has its own helper and note: no interrupt is offered for a Station that is gone.
-  const removing = script.match(/^const removing = .*;$/m)?.[0] || "";
-  assert.equal(removing, "const removing = (text) => me?.delegatedHostWork ? text + \" \" + REMOVED_NOTE : text;");
-  const removal = (account) => new Function("me", "REMOVED_NOTE", removing + "\nreturn removing;")(account, "GONE");
+  // Remove Station has its own helper: with the setting on its text is the two-phase removal's, in place of today's.
+  const removalText = script.match(/^const removalText = .*;$/m)?.[0] || "";
+  assert.equal(removalText, "const removalText = (text) => me?.delegatedHostWork ? REMOVAL_NOTE : text;");
+  const removal = (account) => new Function("me", "REMOVAL_NOTE", removalText + "\nreturn removalText;")(account, "TWO PHASES");
   assert.equal(removal(null)("Text."), "Text.");
   assert.equal(removal({ account: {} })("Text."), "Text.");
-  assert.equal(removal({ delegatedHostWork: true })("Text."), "Text. GONE");
+  assert.equal(removal({ delegatedHostWork: true })("Text."), "TWO PHASES");
   assert.match(script, /\["Remove this member\?", indirect\(member\.account \+ " loses this Station, and their integrations on it are revoked\."\), "Remove member"\]/);
-  assert.match(script, /\["Remove " \+ station\.origin \+ "\?", removing\("Every integration on this Station is revoked and its members lose access\. This can't be undone\."\), "Remove Station"\]/);
+  assert.match(script, /\["Remove " \+ station\.origin \+ "\?", removalText\("Every integration on this Station is revoked and its members lose access\. This can't be undone\."\), "Remove Station"\]/);
   assert.match(script, /\["Leave " \+ station\.origin \+ "\?", indirect\("You lose this Station, and your integrations on it are revoked\."\), "Leave Station"\]/);
   // The host-senders line shows only for a signed-in account, with the setting on.
   assert.match(script, /document\.querySelector\("#host-senders-note"\)\.hidden = !\(shown && me\.delegatedHostWork\);/);
   // Everything new is behind the setting: each use of the new copy is on a line that tests it.
-  for (const name of ["INTERRUPT_CHOICE", "EXPIRY_NOTE", "PAUSE_NOTE", "INDIRECT_NOTE", "REMOVED_NOTE", "INTERRUPTED_NOTE", "appliedNote", "unconfirmedNote"]) {
+  for (const name of ["INTERRUPT_CHOICE", "EXPIRY_NOTE", "PAUSE_NOTE", "INDIRECT_NOTE", "REMOVAL_NOTE", "PENDING_NOTE", "INTERRUPTED_NOTE", "appliedNote", "unconfirmedNote"]) {
     const uses = script.split("\n").filter((line) => new RegExp("\\b" + name + "\\b").test(line) && !line.startsWith("const " + name + " ="));
     assert.ok(uses.length, name + " is used");
     for (const line of uses) assert.match(line, /\bhostWork\b|me\?\.delegatedHostWork/, name + ": " + line.trim());
@@ -286,5 +287,29 @@ test("with the setting on the Stations section shows each refused binding attemp
     assert.ok(uses.length, name + " is used");
     for (const entry of uses) assert.match(entry, /\bhostWork\b|me\?\.delegatedHostWork|^const bindingNotice = /, name + ": " + entry.trim());
   }
+  assert.doesNotMatch(script, /console\.|innerHTML/);
+});
+
+test("a removing Station shows how far its removal has got and offers no actions; the removal's answer says it started (D29)", async () => {
+  const script = await read("integrations.js");
+  const line = script.match(/^const removingNote = .*;$/m)?.[0] || "";
+  assert.ok(line, "one small named function for the sentence");
+  const removingNote = new Function(line + "\nreturn removingNote;")();
+  // The exact copy of the design, with the list's counts.
+  assert.equal(removingNote({ removalProgress: { done: 1, total: 3 } }), "Removing: passing the revocations to your hosts (1 of 3 done)");
+  assert.equal(removingNote({ removalProgress: { done: 0, total: 0 } }), "Removing: passing the revocations to your hosts (0 of 0 done)");
+  assert.equal(removingNote({}), "Removing: passing the revocations to your hosts", "without counts, the sentence alone");
+  // The row: the origin, the facts and that line, and none of the actions (the Portal refuses them while it is removing).
+  assert.match(script, /if \(station\.status === "removing"\) return removingRow\(station\);/);
+  const row = script.slice(script.indexOf("function removingRow("), script.indexOf("async function loadStations("));
+  assert.ok(row.length > 0, "removingRow comes before loadStations");
+  assert.match(row, /el\("p", \{ class: "muted", text: removingNote\(station\) \}\)/);
+  assert.doesNotMatch(row, /el\("button"|membersPanel|confirmed\(|stationDetails/);
+  // It is never offered for a new integration, as any Station that isn't active.
+  assert.match(script, /stations\.filter\(\(station\) => \(!station\.status \|\| station\.status === "active"\)/);
+  // Remove Station says whether the removal started or the Station is removed (one step: the setting off, or nothing to pass on).
+  assert.match(script, /const answer = await request\("\/api\/stations\/" \+ segment\(station\.id\), \{ method: "DELETE" \}\);\n\s*notify\(answer\.removing \? "Removal started\." : "Station removed\."\);/);
+  // Interrupt running tasks stays offered while the Station is removing: only a removed one (stationRemoved) hides it.
+  assert.match(script, /if \(hostWork && STOPPED\.includes\(state\) && interruptible\(integration\) && !integration\.stationRemoved\) \{/);
   assert.doesNotMatch(script, /console\.|innerHTML/);
 });

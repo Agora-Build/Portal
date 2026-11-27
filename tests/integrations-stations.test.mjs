@@ -672,3 +672,50 @@ test("a sync whose listing lacks a built-in Station removes nothing and revokes 
   assert.equal((await s.repository.integration("i-kept")).state, "ready");
   assert.ok(s.logs.includes("Built-in Station absent from Auth's listing: left as it is."));
 });
+
+// D27: each built-in Station's admins come from Auth's built-in listing only, and the Portal keeps them to check the admin
+// API's tokens (nothing else).
+const ADMIN = "ab" + "0".repeat(25) + "4";
+const ADMIN_TOO = "ab" + "0".repeat(25) + "5";
+const adminsOf = async (s, id) => (await s.db.pool.query("SELECT admin_accounts FROM stations WHERE id = $1", [id])).rows[0].admin_accounts;
+
+test("syncBuiltIn keeps each built-in Station's admins from Auth's listing; only that listing changes them", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const built = s.manage.seedBuiltIn({ admins: [ADMIN_TOO, ADMIN] });
+  assert.equal(await s.service.isPortalAdmin(ADMIN), false, "none until the first sync");
+  assert.equal(await s.service.syncBuiltIn(), true);
+  assert.deepEqual(await adminsOf(s, built.id), [ADMIN, ADMIN_TOO], "sorted");
+  assert.deepEqual([await s.service.isPortalAdmin(ADMIN), await s.service.isPortalAdmin(ADMIN_TOO), await s.service.isPortalAdmin(OWNER)], [true, true, false]);
+  assert.ok(s.logs.includes("Built-in Station admins followed from Auth: 2 admins."));
+  // An account's own listing names no admins, and changes nothing.
+  await s.service.stations(OWNER);
+  assert.deepEqual(await adminsOf(s, built.id), [ADMIN, ADMIN_TOO]);
+  // An admin Auth no longer lists is gone after the next sync.
+  built.admins = [ADMIN];
+  await s.service.syncBuiltIn();
+  assert.deepEqual(await adminsOf(s, built.id), [ADMIN]);
+  assert.equal(await s.service.isPortalAdmin(ADMIN_TOO), false);
+  assert.ok(s.logs.includes("Built-in Station admins followed from Auth: 1 admin."));
+  // What isn't an account ID is ignored and counted; a duplicate counts once.
+  built.admins = [ADMIN, ADMIN, "acct_1", 7];
+  await s.service.syncBuiltIn();
+  assert.deepEqual(await adminsOf(s, built.id), [ADMIN]);
+  assert.ok(s.logs.includes("Built-in Station admins: ignored 2 entries that are not account IDs."));
+  // A listing without admins (an Auth from before D27) means none: nobody passes the admin API's gate.
+  s.manage.adminsListed = false;
+  await s.service.syncBuiltIn();
+  assert.deepEqual(await adminsOf(s, built.id), []);
+  assert.ok(s.logs.includes("Built-in Station admins followed from Auth: 0 admins."));
+});
+
+test("the admin set is every active built-in Station's admins together: a removed one's don't count", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  s.manage.seedBuiltIn({ admins: [ADMIN] });
+  const second = s.manage.seedBuiltIn({ id: "stbuiltin2", origin: "https://station2.agora.test", reportClientId: "s-" + "0".repeat(24) + "bt", admins: [ADMIN_TOO] });
+  await s.service.syncBuiltIn();
+  assert.deepEqual([await s.service.isPortalAdmin(ADMIN), await s.service.isPortalAdmin(ADMIN_TOO)], [true, true]);
+  await s.repository.markStationRemoved(second.id, Date.now());
+  assert.deepEqual([await s.service.isPortalAdmin(ADMIN), await s.service.isPortalAdmin(ADMIN_TOO)], [true, false]);
+});

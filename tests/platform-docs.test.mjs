@@ -2,7 +2,9 @@
 // a fenced block "json example:<name>". The binding report examples are sent to the service, and what it answers must be the
 // answer the document shows. The others (the directory, the checkpoint, the account changes and the browser list's notices)
 // carry ids and times, so they are held to the shape the service gives: the same keys in the same order, the same kind of
-// value (null included), and the same value for the fields that are a fixed vocabulary.
+// value (null included), and the same value for the fields that are a fixed vocabulary. The D27 examples (the admin API's
+// bindings, release request, answer and refusal, and the binding_released change) are held the same way; the release request
+// is sent to the service on this test's built-in Station, and its refusal must be the one the document shows.
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -13,10 +15,11 @@ import { fakeManage } from "./helpers/fake-manage.mjs";
 import { testDatabase } from "./helpers/test-db.mjs";
 
 const NAMES = [
-  "directory", "directory-page", "notices", "checkpoint", "checkpoint-custom", "account-changes",
-  "binding-changed-request", "binding-changed-answer", "binding-version-error", "binding-attempt-request", "binding-attempt-answer"
+  "directory", "directory-page", "directory-removing", "notices", "checkpoint", "checkpoint-custom", "account-changes",
+  "binding-changed-request", "binding-changed-answer", "binding-version-error", "binding-attempt-request", "binding-attempt-answer",
+  "admin-bindings", "admin-release-request", "admin-release-answer", "admin-release-error", "binding-released-change"
 ];
-const FIXED = ["kind", "reason", "role", "status", "membership", "access", "state", "bindingState", "builtIn", "integrationsEnabled", "stale", "complete", "interruptRunning", "quotaPerSecond", "version", "name"];
+const FIXED = ["kind", "reason", "role", "status", "membership", "access", "state", "bindingState", "builtIn", "integrationsEnabled", "stale", "complete", "interruptRunning", "quotaPerSecond", "version", "name", "accountState"];
 const document = readFileSync(new URL("../docs/platform.md", import.meta.url), "utf8");
 const examples = Object.fromEntries([...document.matchAll(/^[ ]*```json example:([a-z-]+)\n([\s\S]*?)^[ ]*```$/gm)].map((match) => [match[1], JSON.parse(match[2])]));
 
@@ -98,6 +101,18 @@ test("the example answers in platform.md are what the Portal gives", async (t) =
   assert.equal(JSON.stringify(JSON.parse(Buffer.from(examples["directory-page"].nextCursor, "base64url"))), JSON.stringify([true, examples.directory.stations[0].createdAt, examples.directory.stations[0].id]), "the example cursor is [builtIn, createdAt, id] of the page's last Station");
   assert.deepEqual(JSON.parse(Buffer.from(page.nextCursor, "base64url")), [true, page.stations[0].createdAt, page.stations[0].id]);
 
+  // A Station whose two-phase removal is under way (D29), with an approved integration still revoking: its directory entry.
+  const leaving = await register(OWNER, "https://leaving.example.net");
+  const staying = await service.createIntegration(OWNER, { stationId: leaving.id, name: "Leaving", scopes: [], publicJwk: publicJwk() });
+  await service.approve(OWNER, staying.id, { r9Svc: R9 });
+  assert.equal((await service.removeStation(OWNER, leaving.id)).removing, true);
+  const removing = (await service.directory(OWNER, {})).stations.find((entry) => entry.id === leaving.id);
+  assertMatches("directory-removing", removing);
+  // completeBy is 26 hours after removalStartedAt, in the document's example as in the service's entry.
+  for (const [name, entry] of [["the example", examples["directory-removing"]], ["the service's entry", removing]]) {
+    assert.equal(Date.parse(entry.completeBy) - Date.parse(entry.removalStartedAt), 26 * 3600000, name + ": completeBy is 26 hours after removalStartedAt");
+  }
+
   // The checkpoint of the built-in Station: a ready integration, a revoking one that interrupts, Auth's baseline, a disabled
   // account and a binding.
   const integration = async (name) => {
@@ -123,6 +138,21 @@ test("the example answers in platform.md are what the Portal gives", async (t) =
     (error) => { assert.equal(error.status, 409); assert.deepEqual({ error: error.message, code: error.details.code }, examples["binding-version-error"]); return true; }
   );
   assert.equal(examples["binding-changed-answer"].version, examples["binding-changed-request"].version, "the answer is the recorded binding");
+  // The admin API's release (D27): the documented request on this test's built-in Station, by an admin who doesn't own the
+  // binding; and its documented refusal, a version the record no longer has.
+  const asked = { ...examples["admin-release-request"], stationId: built.id };
+  for (const name of ["accountId", "genesisHash", "bindingId", "version"]) assert.equal(asked[name], examples["binding-changed-request"][name], "the release names the documented binding: " + name);
+  const released = await service.releaseBinding(ADMIN, asked);
+  assert.equal(released.status, 201);
+  // The route answers { release } (scripts/admin-api.mjs), the wrapper of GET /releases/<id> too.
+  assertMatches("admin-release-answer", { release: released.release });
+  assert.match(examples["admin-release-answer"].release.releaseId, /^rl-[0-9a-hjkmnp-tv-z]{26}$/);
+  assert.equal(examples["admin-release-answer"].release.account, examples["binding-changed-request"].account);
+  await assert.rejects(
+    service.releaseBinding(ADMIN, { ...asked, key: asked.key + "-again", version: asked.version - 1 }),
+    (error) => { assert.equal(error.status, 409); assert.deepEqual({ error: error.message, code: error.details.code }, examples["admin-release-error"]); return true; }
+  );
+  assertMatches("admin-bindings", await service.adminBindings({ account: examples["binding-changed-request"].account }));
   const checkpoint = await service.changes(built.reportClientId, "0", { checkpoint: true });
   assert.deepEqual(checkpoint.checkpoint.accounts, { complete: true, disabled: [DISABLED] });
   assertMatches("checkpoint", checkpoint);
@@ -141,6 +171,10 @@ test("the example answers in platform.md are what the Portal gives", async (t) =
   for (const entry of manage.feed.slice(seen)) assert.equal(await service.applyAuthChange(entry, pass), "applied");
   await service.accountsStartingOver();
   const feed = await service.changes(built.reportClientId, "0");
+  // The binding_released change the release wrote.
+  const releasedChange = feed.changes.find((change) => change.kind === "binding_released");
+  assertMatches("binding-released-change", releasedChange);
+  assert.equal(releasedChange.releaseId, released.release.releaseId);
   const changes = {};
   for (const change of feed.changes) if (["account_disabled", "account_enabled", "accounts_baseline", "accounts_incomplete"].includes(change.kind)) changes[change.kind] ??= change;
   assert.deepEqual(Object.keys(changes).sort(), ["account_disabled", "account_enabled", "accounts_baseline", "accounts_incomplete"]);
