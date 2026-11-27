@@ -849,7 +849,7 @@ test("a removing Station is used for nothing else: creating an integration, shar
   await assert.rejects(s.service.share(MEMBER, s.station.id, STRANGER), refused(403, "forbidden"));
 });
 
-test("the browser's list and the directory show a removing Station with when its removal began and completes at the latest, no integrations, and the list how far it has got", async (t) => {
+test("the browser's list and the directory show a removing Station with when its removal began and when it is due to complete, no integrations, and the list how far it has got", async (t) => {
   const s = await setup(t);
   if (!s) return;
   const one = await s.integration();
