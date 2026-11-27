@@ -23,8 +23,9 @@ const iso = (ms) => new Date(ms).toISOString();
 
 // The Portal with the setting on over a fake Auth with its own on (`authDelegated` false: an Auth without the two-phase
 // routes), on a clock the tests move, with a custom Station of OWNER's shared with MEMBER. `open()` starts another replica
-// on the same database and Auth (`open({ delegatedHostWork: false })`, one with the setting turned off).
-async function setup(t, { delegatedHostWork = true, authDelegated = delegatedHostWork } = {}) {
+// on the same database and Auth (`open({ delegatedHostWork: false })`, one with the setting turned off). `wrap` gives each
+// service its own view of the repository, to fail a method of it (the raw one stays `repository`).
+async function setup(t, { delegatedHostWork = true, authDelegated = delegatedHostWork, wrap = (repository) => repository } = {}) {
   const db = await testDatabase(t);
   if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
   const repository = createRepository(db);
@@ -35,7 +36,7 @@ async function setup(t, { delegatedHostWork = true, authDelegated = delegatedHos
   const logs = [];
   let counter = 0;
   const open = ({ delegatedHostWork: setting = delegatedHostWork } = {}) => createIntegrationService({
-    repository, db, manage, stationFetch: { async get() { return { ...served }; } }, exchange: async () => ({}), now: () => clock.now,
+    repository: wrap(repository), db, manage, stationFetch: { async get() { return { ...served }; } }, exchange: async () => ({}), now: () => clock.now,
     log: (line) => logs.push(line), challengeValue: () => "proof-value-" + (++counter), notify: (stationId) => notified.push(stationId), delegatedHostWork: setting
   });
   const service = open();
@@ -243,4 +244,130 @@ test("reading the Station lists while its removal runs never takes the removing 
   }
   assert.deepEqual([(await s.repository.station(s.station.id)).status, (await s.row(id)).state, await s.events("station_removed"), s.notified], ["removing", "revoking", [], []]);
   assert.equal(s.logs.some((line) => line.startsWith("Station removed in Portal")), false);
+});
+
+// A database failure as the driver raises it: a code, and a message that is never logged.
+const databaseError = (code) => Object.assign(new Error("secret detail of the failure"), { code });
+// A repository whose `method` fails once when `armed.on` is set (the flag clears as it fails).
+const failingOnce = (method, armed, code = "57P01") => (repository) => ({
+  ...repository,
+  async [method](...args) {
+    if (armed.on) { armed.on = false; throw databaseError(code); }
+    return repository[method](...args);
+  }
+});
+
+test("a removal already begun is never cut short with the setting off: the owner's repeat asks Auth nothing, and the last report still completes it", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const id = await s.integration();
+  const answer = await s.service.removeStation(OWNER, s.station.id);
+  const off = s.open({ delegatedHostWork: false });
+  s.notified.length = 0;
+  assert.deepEqual(await off.removeStation(OWNER, s.station.id), answer);
+  assert.deepEqual([s.asked("beginStationRemoval"), s.asked("removeStation"), s.asked("completeStationRemoval")], [1, 0, 0], "Auth's DELETE would revoke the report client mid-removal");
+  assert.deepEqual([s.authStation().status, s.authStation().reportClientRevoked], ["removing", undefined]);
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, (await s.row(id)).state, s.notified], ["removing", "revoking", []]);
+  // The Station's report in the form it sends with the setting off is the last one: the removal completes.
+  assert.equal((await off.report(s.station.reportClientId, { integrationId: id, state: "revoked" })).state, "revoked");
+  assert.equal((await s.repository.station(s.station.id)).status, "removed");
+  assert.deepEqual([s.asked("completeStationRemoval"), s.authStation().status, await s.flag(id)], [1, "removed", ["revoked", false]]);
+  assert.ok(s.logs.includes("Station removal completed: every integration revoked."));
+});
+
+test("a repeat removal retries a completion that failed", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const id = await s.integration();
+  await s.service.removeStation(OWNER, s.station.id);
+  s.manage.failNext.completeStationRemoval = { status: 503, code: "unavailable" };
+  await s.final(id);
+  assert.equal((await s.repository.station(s.station.id)).status, "removing");
+  assert.deepEqual(await s.service.removeStation(OWNER, s.station.id), { removed: true }, "completed by the repeat");
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, s.asked("completeStationRemoval"), s.asked("beginStationRemoval")], ["removed", 2, 1]);
+});
+
+test("a final report that commits after a concurrent begin's look at the Station still completes the removal", async (t) => {
+  const armed = { run: null };
+  const s = await setup(t, {
+    wrap: (repository) => ({
+      ...repository,
+      async stationByReportClient(...args) {
+        const found = await repository.stationByReportClient(...args);
+        // The removal begins right after this report read the Station, which was still active.
+        if (armed.run) { const run = armed.run; armed.run = null; await run(); }
+        return found;
+      }
+    })
+  });
+  if (!s) return;
+  const id = await s.integration();
+  armed.run = () => s.service.removeStation(OWNER, s.station.id);
+  assert.equal((await s.final(id)).state, "revoked");
+  assert.equal((await s.repository.station(s.station.id)).status, "removed", "completed by the report, not left for the hourly check");
+  assert.equal(s.asked("completeStationRemoval"), 1);
+});
+
+test("Auth's begin succeeds and the Portal's begin transaction fails: the owner's retry begins the removal once on both sides", async (t) => {
+  const armed = { on: true };
+  const s = await setup(t, { wrap: failingOnce("markStationRemoving", armed) });
+  if (!s) return;
+  const id = await s.integration();
+  await assert.rejects(s.service.removeStation(OWNER, s.station.id), (error) => error.code === "57P01");
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, (await s.row(id)).state, s.authStation().status], ["active", "provisioning", "removing"], "Auth has begun it, the Portal has not");
+  const startedAt = s.authStation().removalStartedAt;
+  s.clock.now += 1000;
+  const answer = await s.service.removeStation(OWNER, s.station.id);
+  assert.equal(answer.removing, true);
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, (await s.row(id)).state, s.asked("beginStationRemoval")], ["removing", "revoking", 2], "Auth's begin is idempotent");
+  assert.deepEqual([s.authStation().removalStartedAt, s.manage.feed.filter((entry) => entry.kind === "revoked").length], [startedAt, 1], "Auth revoked it once");
+  assert.deepEqual([(await s.events("station_removing")).length, (await s.events("integration_revoked")).length], [1, 1], "the Portal began it once");
+});
+
+test("the Portal's completion transaction fails: the report is still answered and logged, and a later retry completes the removal", async (t) => {
+  const armed = { on: false };
+  const s = await setup(t, { wrap: failingOnce("markStationRemoved", armed, "40001") });
+  if (!s) return;
+  const id = await s.integration();
+  await s.service.removeStation(OWNER, s.station.id);
+  armed.on = true;
+  assert.equal((await s.final(id)).state, "revoked", "the report is answered");
+  assert.ok(s.logs.includes("Station removal not completed: 40001."));
+  assert.equal(s.logs.some((line) => line.includes("secret detail")), false, "only the code is logged");
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, await s.events("station_removed"), s.authStation().status], ["removing", [], "removed"], "Auth completed, the Portal has not");
+  assert.equal((await s.final(id)).state, "revoked", "the Station's retry of the same final");
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, (await s.events("station_removed")).length, s.asked("completeStationRemoval")], ["removed", 1, 2]);
+});
+
+test("the one-step removal retried after its Portal half failed converges: Auth's 404 means it is removed already", async (t) => {
+  const armed = { on: true };
+  const s = await setup(t, { authDelegated: false, wrap: failingOnce("markStationRemoved", armed) });
+  if (!s) return;
+  const id = await s.integration();
+  await assert.rejects(s.service.removeStation(OWNER, s.station.id), (error) => error.code === "57P01");
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, s.authStation().status, await s.flag(id)], ["active", "removed", ["provisioning", false]]);
+  s.notified.length = 0;
+  assert.deepEqual(await s.service.removeStation(OWNER, s.station.id), { removed: true });
+  assert.deepEqual([(await s.repository.station(s.station.id)).status, await s.flag(id), s.asked("removeStation")], ["removed", ["revoked", true], 2]);
+  assert.deepEqual([(await s.events("station_removed")).length, s.notified], [1, [s.station.id]]);
+});
+
+test("a Station removed by another path while the one-step removal ran gets no second event, log line or push", async (t) => {
+  const armed = { on: true };
+  const s = await setup(t, {
+    authDelegated: false,
+    wrap: (repository) => ({
+      ...repository,
+      async markStationRemoved(id, at, client) {
+        // The other path removes it first, outside this call's transaction.
+        if (armed.on) { armed.on = false; await repository.markStationRemoved(id, at); }
+        return repository.markStationRemoved(id, at, client);
+      }
+    })
+  });
+  if (!s) return;
+  await s.integration();
+  s.notified.length = 0;
+  assert.deepEqual(await s.service.removeStation(OWNER, s.station.id), { removed: true });
+  assert.deepEqual([await s.events("station_removed"), s.notified, s.logs.some((line) => line.startsWith("Station removed in one step"))], [[], [], false]);
 });

@@ -770,29 +770,39 @@ export function createIntegrationService({
     try {
       return await completeIfDone(await repository.station(stationId));
     } catch (error) {
-      log("Station removal not completed: " + (error.code || "error") + ".");
+      log("Station removal not completed: " + (error.details?.code ?? error.code ?? "error") + ".");
       return false;
     }
   }
 
-  // A revoked report from a removing Station (D29) may be the last one its removal waits for.
+  // A revoked report (D29) may be the last one a removal waits for. The Station read before the report may be an active one
+  // whose removal began since, so tryComplete reads it again, after the report has committed.
   async function completingAfter(station, report, answer) {
-    if (station.status === "removing" && report.state === "revoked") await tryComplete(station.id);
+    if (report.state === "revoked") await tryComplete(station.id);
     return answer;
   }
 
   // The one-step removal of a Portal with the setting on whose Auth has no two-phase removal (D29; 404: its setting off, or
   // an older Auth): Auth's DELETE removes the Station and revokes its report client at once, so it can pass nothing on.
   // In one transaction the Station is removed and every integration on it revoked, each with an R9 service flagged
-  // (abandonOn); the Station is pushed once, as today.
+  // (abandonOn); the Station is pushed once, as today. A 404 to the DELETE means Auth has removed it already (an earlier
+  // try whose Portal half failed), so a retry converges; a Station the Portal has removed meanwhile (another path) gets
+  // no second event, log line or push.
   async function removeInOneStep(accountId, station) {
-    await byActor(accountId, () => manage.removeStation(station.id, accountId));
+    await byActor(accountId, async () => {
+      try {
+        await manage.removeStation(station.id, accountId);
+      } catch (error) {
+        if (!(error instanceof ManageError && error.status === 404)) throw error;
+      }
+    });
     const flagged = await appending(async (client) => {
-      await repository.markStationRemoved(station.id, now(), client);
+      if (!(await repository.markStationRemoved(station.id, now(), client))) return null;
       const count = await abandonOn(client, station.id, { actor: accountId, reason: "station_removed" });
       await repository.appendEvent({ stationId: station.id, accountId: station.ownerAccount, actor: accountId, kind: "station_removed", details: { oneStep: true, pendingHostRevocation: count } }, client);
       return count;
     });
+    if (flagged === null) return { removed: true };
     log("Station removed in one step: Auth has no two-phase removal; " + integrationsCount(flagged) + " pending host revocation.");
     changed(station.id);
     return { removed: true };
@@ -1551,10 +1561,16 @@ export function createIntegrationService({
     // Station, which passes the revocations to its hosts and reports; the removal completes once every integration on it
     // is revoked (at once when none was left to pass on) or 26 hours later. The answer is removalAnswer's. An Auth without
     // the route (404) gets today's one-step removal, with every integration revoked at once and flagged where a host may
-    // hold it (removeInOneStep). A Station the Portal already has removing answers as it is, asking Auth nothing. With the
-    // setting off: today's one-step removal, { removed: true }.
+    // hold it (removeInOneStep). A Station the Portal already has removing answers as it is, asking Auth nothing, whatever
+    // the setting (an operator may turn it off while a removal runs, and Auth's DELETE would revoke the Station's report
+    // client with its revocations unpassed); a repeat also retries a completion that failed. With the setting off:
+    // today's one-step removal, { removed: true }.
     async removeStation(accountId, stationId) {
       const station = await ownStation(accountId, stationId);
+      if (station.status === "removing") {
+        await tryComplete(stationId);
+        return removalAnswer(await repository.station(stationId));
+      }
       if (!delegatedHostWork) {
         await byActor(accountId, () => manage.removeStation(stationId, accountId));
         await appending(async (client) => {
@@ -1565,7 +1581,6 @@ export function createIntegrationService({
         changed(stationId);
         return { removed: true };
       }
-      if (station.status === "removing") return removalAnswer(station);
       const begun = await byActor(accountId, async () => {
         try {
           return await manage.beginStationRemoval(stationId, accountId);
