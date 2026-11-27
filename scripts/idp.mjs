@@ -360,6 +360,20 @@ export function createIdp({ issuer: issuerSetting, clientId = "portal", clientSe
       }
       if (typeof payload.sub !== "string" || !ACCOUNT_ID.test(payload.sub)) throw new TokenError(401, "sub");
       return { sub: payload.sub, clientId: payload.client_id, scopes };
+    },
+    // An Agora.Build admin's token for the admin API (D27): the usual checks (issuer, this Portal's audience, ES256, at+jwt,
+    // expiry) and an account as sub. The claims the admin API's gate judges come back as they are: client_id, the scopes,
+    // acr (null unless a string) and auth_time (null unless whole seconds). scripts/admin-api.mjs decides what they allow.
+    async verifyAdminToken(token) {
+      const payload = await verify(token, { audience, typ: "at+jwt", requiredClaims: ["exp", "sub"] });
+      if (!plainString(payload.client_id, 200)) throw new TokenError(401, "client_id");
+      if (typeof payload.sub !== "string" || !ACCOUNT_ID.test(payload.sub)) throw new TokenError(401, "sub");
+      const scopes = typeof payload.scope === "string" ? payload.scope.split(" ").filter(Boolean) : [];
+      return {
+        sub: payload.sub, clientId: payload.client_id, scopes,
+        acr: typeof payload.acr === "string" ? payload.acr : null,
+        authTime: Number.isSafeInteger(payload.auth_time) ? payload.auth_time : null
+      };
     }
   };
 }

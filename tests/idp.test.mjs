@@ -358,6 +358,30 @@ test("bearer: wrong typ, alg none or HS256, wrong iss or aud, expiry, forged sig
   await rejectsToken(idp.verifyAccessToken(undefined), 401);
 });
 
+// D27: the admin API's token. The usual checks are verifyAccessToken's; the claims the gate judges come back as they are.
+test("verifyAdminToken: the usual checks and an account as sub, then the client, scopes, acr and auth_time as they are", async () => {
+  const { fake, idp } = await setup();
+  const sub = fake.accountId();
+  const authTime = Math.floor(Date.now() / 1000) - 42;
+  const token = await fake.issueAccessToken({ sub, client_id: "admin", scope: "portal.admin", acr: "urn:agora:mfa", auth_time: authTime });
+  assert.deepEqual(await idp.verifyAdminToken(token), { sub, clientId: "admin", scopes: ["portal.admin"], acr: "urn:agora:mfa", authTime });
+  assert.deepEqual(await idp.verifyAdminToken(await fake.issueAccessToken({ sub, scope: undefined, acr: 5, auth_time: "1" })), { sub, clientId: "portal", scopes: [], acr: null, authTime: null });
+  assert.equal((await idp.verifyAdminToken(await fake.issueAccessToken({ sub, auth_time: 1.5 }))).authTime, null);
+  const stranger = await generateKeyPair("ES256");
+  const now = Math.floor(Date.now() / 1000);
+  const refused = {
+    "typ JWT": fake.issueAccessToken({ sub }, { typ: "JWT" }),
+    "HS256": fake.issueAccessToken({ sub }, { alg: "HS256" }),
+    "wrong aud": fake.issueAccessToken({ sub, aud: "https://other.example" }),
+    "wrong iss": fake.issueAccessToken({ sub, iss: "https://evil.example" }),
+    "expired": fake.issueAccessToken({ sub, iat: now - 200, exp: now - 100 }),
+    "a Station's report token": fake.issueAccessToken({ sub: "s-" + "0".repeat(26), client_id: "s-" + "0".repeat(26), scope: "station.report" }),
+    "no client_id": fake.issueAccessToken({ sub }, { omit: ["client_id"] }),
+    "forged": fake.issueAccessToken({ sub }, { key: { kid: fake.keys[0].kid, privateKey: stranger.privateKey } })
+  };
+  for (const pending of Object.values(refused)) await rejectsToken(idp.verifyAdminToken(await pending), 401);
+});
+
 test("bearer: key rotation refetches JWKS for an unknown kid", async () => {
   mock.timers.enable({ apis: ["Date"], now: Date.now() });
   const { fake, idp } = await setup();

@@ -21,6 +21,7 @@ import { createSignaling, signalingConfig } from "./spaces/signaling.mjs";
 import { createSpaces, loadWorlds } from "./spaces/service.mjs";
 import { handleSpaces } from "./spaces/routes.mjs";
 import { CHANGES_NUDGE_PATH, handleIntegrations, integrationPath, integrationsFromEnv, NUDGES_PER_MINUTE, readyIntegrations } from "./integrations/routes.mjs";
+import { adminApiPath, adminClientIdFrom, adminTokenOnly, handleAdmin, isAdminToken } from "./admin-api.mjs";
 import { loadThemes } from "./spaces/themes.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -122,6 +123,8 @@ export function createAppServer(directory = root, options = {}) {
   // Delegated host work (D29), off by default: the same variable the integration service reads (integrationsFromEnv).
   const delegatedHostWork = (options.delegatedHostWork ?? process.env.DELEGATED_HOST_WORK) === "1";
   const bearerRoute = (route) => isBearerRoute(route) || (delegatedHostWork && delegatedBearerPatterns.some((pattern) => pattern.test(route)));
+  // The admin API (D27, /api/admin/v1): the ID of Auth's admin client, or null. Unset, every admin path is today's 404.
+  const portalAdminClientId = adminClientIdFrom(options.portalAdminClientId ?? process.env.PORTAL_ADMIN_CLIENT_ID, log);
   const clientAddress = (request) => (trustProxy && String(request.headers["x-forwarded-for"] || "").split(",").map((hop) => hop.trim()).filter(Boolean).at(-1)) || request.socket.remoteAddress;
   // Platform billing clients and their server-side prices; null turns platform billing off.
   const billingClients = "billingClients" in options ? (options.billingClients && parseBillingClients(options.billingClients)) : loadBillingClients(process.env.PORTAL_BILLING_FILE, log);
@@ -198,6 +201,16 @@ export function createAppServer(directory = root, options = {}) {
         if (!integrations) { done(404); return; }
         integrations.nudge();
         done(204);
+        return;
+      }
+      if (adminApiPath(path)) {
+        // The admin API (D27): a 60-second portal.admin token only, never a cookie. It is answered before any cookie or
+        // session lookup, so it costs no store work and never makes an account: all it reads is in the Portal database.
+        const handled = await handleAdmin({
+          method: request.method, path, url: requestUrl, authorization: request.headers.authorization, read: () => body(request), idp,
+          integrations, adminClientId: portalAdminClientId, delegatedHostWork, limit, now: clock
+        });
+        json(response, handled.status, handled.body);
         return;
       }
       const bearer = request.headers.authorization?.startsWith("Bearer ") ? request.headers.authorization.slice(7).trim() : "";
@@ -324,6 +337,9 @@ export function createAppServer(directory = root, options = {}) {
             throw invalidToken();
           }
         }
+        // An Agora.Build admin's token (D27) works on the admin API only. Refused here, before any route, so it never
+        // reaches a handler and never makes an account.
+        if (caller && isAdminToken(caller, portalAdminClientId)) throw adminTokenOnly();
         const token = caller ? "" : browserToken;
         const route = request.method + " " + path;
         if (caller?.station && !stationReportRoutes.has(route)) throw reportTokenOnly();

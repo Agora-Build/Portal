@@ -1,0 +1,267 @@
+// The admin API's gate (D27 slice 1, docs/integrations.md §3.3.5): Auth's 60-second portal.admin token, the admins from
+// Auth's built-in listing, the auth_time windows and the per-admin limits, over HTTP against a real service on the test
+// database. Slice 1's routes need DELEGATED_HOST_WORK (Task 4's tests, below); the gate's own tests use a path no route
+// has, which answers 404 not_found only once the gate has passed.
+import { after, before, test } from "node:test";
+import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import { createAppServer } from "../scripts/serve.mjs";
+import { AppError, createStore } from "../scripts/store.mjs";
+import { createModelClient, modelConfig } from "../scripts/models.mjs";
+import { agoraConfig, createAgoraCalls } from "../scripts/calls.mjs";
+import { createSignaling, signalingConfig } from "../scripts/spaces/signaling.mjs";
+import { createIdp } from "../scripts/idp.mjs";
+import { createRepository } from "../scripts/integrations/repository.mjs";
+import { createIntegrationService } from "../scripts/integrations/service.mjs";
+import { createFakeIdp } from "./helpers/fake-idp.mjs";
+import { fakeManage } from "./helpers/fake-manage.mjs";
+import { testDatabase } from "./helpers/test-db.mjs";
+
+const root = new URL("../", import.meta.url).pathname;
+const issuer = "https://auth.example";
+const clientSecret = "portal-admin-test-secret-".padEnd(48, "x");
+const siteUrl = "http://localhost:3080";
+const env = { AGORA_APP_ID: "a".repeat(32), AGORA_APP_CERTIFICATE: "b".repeat(32), SPACES_SIGNALING_SECRET: "s".repeat(32) };
+const ADMIN_CLIENT = "admin";
+const OWNER = "ab" + "0".repeat(25) + "1";
+const ADMIN = "ab" + "0".repeat(25) + "4";
+const ADMIN_TOO = "ab" + "0".repeat(25) + "5";
+// Past the gate, a path no route has.
+const PASSED = "/api/admin/v1/no-such-route";
+const passed = [404, { error: "This admin route was not found.", code: "not_found" }];
+const TOKEN = [401, { error: "A valid Agora.Build admin token is required.", code: "token" }];
+const UNAVAILABLE = [503, { error: "The admin API is unavailable right now. Try again shortly.", code: "unavailable" }];
+const ADMIN_ONLY = [403, { error: "An Agora.Build admin token works only on the admin API, /api/admin/v1." }];
+const seconds = () => Math.floor(Date.now() / 1000);
+let temporary;
+before(async () => { temporary = await mkdtemp(resolve(tmpdir(), "admin-api-")); });
+after(() => rm(temporary, { recursive: true, force: true }));
+const close = (instance) => new Promise((done) => { instance.close(done); instance.closeIdleConnections(); });
+
+// A real service on the test database, with the built-in Station Auth seeds (admins ADMIN and ADMIN_TOO), synced unless
+// `synced` is false; null (and the test skipped) without PORTAL_TEST_DATABASE_URL. node:test runs a test's after hooks in
+// the order they were added, and a push still in flight reads the database, so the database is closed by our own hook, once
+// the service's pushes are done.
+async function stack(t, { delegatedHostWork = false, synced = true } = {}) {
+  const closing = [];
+  let service = null;
+  t.after(async () => {
+    await service?._pushesIdle();
+    for (const hook of closing) await hook();
+  });
+  const db = await testDatabase({ after: (hook) => closing.push(hook) });
+  if (!db) { t.skip("PORTAL_TEST_DATABASE_URL is not set."); return null; }
+  const manage = fakeManage({ delegated: delegatedHostWork });
+  const built = manage.seedBuiltIn({ integrations: true, admins: [ADMIN, ADMIN_TOO] });
+  const pushes = [];
+  service = createIntegrationService({
+    repository: createRepository(db), db, manage, stationFetch: { async get() { return { status: 404, body: "" }; } },
+    pushFetch: { async post(url, body) { pushes.push({ url, body }); return { status: 202 }; } }, exchange: async () => ({}), log: () => {}, delegatedHostWork
+  });
+  if (synced) assert.equal(await service.syncBuiltIn(), true);
+  await service._pushesIdle();
+  return { db, manage, built, service, pushes };
+}
+
+// The Portal with the stand-in IdP. `integrations` is the service (or null: no Portal database), `adminClientId` is
+// PORTAL_ADMIN_CLIENT_ID (null: unset), `idp: false` is a Portal without Auth's settings.
+async function start(t, { integrations = null, adminClientId = ADMIN_CLIENT, delegatedHostWork = false, idp: withIdp = true, ...options } = {}) {
+  const saved = process.env.DATABASE_URL;
+  delete process.env.DATABASE_URL;
+  t.after(() => { if (saved !== undefined) process.env.DATABASE_URL = saved; });
+  const fake = await createFakeIdp({ issuer, clientId: "portal", clientSecret });
+  const idp = withIdp ? createIdp({ issuer, clientId: "portal", clientSecret, siteUrl, request: fake.request }) : null;
+  const store = createStore(resolve(root, "data/people.json"), resolve(temporary, randomBytes(8).toString("hex") + ".json"), { log: () => {} });
+  const instance = createAppServer(root, {
+    monitor: false, store, idp, siteUrl, billingClients: null, log: () => {}, models: createModelClient(modelConfig({})),
+    calls: createAgoraCalls(agoraConfig(env)), signaling: createSignaling(signalingConfig(env)), channelSecret: env.SPACES_SIGNALING_SECRET,
+    integrations, portalAdminClientId: adminClientId ?? "", delegatedHostWork: delegatedHostWork ? "1" : "0", ...options
+  });
+  await new Promise((done) => instance.listen(0, "127.0.0.1", done));
+  t.after(() => close(instance));
+  return { fake, store, base: "http://127.0.0.1:" + instance.address().port };
+}
+
+// A token as Auth's portal.admin exchange issues it (60 s), its passkey sign-in `age` seconds ago; `claims` override it.
+const adminToken = (app, { sub = ADMIN, age = 10, ...claims } = {}, opts = {}) => app.fake.issueAccessToken({
+  sub, client_id: ADMIN_CLIENT, scope: "portal.admin", acr: "urn:agora:mfa", auth_time: seconds() - age, exp: seconds() + 60, ...claims
+}, opts);
+const call = (app, path, { bearer, cookie, method = "GET", data, headers = {} } = {}) => fetch(app.base + path, {
+  method, redirect: "manual",
+  headers: { ...(bearer ? { Authorization: "Bearer " + bearer } : {}), ...(cookie ? { Cookie: cookie } : {}), ...(data !== undefined ? { "Content-Type": "application/json" } : {}), ...headers },
+  ...(data !== undefined ? { body: JSON.stringify(data) } : {})
+});
+const answer = async (response) => [response.status, await response.json()];
+const pair = (line) => line.split(";")[0];
+const cookieNamed = (response, name) => response.headers.getSetCookie().find((line) => line.startsWith(name + "="));
+// Signs in through /auth/login, the stand-in IdP and /auth/callback, as a browser does; returns the session cookie.
+async function signIn(app, sub) {
+  const login = await call(app, "/auth/login?returnTo=%2Faccount%2F");
+  const transaction = cookieNamed(login, "portal_auth");
+  const callback = new URL(app.fake.authorize(login.headers.get("location"), { sub }));
+  const back = await call(app, callback.pathname + callback.search, { cookie: pair(transaction) });
+  return { sub, cookie: pair(cookieNamed(back, "house_session")) };
+}
+
+test("without PORTAL_ADMIN_CLIENT_ID, or without the Portal database, every admin path is today's 404, a valid admin token included", async (t) => {
+  const s = await stack(t);
+  if (!s) return;
+  for (const [label, settings] of [["no client ID", { integrations: s.service, adminClientId: null }], ["no database", { integrations: null }]]) {
+    const app = await start(t, settings);
+    const token = await adminToken(app);
+    for (const [method, path] of [["GET", "/api/admin/v1/bindings?account=" + OWNER], ["POST", "/api/admin/v1/bindings/release"], ["GET", "/api/admin/v1"], ["DELETE", PASSED]]) {
+      for (const bearer of [token, undefined, "not.a.jwt"]) {
+        const response = await call(app, path, { method, bearer, ...(method === "POST" ? { data: {} } : {}) });
+        assert.deepEqual(await answer(response), [404, { error: "This page or service was not found." }], label + ": " + method + " " + path);
+      }
+    }
+  }
+});
+
+test("a valid admin token passes the gate, portal.admin among other scopes too, whatever DELEGATED_HOST_WORK is", async (t) => {
+  const s = await stack(t);
+  if (!s) return;
+  for (const delegatedHostWork of [false, true]) {
+    const app = await start(t, { integrations: s.service, delegatedHostWork });
+    assert.deepEqual(await answer(await call(app, PASSED, { bearer: await adminToken(app) })), passed);
+    assert.deepEqual(await answer(await call(app, PASSED, { bearer: await adminToken(app, { scope: "openid portal.admin" }) })), passed);
+    assert.deepEqual(await answer(await call(app, "/api/admin/v1", { method: "POST", bearer: await adminToken(app) })), passed);
+  }
+});
+
+test("a missing, malformed or invalid token is 401 token, and a cookie never counts", async (t) => {
+  const s = await stack(t);
+  if (!s) return;
+  const app = await start(t, { integrations: s.service });
+  const past = seconds() - 120;
+  const refused = {
+    "no token": undefined,
+    "garbage": "not.a.jwt",
+    "wrong typ": await adminToken(app, {}, { typ: "JWT" }),
+    "HS256": await adminToken(app, {}, { alg: "HS256" }),
+    "wrong issuer": await adminToken(app, { iss: "https://evil.example" }),
+    "wrong audience": await adminToken(app, { aud: "https://agora.build" }),
+    "expired": await adminToken(app, { iat: past - 60, exp: past }),
+    "sub not an account": await adminToken(app, { sub: "s-" + "0".repeat(26) }),
+    "no auth_time": await adminToken(app, {}, { omit: ["auth_time"] }),
+    "auth_time not a number": await adminToken(app, { auth_time: String(seconds()) }),
+    "auth_time two minutes ahead": await adminToken(app, { auth_time: seconds() + 120 })
+  };
+  for (const [label, bearer] of Object.entries(refused)) {
+    for (const method of ["GET", "POST"]) {
+      const response = await call(app, PASSED, { method, bearer });
+      assert.equal(response.headers.get("www-authenticate"), 'Bearer error="invalid_token"', label);
+      assert.deepEqual(await answer(response), TOKEN, label + " " + method);
+    }
+  }
+  assert.deepEqual(await answer(await call(app, PASSED, { headers: { Authorization: "Basic YWRtaW46eA==" } })), TOKEN, "not a bearer token");
+  // A signed-in admin's session cookie is never a credential here; with a token, the token decides.
+  const { cookie } = await signIn(app, ADMIN);
+  assert.deepEqual(await answer(await call(app, PASSED, { cookie })), TOKEN);
+  assert.deepEqual(await answer(await call(app, PASSED, { cookie, bearer: await adminToken(app) })), passed);
+});
+
+test("a token that isn't the admin client's portal.admin token at the MFA level is 403 insufficient_scope", async (t) => {
+  const s = await stack(t);
+  if (!s) return;
+  const app = await start(t, { integrations: s.service });
+  const insufficient = [403, { error: "This token is not an Agora.Build admin token.", code: "insufficient_scope" }];
+  for (const [label, claims] of [["another client", { client_id: "portal" }], ["no portal.admin", { scope: "credits" }], ["no scope", { scope: undefined }], ["no acr", { acr: undefined }], ["the federated level", { acr: "urn:agora:fed" }]]) {
+    const response = await call(app, PASSED, { bearer: await adminToken(app, claims) });
+    assert.equal(response.headers.get("www-authenticate"), 'Bearer error="insufficient_scope", scope="portal.admin"', label);
+    assert.deepEqual(await answer(response), insufficient, label);
+  }
+  // Checked before the admin set: a stranger's token of another client is insufficient_scope, not not_admin.
+  assert.deepEqual(await answer(await call(app, PASSED, { bearer: await adminToken(app, { sub: OWNER, client_id: "portal" }) })), insufficient);
+});
+
+test("only an admin Auth lists for an active built-in Station passes: none before the first sync, and one removed is refused after the next sync", async (t) => {
+  const s = await stack(t, { synced: false });
+  if (!s) return;
+  const app = await start(t, { integrations: s.service });
+  const notAdmin = [403, { error: "This account is not an Agora.Build admin.", code: "not_admin" }];
+  assert.deepEqual(await answer(await call(app, PASSED, { bearer: await adminToken(app) })), notAdmin, "before the first sync there are none");
+  await s.service.syncBuiltIn();
+  assert.deepEqual(await answer(await call(app, PASSED, { bearer: await adminToken(app) })), passed);
+  assert.deepEqual(await answer(await call(app, PASSED, { bearer: await adminToken(app, { sub: OWNER }) })), notAdmin, "an ordinary account");
+  s.built.admins = [ADMIN_TOO];
+  assert.deepEqual(await answer(await call(app, PASSED, { bearer: await adminToken(app) })), passed, "until the next sync");
+  await s.service.syncBuiltIn();
+  assert.deepEqual(await answer(await call(app, PASSED, { bearer: await adminToken(app) })), notAdmin, "removed at Auth: refused after the sync");
+  assert.deepEqual(await answer(await call(app, PASSED, { bearer: await adminToken(app, { sub: ADMIN_TOO }) })), passed);
+  // A non-admin's old token is not_admin, not mfa_required: a fresh sign-in wouldn't help.
+  assert.deepEqual(await answer(await call(app, PASSED, { bearer: await adminToken(app, { sub: OWNER, age: 2000 }) })), notAdmin);
+});
+
+test("a read rests on a passkey sign-in up to 900 s old and a change up to 300 s; older is 401 mfa_required", async (t) => {
+  const s = await stack(t);
+  if (!s) return;
+  const app = await start(t, { integrations: s.service });
+  const mfa = (max) => ({ max, expected: [401, { error: "Sign in again with your passkey to continue.", code: "mfa_required" }] });
+  const cases = [
+    ["GET", 10, null], ["GET", -25, null], ["GET", 899, null], ["GET", 901, mfa(900)],
+    ["POST", 10, null], ["POST", 299, null], ["POST", 301, mfa(300)], ["POST", 899, mfa(300)], ["DELETE", 301, mfa(300)]
+  ];
+  for (const [method, age, refusal] of cases) {
+    const response = await call(app, PASSED, { method, bearer: await adminToken(app, { age }) });
+    if (!refusal) { assert.deepEqual(await answer(response), passed, method + " " + age); continue; }
+    assert.equal(response.headers.get("www-authenticate"), 'Bearer error="insufficient_user_authentication", error_description="A more recent passkey sign-in is required", max_age=' + refusal.max, method + " " + age);
+    assert.deepEqual(await answer(response), refusal.expected, method + " " + age);
+  }
+});
+
+test("each admin may make 120 reads and 30 changes a minute, then 429 rate_limited; refused requests spend nothing", async (t) => {
+  const s = await stack(t);
+  if (!s) return;
+  const app = await start(t, { integrations: s.service });
+  const bearer = await adminToken(app);
+  for (let n = 1; n <= 120; n += 1) assert.equal((await call(app, PASSED, { bearer })).status, 404, "read " + n);
+  const limited = await call(app, PASSED, { bearer });
+  assert.equal(limited.headers.get("retry-after"), "60");
+  assert.deepEqual(await answer(limited), [429, { error: "Too many admin requests. Try again in a minute.", code: "rate_limited" }]);
+  for (let n = 1; n <= 30; n += 1) assert.equal((await call(app, PASSED, { bearer, method: "POST" })).status, 404, "change " + n);
+  assert.equal((await call(app, PASSED, { bearer, method: "POST" })).status, 429);
+  // The other admin has their own budgets, and a refused request (here a stale change) doesn't count against them.
+  const stale = await adminToken(app, { sub: ADMIN_TOO, age: 400 });
+  for (let n = 1; n <= 30; n += 1) assert.equal((await call(app, PASSED, { bearer: stale, method: "POST" })).status, 401);
+  assert.equal((await call(app, PASSED, { bearer: await adminToken(app, { sub: ADMIN_TOO }), method: "POST" })).status, 404);
+  assert.equal((await call(app, PASSED, { bearer: await adminToken(app, { sub: ADMIN_TOO }) })).status, 404);
+});
+
+test("with Auth's settings missing or the Portal database down, the gate answers 503 unavailable", async (t) => {
+  const s = await stack(t);
+  if (!s) return;
+  const noIdp = await start(t, { integrations: s.service, idp: false });
+  assert.deepEqual(await answer(await call(noIdp, PASSED, { bearer: "x.y.z" })), UNAVAILABLE);
+  const down = await start(t, {
+    integrations: s.service,
+    integrationStack: { service: null, ready: async () => { throw new AppError(503, "Stations and integrations are unavailable right now. Try again shortly."); }, nudge() {}, close: async () => {} }
+  });
+  assert.deepEqual(await answer(await call(down, PASSED, { bearer: await adminToken(down) })), UNAVAILABLE);
+});
+
+// Routes an admin token reaches today (a valid token with a sub): each now refuses it before anything else.
+const OTHER_ROUTES = [
+  ["GET", "/api/v1/me"], ["GET", "/api/me"], ["GET", "/api/v1/integrations"], ["GET", "/api/v1/credits/balance"], ["GET", "/api/v1/connections"],
+  ["POST", "/api/v1/stations/reports"], ["GET", "/api/v1/stations/changes"], ["POST", "/api/v1/platform/credits/reserve"], ["GET", "/api/people"], ["GET", "/api/stations"]
+];
+
+test("an admin token works on no other route and never makes an account", async (t) => {
+  for (const adminClientId of [ADMIN_CLIENT, null]) {
+    const app = await start(t, { adminClientId });
+    // The scope alone makes a token an admin token; with the setting, so does the admin client.
+    const tokens = [await adminToken(app), await adminToken(app, { client_id: "astation" })];
+    if (adminClientId) tokens.push(await adminToken(app, { scope: "credits" }));
+    for (const bearer of tokens) {
+      for (const [method, path] of OTHER_ROUTES) {
+        assert.deepEqual(await answer(await call(app, path, { method, bearer, ...(method === "POST" ? { data: {} } : {}) })), ADMIN_ONLY, String(adminClientId) + " " + method + " " + path);
+      }
+    }
+    assert.equal(((await app.store.snapshot()).accounts ?? []).some((account) => account.id === ADMIN), false, "no account is made for it");
+    // Without the setting, the admin client's token without portal.admin is an ordinary app token, as today.
+    if (!adminClientId) assert.equal((await call(app, "/api/v1/me", { bearer: await adminToken(app, { sub: OWNER, scope: "credits" }) })).status, 200);
+  }
+});
