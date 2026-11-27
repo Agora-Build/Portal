@@ -66,10 +66,16 @@ const FEED_LIMIT = 500;
 // Station records' own retention) is still listed, with the loss stated.
 const DIRECTORY_PAGE = 100;
 const DIRECTORY_LOST_FOR = 30 * DAY;
+// A two-phase removal (D29) is due 26 hours after it began (completeBy), and completes at the first hourly check at or after
+// that: a Station's own final report comes at most 24 hours after a revocation starts, and an hour's slack each way.
+const REMOVAL_DEADLINE = 26 * 3600000;
 const LIMIT_DIGITS = /^[0-9]{1,3}$/;
 const CURSOR_CHARACTERS = /^[A-Za-z0-9_-]{1,512}$/;
 const CURSOR_TIME = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
 const CHANGES_PATH = "/agora-build/v1/changes";
+// Two-phase Station removal (D29): the Portal's own record of a removal's begin, which the Station's feed never carries (the
+// Station learns of its removal from its integrations' integration_revoked changes, as Atem's §9 has it).
+const REMOVING_KIND = "station_removing";
 
 const failure = (status, message, code, extra = {}) => new AppError(status, message, { code, ...extra });
 const notFound = () => failure(404, "This Station or integration was not found.", "not_found");
@@ -78,6 +84,8 @@ const unknownStation = () => failure(403, "This Station is not registered.", "st
 const expiredChallenge = () => failure(400, "This check has expired or was already used. Start again.", "challenge");
 // D29: with the setting on, a revocation says whether to interrupt the tasks running on the owner's hosts.
 const interruptRunningRequired = () => failure(400, "Say whether to interrupt running tasks: send interruptRunning as true or false.", "interrupt_running");
+// D29: a removing Station still reads its feed and reports, and is used for nothing else.
+const stationRemoving = () => failure(409, "This Station is being removed.", "station_removing");
 const REPORT_FORM = "Send a report as { integrationId, state, reason }.";
 const DELEGATED_REPORT_FORMS = REPORT_FORM.slice(0, -1) + ', { integrationId, state: "revocation_applied", reportId, host, recordId } or { integrationId, state: "revoked", reportId, outcome, pendingHosts }.';
 const IDENTIFIER = "1 to 128 characters of letters, digits, '.', '_', ':' or '-'.";
@@ -147,6 +155,14 @@ const WAITING_LINE = "Account availability waits for Auth's change feed to be re
 const WAITING_AGAIN_MS = 3600000;
 // "1 account", "2 accounts": the count in a counts-only line.
 const accountsCount = (count) => count + (count === 1 ? " account" : " accounts");
+const integrationsCount = (count) => count + (count === 1 ? " integration" : " integrations");
+// The line logged for a completed removal, by how it completed (D29, completedBy), given how many integrations it flagged.
+function completedLine(completedBy, flagged) {
+  if (completedBy === "all_revoked") return "Station removal completed: every integration revoked.";
+  if (completedBy === "deadline") return "Station removal completed after 26 hours: " + integrationsCount(flagged) + " pending host revocation.";
+  if (completedBy === "auth_removed") return "Station removal completed: Auth has it removed; " + integrationsCount(flagged) + " pending host revocation.";
+  return "Station removal completed: " + integrationsCount(flagged) + " pending host revocation.";
+}
 const WAITING = Symbol("waiting");
 // How the Station's feed and an integration's history name a change an Agora.Build admin made (spec §3.3.4): the admin
 // and the reason they gave stay in the Portal's event (actor, reason) and in Auth's audit.
@@ -185,11 +201,12 @@ async function viaAuth(call) {
 }
 
 // Members are not shown the Station's report client; it is not secret, but they have no use for it. Nobody is shown a
-// built-in Station's report client (its role is built_in).
+// built-in Station's report client (its role is built_in). A removing Station (D29) also says when its removal began and
+// its completeBy (the first hourly check at or after it completes the removal), and takes no integration.
 function stationView(station, role) {
   const view = {
-    id: station.id, origin: station.origin, role, ownerAccount: station.ownerAccount, status: station.status, createdAt: station.createdAt,
-    builtIn: station.builtIn, name: station.name, integrationsEnabled: station.integrationsEnabled
+    id: station.id, origin: station.origin, role, ownerAccount: station.ownerAccount, status: station.status, ...removalOf(station), createdAt: station.createdAt,
+    builtIn: station.builtIn, name: station.name, integrationsEnabled: station.integrationsEnabled && station.status !== "removing"
   };
   if (role === "owner") view.reportClientId = station.reportClientId;
   return view;
@@ -226,13 +243,22 @@ function directoryCursor(value) {
 }
 const directoryCursorFor = (entry) => Buffer.from(JSON.stringify([entry.builtIn, entry.createdAt, entry.id])).toString("base64url");
 
+// What removing a Station answers (D29): { removed: true }, or, while it is removing, its completeBy (the first hourly check
+// at or after it completes the removal).
+const completeByOf = (station) => new Date(Date.parse(station.removalStartedAt) + REMOVAL_DEADLINE).toISOString();
+const removalAnswer = (station) => (station.status === "removing" ? { removed: false, removing: true, completeBy: completeByOf(station) } : { removed: true });
+// The fields a removing Station's views add: when its removal began and its completeBy (the first hourly check at or after
+// it completes the removal).
+const removalOf = (station) => (station.status === "removing" ? { removalStartedAt: station.removalStartedAt, completeBy: completeByOf(station) } : {});
+
 // A Station as the directory shows it: routing and availability only, never its report client, its owner or its members.
-// integrationsEnabled says whether an integration can be created there now: not on a removed Station, and not by a member
-// whose membership ended.
+// integrationsEnabled says whether an integration can be created there now: not on a removing (D29) or removed Station, and
+// not by a member whose membership ended. A removing Station also says when its removal began and its
+// completeBy (the first hourly check at or after it completes the removal).
 function directoryEntry(row) {
   return {
     id: row.id, origin: row.origin, name: row.name, builtIn: row.builtIn, access: row.access, role: row.role, status: row.status,
-    removedAt: row.removedAt, membership: row.membership, membershipEndedAt: row.membershipEndedAt,
+    removedAt: row.removedAt, ...removalOf(row), membership: row.membership, membershipEndedAt: row.membershipEndedAt,
     integrationsEnabled: row.status === "active" && row.integrationsEnabled && (row.role !== "member" || row.membership === "current"),
     createdAt: row.createdAt
   };
@@ -646,21 +672,209 @@ export function createIntegrationService({
     return revoked;
   }
 
-  // Inside the caller's transaction, retires an active Portal Station at `origin` other than `id`: Auth has given the
-  // origin to `id`, so the old Station is gone there, with its integrations. Returns the retired Station's ID or null.
+  // Inside the caller's transaction, retires a Portal Station at `origin` (active, or removing: D29) other than `id`: Auth
+  // has given the origin to `id`, so the old Station is gone there, with its integrations (removeGoneOn). Returns the
+  // retired Station's ID or null.
   async function retireStale(client, origin, id) {
     const stale = await repository.activeStationAt(origin, client);
     if (!stale || stale.id === id) return null;
-    await repository.markStationRemoved(stale.id, now(), client);
-    await revokeOn(client, stale.id, () => true, { actor: "system", reason: "reconciled", direct: true });
-    await repository.appendEvent({ stationId: stale.id, accountId: stale.ownerAccount ?? SYSTEM, actor: SYSTEM, kind: "station_removed", reason: "reconciled" }, client);
+    await removeGoneOn(client, stale.id);
     return stale.id;
   }
+
+  // Inside the caller's transaction, under the event lock, removes a Station Auth has removed behind the Portal's back
+  // (reconcile, retireStale), deciding on the row as it is now, whatever the setting. One the Portal has removing (D29) is
+  // completed as its removal would be (completeOn, `auth_removed`): a removal begun keeps its flags and its event. An active
+  // one is gone without the two phases: its integrations are revoked at once (revokeGone). Returns null when the Portal has
+  // it removed already, else { completed, flagged }: whether it completed a removal, and how many integrations that flagged.
+  async function removeGoneOn(client, stationId) {
+    const station = await repository.station(stationId, client);
+    if (station?.status === "removing") return { completed: true, flagged: await completeOn(client, station, "auth_removed") };
+    if (station?.status !== "active") return null;
+    await repository.markStationRemoved(stationId, now(), client);
+    await revokeGone(client, stationId);
+    await repository.appendEvent({ stationId, accountId: station.ownerAccount ?? SYSTEM, actor: SYSTEM, kind: "station_removed", reason: "reconciled" }, client);
+    return { completed: false, flagged: 0 };
+  }
+
+  // The revocations of an active Station Auth has removed behind the Portal's back: at once, and with the setting on (D29)
+  // flagged where a host may hold them, since the Station never passed them on (abandonOn).
+  const revokeGone = (client, stationId) => (delegatedHostWork
+    ? abandonOn(client, stationId, { actor: SYSTEM, reason: "reconciled" })
+    : revokeOn(client, stationId, () => true, { actor: SYSTEM, reason: "reconciled", direct: true }));
 
   function retired(stationId) {
     if (!stationId) return;
     log("Station removed in Portal: its origin belongs to another Station at Auth.");
     changed(stationId);
+  }
+
+  // A Station gone without its removal's two phases, or at their end (D29): it can pass no revocation on any more.
+  // Inside the caller's transaction every integration on it that isn't revoked yet is revoked: a live one at once, as
+  // revokeOn's direct revocation does (no interrupt), and one still revoking without the final report it will never get
+  // (its own choice kept). Each of them that has an R9 service (r9Svc: a host may hold it) is flagged pending host
+  // revocation, for the owner's native revoke in Astation. Returns how many it flagged.
+  async function abandonOn(client, stationId, { actor, reason }) {
+    const before = await repository.integrationsOnStation(stationId, client);
+    await revokeOn(client, stationId, () => true, { actor, reason, direct: true });
+    let flagged = 0;
+    for (const listed of before) {
+      if (listed.state === "revoked") continue;
+      const row = await repository.integrationForUpdate(listed.id, client);
+      if (row.state === "revoking") {
+        await repository.updateIntegration(row.id, { state: "revoked", resumeState: null }, client);
+        await repository.appendEvent({ stationId, integrationId: row.id, accountId: row.ownerAccount, actor, kind: "integration_revoked", state: "revoked", reason, details: { interruptRunning: row.interruptRunning, finalReport: false } }, client);
+      }
+      if (row.r9Svc !== null && !row.pendingHostRevocation) {
+        await repository.updateIntegration(row.id, { pendingHostRevocation: true }, client);
+        flagged += 1;
+      }
+    }
+    return flagged;
+  }
+
+  // The Portal's part of beginning a two-phase removal (D29), once Auth has the Station removing: in one transaction under
+  // the event lock the Station becomes removing, dated now; every integration on it is revoked as an indirect revocation
+  // (revokeOn, reason station_removed, no interrupt: one awaiting approval at once, the others revoking until their
+  // Station's final report); and a station_removing event names the integrations still revoking, the ones the Station has
+  // yet to pass on (the account page counts them). Returns false when the Portal had it removing or removed already. The
+  // caller pushes the Station: its feed carries the integration_revoked changes.
+  function beginRemovalHere(station, actor) {
+    return appending(async (client) => {
+      if (!(await repository.markStationRemoving(station.id, now(), client))) return false;
+      await revokeOn(client, station.id, () => true, { actor, reason: "station_removed" });
+      const revoking = (await repository.integrationsOnStation(station.id, client)).filter((row) => row.state === "revoking").map((row) => row.id);
+      await repository.appendEvent({ stationId: station.id, accountId: station.ownerAccount, actor, kind: REMOVING_KIND, details: { revoking } }, client);
+      return true;
+    });
+  }
+
+  // Auth's part of completing a two-phase removal (D29): complete-removal removes the Station and revokes its report client
+  // (204, again for one already removed). An Auth without the route (404: its setting turned off while the Station was
+  // removing) gets its one-step DELETE instead, named as the owner who began the removal, which removes a removing Station
+  // too; a 404 to that as well means Auth has the Station no more. Any other refusal is logged and leaves it removing, for
+  // the next check. Returns whether Auth has it removed.
+  async function completedAtAuth(station) {
+    for (const call of [() => manage.completeStationRemoval(station.id, SYSTEM), () => manage.removeStation(station.id, station.ownerAccount)]) {
+      try {
+        await call();
+        return true;
+      } catch (error) {
+        if (!(error instanceof ManageError)) throw error;
+        if (error.status !== 404) {
+          log("Station removal not completed: Auth " + error.code + ".");
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  // Completes a removing Station's removal (D29): Auth first (completedAtAuth), then the Portal's part (completeHere).
+  // Returns whether this call completed it.
+  async function finishRemoval(station, completedBy) {
+    if (!(await completedAtAuth(station))) return false;
+    return completeHere(station, completedBy);
+  }
+
+  // Inside the caller's transaction, under the event lock, the Portal's part of completing a removal (D29), once Auth has
+  // the Station removed, and only while the Portal still has it removing (so two replicas, or a replica and a reconcile,
+  // complete it once): it is removed, every integration on it not revoked yet revoked and, with an R9 service, flagged
+  // (abandonOn), and a station_removed event says how it completed (`completedBy`: all_revoked, deadline, or auth_removed
+  // when a listing found Auth had removed it). Returns how many integrations it flagged, or null when the Portal no longer
+  // has it removing.
+  async function completeOn(client, station, completedBy) {
+    if ((await repository.station(station.id, client))?.status !== "removing") return null;
+    await repository.markStationRemoved(station.id, now(), client);
+    const count = await abandonOn(client, station.id, { actor: SYSTEM, reason: "station_removed" });
+    await repository.appendEvent({ stationId: station.id, accountId: station.ownerAccount, actor: SYSTEM, kind: "station_removed", reason: "removal_completed", details: { completedBy, pendingHostRevocation: count } }, client);
+    return count;
+  }
+
+  // The Portal's part of completing a removal in its own transaction (completeOn). The Station is pushed once more after the
+  // commit: its token is refused from now on, which is how it learns to stop. Returns whether this call completed it.
+  async function completeHere(station, completedBy) {
+    const flagged = await appending((client) => completeOn(client, station, completedBy));
+    if (flagged === null) return false;
+    log(completedLine(completedBy, flagged));
+    changed(station.id);
+    return true;
+  }
+
+  // Completes a removing Station's removal once it is done (D29): every integration on it revoked (each final report
+  // received, or none needed), or 26 hours since it began, whatever is left. Returns whether this call completed it.
+  async function completeIfDone(station) {
+    if (station?.status !== "removing") return false;
+    if ((await repository.integrationsOnStation(station.id)).every((row) => row.state === "revoked")) return finishRemoval(station, "all_revoked");
+    if (now() - Date.parse(station.removalStartedAt) >= REMOVAL_DEADLINE) return finishRemoval(station, "deadline");
+    return false;
+  }
+
+  // completeIfDone for one Station after a change that may have finished its removal (its begin, a final report), which has
+  // committed already: a failure is logged and never fails that change.
+  async function tryComplete(stationId) {
+    try {
+      return await completeIfDone(await repository.station(stationId));
+    } catch (error) {
+      log("Station removal not completed: " + (error.details?.code ?? error.code ?? "error") + ".");
+      return false;
+    }
+  }
+
+  // Auth lists a Station as removing that the Portal has active (D29): Auth began its removal, but the Portal's part was
+  // lost (the owner's request failed after Auth answered), or the Portal has just reconciled the Station from Auth. With
+  // the setting on, the Portal begins its part now, as the system, pushes the Station and completes the removal at once
+  // if nothing is left to pass on.
+  async function followRemoving(stationId) {
+    const station = await repository.station(stationId);
+    if (station?.status !== "active" || station.builtIn) return;
+    if (!(await beginRemovalHere(station, SYSTEM))) return;
+    log("Station removal begun in Portal: Auth has it removing.");
+    changed(stationId);
+    await tryComplete(stationId);
+  }
+
+  // How far a removing Station's removal has got (D29), for the account page: of the integrations it waits for (those still
+  // revoking when it began, as its station_removing event names them), how many are revoked now. Its owner counts them all,
+  // a member only its own.
+  async function removalProgress(station, accountId) {
+    const begun = await repository.latestStationEvent(station.id, REMOVING_KIND);
+    const waited = new Set(Array.isArray(begun?.details?.revoking) ? begun.details.revoking : []);
+    const rows = (await repository.integrationsOnStation(station.id)).filter((row) => waited.has(row.id) && (station.role === "owner" || row.ownerAccount === accountId));
+    return { done: rows.filter((row) => row.state === "revoked").length, total: rows.length };
+  }
+
+  // A revoked report (D29) may be the last one a removal waits for. The Station read before the report may be an active one
+  // whose removal began since, so tryComplete reads it again, after the report has committed.
+  async function completingAfter(station, report, answer) {
+    if (report.state === "revoked") await tryComplete(station.id);
+    return answer;
+  }
+
+  // The one-step removal of a Portal with the setting on whose Auth has no two-phase removal (D29; 404: its setting off, or
+  // an older Auth): Auth's DELETE removes the Station and revokes its report client at once, so it can pass nothing on.
+  // In one transaction the Station is removed and every integration on it revoked, each with an R9 service flagged
+  // (abandonOn); the Station is pushed once, as today. A 404 to the DELETE means Auth has removed it already (an earlier
+  // try whose Portal part failed), so a retry converges; a Station the Portal has removed meanwhile (another path) gets
+  // no second event, log line or push.
+  async function removeInOneStep(accountId, station) {
+    await byActor(accountId, async () => {
+      try {
+        await manage.removeStation(station.id, accountId);
+      } catch (error) {
+        if (!(error instanceof ManageError && error.status === 404)) throw error;
+      }
+    });
+    const flagged = await appending(async (client) => {
+      if (!(await repository.markStationRemoved(station.id, now(), client))) return null;
+      const count = await abandonOn(client, station.id, { actor: accountId, reason: "station_removed" });
+      await repository.appendEvent({ stationId: station.id, accountId: station.ownerAccount, actor: accountId, kind: "station_removed", details: { oneStep: true, pendingHostRevocation: count } }, client);
+      return count;
+    });
+    if (flagged === null) return { removed: true };
+    log("Station removed in one step: Auth has no two-phase removal; " + integrationsCount(flagged) + " pending host revocation.");
+    changed(station.id);
+    return { removed: true };
   }
 
   // The active Station as this account has it in Portal (with its role, "built_in", "owner" or "member"). An account
@@ -676,6 +890,14 @@ export function createIntegrationService({
   // (409 built_in), without asking Auth.
   function notBuiltIn(station) {
     if (station.builtIn) throw failure(409, BUILT_IN_FIXED, "built_in");
+    return station;
+  }
+
+  // A removing Station (D29) is used for nothing but its removal: no integration is created there, it is not shared, its
+  // members don't change, its member list isn't read and no read token is issued for it (Auth issues none either). Refused
+  // here, without asking Auth.
+  function notRemoving(station) {
+    if (station.status === "removing") throw stationRemoving();
     return station;
   }
 
@@ -717,15 +939,19 @@ export function createIntegrationService({
       }
       if (known.has(station.id)) continue;
       if (station.role === "owner") {
-        await appending(async (client) => {
-          await repository.markStationRemoved(station.id, now(), client);
-          await revokeOn(client, station.id, () => true, { actor: "system", reason: "reconciled", direct: true });
-          await repository.appendEvent({ stationId: station.id, accountId, actor: "system", kind: "station_removed", reason: "reconciled" }, client);
-        });
-        log("Station removed in Portal: absent from Auth.");
-        changed(station.id);
+        // Decided on the row under the lock (removeGoneOn), not on the one read above: a Station the Portal has removing
+        // (D29) has its removal completed, flags and all; an active one is gone without the two phases; one removed
+        // meanwhile (listings racing each other, or a completion) is left, so its removal is recorded once.
+        const gone = await appending((client) => removeGoneOn(client, station.id));
+        if (gone) {
+          log(gone.completed ? completedLine("auth_removed", gone.flagged) : "Station removed in Portal: absent from Auth.");
+          changed(station.id);
+        }
         continue;
       }
+      // A member's listing can't say whether a removing Station is gone or the member left before the removal began, and
+      // either way it is the Station going (D29): the owner's listing or the hourly check completes the removal.
+      if (station.status === "removing") continue;
       // Auth no longer counts this account a member (and has revoked its integrations there); Portal follows.
       const removed = await appending(async (client) => {
         if (!(await repository.removeMember(station.id, accountId, "system", now(), client))) return false;
@@ -766,6 +992,7 @@ export function createIntegrationService({
           changed(entry.id);
         }
       }
+      if (delegatedHostWork && entry.status === "removing") await followRemoving(entry.id);
       if (entry.owner !== accountId && !(await repository.currentMembers(entry.id)).some((member) => member.accountId === accountId)) {
         const added = await appending(async (client) => {
           if (!(await repository.addMember(entry.id, accountId, "system", now(), client))) return false;
@@ -989,6 +1216,8 @@ export function createIntegrationService({
     if (delegatedHostWork && STOPPED.includes(state)) {
       Object.assign(view, { revokedAt: row.revokedAt, interruptRunning: row.interruptRunning });
       if (station?.status === "removed") view.stationRemoved = true;
+      // Its Station couldn't confirm the revocation on every host (D29): Astation offers the owner a native revoke.
+      if (row.pendingHostRevocation) view.pendingHostRevocation = true;
       if (hosts) view.revocation = revocationCounts(row, hosts);
     }
     return view;
@@ -1033,7 +1262,7 @@ export function createIntegrationService({
   // paused an integration, nor (the setting on, D29) when it was revoked or the counts of its revocation (the Station
   // sent those), nor whether that interrupts running tasks: the feed says the latter, and the answer stays as it is today.
   function reportAnswer(row, station) {
-    const { role, pausedBy, revokedAt, interruptRunning, stationRemoved, revocation, ...view } = integrationView(row, null, station);
+    const { role, pausedBy, revokedAt, interruptRunning, stationRemoved, revocation, pendingHostRevocation, ...view } = integrationView(row, null, station);
     return view;
   }
 
@@ -1184,11 +1413,12 @@ export function createIntegrationService({
   // as Interrupt does (addInterrupt: Auth is not asked), so a mirror of "revoke and interrupt" converges after another
   // revocation came first: before this call reached Auth, or while it was there (the commit finds the row stopped).
   // A false never undoes a true.
-  async function stop(accountId, id, event, { interruptRunning, details, mineOnly = false } = {}) {
+  async function stop(accountId, id, event, { interruptRunning, details, mineOnly = false, clearsPending = false } = {}) {
     const choice = delegatedHostWork && event === "revoke";
     if (choice && typeof interruptRunning !== "boolean") throw interruptRunningRequired();
     const { row, role } = await visible(accountId, id);
     if (mineOnly && role !== "owner") throw notFound();
+    if (clearsPending && row.pendingHostRevocation) return clearPending(accountId, row, { interruptRunning, details });
     // Shown as paused (its owner's account disabled): a pause is refused as for any paused integration, before Auth.
     step(shownPaused(row) ? { ...row, state: "paused", resumeState: row.state } : row, event, now());
     if (event === "revoke" && STOPPED.includes(row.state)) return choice && interruptRunning ? addInterrupt(accountId, row, role, details) : viewOf(row, role);
@@ -1204,6 +1434,19 @@ export function createIntegrationService({
     // Another revocation committed first, while this call was at Auth: the choice is still added.
     if (choice && interruptRunning && STOPPED.includes(updated.state) && !updated.interruptRunning) return addInterrupt(accountId, updated, role, details);
     return viewOf(updated, role);
+  }
+
+  // Astation's native revoke of an integration pending host revocation (D29): Astation has signed the revocation for the
+  // owner's hosts itself, so the flag is cleared, once (a call that finds it cleared under the row lock changes nothing),
+  // with an integration_revoked_natively event (the owner, the app's clientId and the choice); a true also records
+  // interruptRunning, which only goes from false to true. Its Station is gone: nothing is asked of Auth, nothing pushed.
+  async function clearPending(accountId, row, { interruptRunning, details }) {
+    const updated = await commit(row.id, (current) => {
+      if (!current.pendingHostRevocation) return null;
+      const fields = { pendingHostRevocation: false, ...(interruptRunning && !current.interruptRunning ? { interruptRunning: true } : {}) };
+      return { fields, event: { actor: accountId, kind: "integration_revoked_natively", reason: "owner", details: { ...details, interruptRunning } } };
+    }, { push: false });
+    return viewOf(updated, "owner");
   }
 
   // Interrupt running tasks (D29), for Interrupt itself and for a revoke that asks for it of an integration that is
@@ -1352,7 +1595,12 @@ export function createIntegrationService({
     // own id, and nothing of the other Agora.Build account the attempt came from or went to.
     async stations(accountId) {
       const fresh = await reconcileWithAuth(accountId);
-      const stations = (await repository.stationsFor(accountId)).map((station) => stationView(station, station.role));
+      const stations = [];
+      for (const station of await repository.stationsFor(accountId)) {
+        const view = stationView(station, station.role);
+        if (station.status === "removing") view.removalProgress = await removalProgress(station, accountId);
+        stations.push(view);
+      }
       if (!delegatedHostWork) return { stations, stale: !fresh };
       const attempts = await repository.bindingAttemptsFor(accountId, now() - ATTEMPTS_SHOWN_FOR, undefined, { limit: NOTICES_SHOWN });
       const notices = attempts.map(({ r9AccountId, genesisHash, reason, attemptedAt }) => ({ kind: "binding_attempt", accountId: r9AccountId, genesisHash, reason, attemptedAt }));
@@ -1377,14 +1625,14 @@ export function createIntegrationService({
     },
 
     async members(accountId, stationId) {
-      notBuiltIn(await usable(accountId, stationId));
+      notRemoving(notBuiltIn(await usable(accountId, stationId)));
       const answer = await byActor(accountId, () => manage.members(stationId, accountId));
       return { owner: answer.owner, members: (answer.members || []).map(({ account, addedAt }) => ({ account, addedAt })) };
     },
 
     async share(accountId, stationId, member) {
       memberAccount(member);
-      const station = await ownStation(accountId, stationId);
+      const station = notRemoving(await ownStation(accountId, stationId));
       if (member === station.ownerAccount) throw failure(400, "The owner already has this Station.", "account");
       await byActor(accountId, () => manage.addMember(stationId, member, accountId));
       const added = await appending(async (client) => {
@@ -1399,7 +1647,7 @@ export function createIntegrationService({
     // on the Station; Portal follows in one transaction, recording the removal only when it had the member.
     async unshare(accountId, stationId, member) {
       memberAccount(member);
-      const station = notBuiltIn(await usable(accountId, stationId));
+      const station = notRemoving(notBuiltIn(await usable(accountId, stationId)));
       if (station.role !== "owner" && member !== accountId) throw ownerOnly();
       await byActor(accountId, () => manage.removeMember(stationId, member, accountId));
       const wrote = await appending(async (client) => {
@@ -1411,20 +1659,51 @@ export function createIntegrationService({
       if (wrote) changed(stationId);
     },
 
+    // The owner removes a custom Station. With the setting on (D29) that is a two-phase removal: Auth begins it (the Station
+    // removing, its integrations revoked, its report client kept), the Portal follows (beginRemovalHere) and pushes the
+    // Station, which passes the revocations to its hosts and reports; the removal completes once every integration on it
+    // is revoked (at once when none was left to pass on) or 26 hours later. The answer is removalAnswer's. An Auth without
+    // the route (404) gets today's one-step removal, with every integration revoked at once and flagged where a host may
+    // hold it (removeInOneStep). A Station the Portal already has removing answers as it is, asking Auth nothing, whatever
+    // the setting (an operator may turn it off while a removal runs, and Auth's DELETE would revoke the Station's report
+    // client with its revocations unpassed); a repeat also retries a completion that failed. With the setting off:
+    // today's one-step removal, { removed: true }.
     async removeStation(accountId, stationId) {
       const station = await ownStation(accountId, stationId);
-      await byActor(accountId, () => manage.removeStation(stationId, accountId));
-      await appending(async (client) => {
-        await repository.markStationRemoved(stationId, now(), client);
-        await revokeOn(client, stationId, () => true, { actor: accountId, reason: "station_removed" });
-        await repository.appendEvent({ stationId, accountId: station.ownerAccount, actor: accountId, kind: "station_removed" }, client);
-      });
+      if (station.status === "removing") {
+        await tryComplete(stationId);
+        return removalAnswer(await repository.station(stationId));
+      }
+      if (!delegatedHostWork) {
+        await byActor(accountId, () => manage.removeStation(stationId, accountId));
+        await appending(async (client) => {
+          await repository.markStationRemoved(stationId, now(), client);
+          await revokeOn(client, stationId, () => true, { actor: accountId, reason: "station_removed" });
+          await repository.appendEvent({ stationId, accountId: station.ownerAccount, actor: accountId, kind: "station_removed" }, client);
+        });
+        changed(stationId);
+        return { removed: true };
+      }
+      // An Auth without the route answers 404 before it looks at the actor, so that answer proves nothing about the owner
+      // (byActor would clear their owner-disabled flags): it is taken outside byActor. The one-step DELETE checks the actor
+      // before its 404, so removeInOneStep's own 404 stays inside.
+      let begun;
+      try {
+        begun = await byActor(accountId, () => manage.beginStationRemoval(stationId, accountId));
+      } catch (error) {
+        if (!(error instanceof AppError && error.status === 404)) throw error;
+        begun = null;
+      }
+      if (!begun) return removeInOneStep(accountId, station);
+      await beginRemovalHere(station, accountId);
       changed(stationId);
+      await tryComplete(stationId);
+      return removalAnswer(await repository.station(stationId));
     },
 
     // A 5-minute station.read token for the browser to send to a Station this account owns or belongs to.
     async readToken(accountId, idToken, stationId) {
-      const station = await usable(accountId, stationId);
+      const station = notRemoving(await usable(accountId, stationId));
       if (!idToken) throw new AppError(401, "Sign in again to read this Station's details.");
       try {
         const { accessToken, expiresIn } = await exchange(idToken, station.origin);
@@ -1443,7 +1722,7 @@ export function createIntegrationService({
       const fields = { name: integrationName(name), scopes: integrationScopes(scopes), quotaPerSecond: quota(quotaPerSecond) };
       expiryDays(expiresInDays);
       publicKey(publicJwk);
-      const station = await usable(accountId, stationId);
+      const station = notRemoving(await usable(accountId, stationId));
       if (!station.builtIn) return create(accountId, station, fields, publicJwk, expiresInDays);
       if (!station.integrationsEnabled) throw failure(409, NOT_SUPPORTED, "not_supported");
       return oneAtATime(accountId + " " + station.id, async () => {
@@ -1495,10 +1774,10 @@ export function createIntegrationService({
     revoke: (accountId, id, { interruptRunning } = {}) => stop(accountId, id, "revoke", { interruptRunning }),
 
     // Astation's revoke, for the owner's own integrations only, as approve is (the setting on only): recorded with the
-    // app as the client.
+    // app as the client. On an integration pending host revocation it clears the flag (clearPending).
     async revokeNative(accountId, id, { interruptRunning, clientId } = {}) {
       if (!delegatedHostWork) throw notFound();
-      return stop(accountId, id, "revoke", { interruptRunning, mineOnly: true, details: { clientId } });
+      return stop(accountId, id, "revoke", { interruptRunning, mineOnly: true, clearsPending: true, details: { clientId } });
     },
 
     // Interrupt running tasks (D29): within 24 hours of the revocation, the owner or the custom Station's owner adds the
@@ -1591,7 +1870,7 @@ export function createIntegrationService({
     async report(clientId, body) {
       const station = await reportingStation(clientId);
       const parsed = reportBody(body, { delegated: delegatedHostWork, now: now() });
-      if (parsed.reportId !== undefined) return identifiedReport(station, parsed);
+      if (parsed.reportId !== undefined) return completingAfter(station, parsed, await identifiedReport(station, parsed));
       const { integrationId, state, reason } = parsed;
       const row = typeof integrationId === "string" && integrationId ? await repository.integration(integrationId) : null;
       // Integrations of other Stations get the same answer as unknown ones.
@@ -1614,7 +1893,7 @@ export function createIntegrationService({
       } catch (error) {
         throw shownRefusal(error, row);
       }
-      return reportAnswer(updated, station);
+      return completingAfter(station, parsed, reportAnswer(updated, station));
     },
 
     // An Agora.Build admin releases a built-in Station's binding of an R9 account (D27 slice 1, the setting on): the admin
@@ -1731,7 +2010,9 @@ export function createIntegrationService({
       const rows = await repository.integrationsOnStation(station.id);
       const at = now();
       const current = new Map(rows.map((row) => [row.id, row]));
-      const changes = events.map(({ id, at: when, integrationId, accountId, kind, state, reason, details }) => {
+      // A two-phase removal's station_removing (D29) is the Portal's own record, never a change: the Station learns of its
+      // removal from its integrations' integration_revoked changes. The cursor still moves past it.
+      const changes = events.filter((event) => event.kind !== REMOVING_KIND).map(({ id, at: when, integrationId, accountId, kind, state, reason, details }) => {
         // An Agora.Build admin's release of a binding (D27): the owner released, the release and the binding as the Station
         // last reported it. The admin and reason stay in the Portal's event and the release. Served as recorded, as the
         // account changes are, even if the setting has been turned off since.
@@ -1763,6 +2044,23 @@ export function createIntegrationService({
         if (delegatedHostWork && station.builtIn) answer.disabledAccounts = await repository.disabledAccountList();
       }
       return answer;
+    },
+
+    // The check of every removing Station (D29), run by the stack after each built-in Station sync that reached Auth
+    // (hourly): each whose integrations are all revoked, or whose removal began 26 hours ago or more, is completed
+    // (completeIfDone). Whatever the setting: a removing Station exists only if it was on. Never throws; returns how many
+    // it completed.
+    async completeRemovals() {
+      let stations;
+      try {
+        stations = await repository.removingStations();
+      } catch (error) {
+        log("Station removals not checked: " + (error.code || "error") + ".");
+        return 0;
+      }
+      let completed = 0;
+      for (const station of stations) if (await tryComplete(station.id)) completed += 1;
+      return completed;
     },
 
     // The built-in Stations as Auth lists them naming no account (GET /manage/v1/built-in-stations, spec §3.3.4), so

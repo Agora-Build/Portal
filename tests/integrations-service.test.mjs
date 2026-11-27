@@ -53,6 +53,17 @@ const refused = (status, code) => (error) => {
   return true;
 };
 
+// With the setting on, removing a Station begins its two-phase removal (D29). This ends it as a Station that passed every
+// revocation on to its hosts does: a final report (all applied) for each integration still revoking, the last of which
+// completes the removal.
+async function finishRemoval(s, stationId) {
+  const station = await s.repository.station(stationId);
+  for (const row of await s.repository.integrationsOnStation(stationId)) {
+    if (row.state === "revoking") await s.service.report(station.reportClientId, { integrationId: row.id, state: "revoked", reportId: "final-" + row.id, outcome: "all_applied", pendingHosts: [] });
+  }
+  assert.equal((await s.repository.station(stationId)).status, "removed", "the removal completed");
+}
+
 test("createIntegration adds agent.view, uses the defaults and records the creation after Auth", async (t) => {
   const s = await setup(t);
   if (!s) return;
@@ -1088,6 +1099,7 @@ test("issue 38: a removed Station's stopped integration answers 409 station_remo
   await s.service.revoke(OWNER, plain, { interruptRunning: false });
   await s.service.revoke(MEMBER, done, { interruptRunning: true });
   await s.service.removeStation(OWNER, s.station.id);
+  await finishRemoval(s, s.station.id);
   const events = (await s.events()).length;
   const notified = s.notified.length;
   const calls = s.manage.calls.length;
@@ -1368,9 +1380,11 @@ test("a removed Station's integrations can't be interrupted (409 station_removed
   const flag = async (accountId, id) => (await s.service.integrations(accountId)).integrations.find((entry) => entry.id === id);
   assert.equal(Object.hasOwn(await flag(OWNER, mine), "stationRemoved"), false, "before the removal");
 
-  // Removing a Station revokes the rest, with no interrupt (an indirect revocation).
+  // Removing a Station revokes the rest, with no interrupt (an indirect revocation), and its removal completes once each
+  // revocation has its final report.
   await s.service.removeStation(OWNER, s.station.id);
   assert.equal((await s.repository.integration(live)).state, "revoked", "revoked at once: it was never approved");
+  await finishRemoval(s, s.station.id);
   const calls = s.manage.calls.length;
   const events = (await s.events()).length;
   const notified = s.notified.length;
@@ -1390,7 +1404,7 @@ test("a removed Station's integrations can't be interrupted (409 station_removed
 
   // The views of stopped integrations on a removed Station carry the flag; others, and the Station that is there, don't.
   const views = [await flag(OWNER, mine), await flag(MEMBER, theirs), await flag(OWNER, live)];
-  assert.deepEqual(views.map((view) => [view.state, view.stationRemoved]), [["revoking", true], ["revoking", true], ["revoked", true]]);
+  assert.deepEqual(views.map((view) => [view.state, view.stationRemoved]), [["revoked", true], ["revoked", true], ["revoked", true]]);
   assert.equal(Object.hasOwn(await flag(OWNER, elsewhere), "stationRemoved"), false, "a Station that is still there");
   assert.equal(await s.service.interrupt(OWNER, elsewhere).then((view) => view.interruptRunning), true, "and its integration can still be interrupted");
   // A view from any call: a repeated revoke of one of them answers with its view.
