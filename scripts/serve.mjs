@@ -124,7 +124,7 @@ export function createAppServer(directory = root, options = {}) {
   const delegatedHostWork = (options.delegatedHostWork ?? process.env.DELEGATED_HOST_WORK) === "1";
   const bearerRoute = (route) => isBearerRoute(route) || (delegatedHostWork && delegatedBearerPatterns.some((pattern) => pattern.test(route)));
   // The admin API (D27, /api/admin/v1): the ID of Auth's admin client, or null. Unset, every admin path is today's 404.
-  const portalAdminClientId = adminClientIdFrom(options.portalAdminClientId ?? process.env.PORTAL_ADMIN_CLIENT_ID, log);
+  const portalAdminClientId = adminClientIdFrom(options.portalAdminClientId ?? process.env.PORTAL_ADMIN_CLIENT_ID, log, idp?.config?.clientId);
   const clientAddress = (request) => (trustProxy && String(request.headers["x-forwarded-for"] || "").split(",").map((hop) => hop.trim()).filter(Boolean).at(-1)) || request.socket.remoteAddress;
   // Platform billing clients and their server-side prices; null turns platform billing off.
   const billingClients = "billingClients" in options ? (options.billingClients && parseBillingClients(options.billingClients)) : loadBillingClients(process.env.PORTAL_BILLING_FILE, log);
@@ -208,7 +208,7 @@ export function createAppServer(directory = root, options = {}) {
         // session lookup, so it costs no store work and never makes an account: all it reads is in the Portal database.
         const handled = await handleAdmin({
           method: request.method, path, url: requestUrl, authorization: request.headers.authorization, read: () => body(request), idp,
-          integrations, adminClientId: portalAdminClientId, delegatedHostWork, limit, now: clock
+          integrations, adminClientId: portalAdminClientId, delegatedHostWork, limit, now: clock, log
         });
         json(response, handled.status, handled.body);
         return;

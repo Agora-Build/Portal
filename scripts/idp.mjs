@@ -7,7 +7,7 @@ import { createLocalJWKSet, createRemoteJWKSet, customFetch, errors, jwtVerify }
 export const LOGOUT_EVENT = "http://schemas.openid.net/event/backchannel-logout";
 const ACCOUNT_ID = /^ab[0-9A-HJKMNP-TV-Z]{26}$/;
 // A Station report client: s- and 26 lower-case Crockford base32 characters (Auth's runtime client IDs).
-const STATION_CLIENT_ID = /^s-[0-9a-hjkmnp-tv-z]{26}$/;
+export const STATION_CLIENT_ID = /^s-[0-9a-hjkmnp-tv-z]{26}$/;
 const TRANSACTION_LIFETIME = 600000;
 const DISCOVERY_RETRY = 30000;
 const SCOPE = "openid profile email";

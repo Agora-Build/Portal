@@ -5,9 +5,11 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
+import { request as httpRequest } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { adminClientIdFrom } from "../scripts/admin-api.mjs";
 import { createAppServer } from "../scripts/serve.mjs";
 import { AppError, createStore } from "../scripts/store.mjs";
 import { createModelClient, modelConfig } from "../scripts/models.mjs";
@@ -264,4 +266,149 @@ test("an admin token works on no other route and never makes an account", async 
     // Without the setting, the admin client's token without portal.admin is an ordinary app token, as today.
     if (!adminClientId) assert.equal((await call(app, "/api/v1/me", { bearer: await adminToken(app, { sub: OWNER, scope: "credits" }) })).status, 200);
   }
+});
+
+// Fix round 1: the database failing after the service was ready, a misconfigured client ID, and the odd requests.
+// A log that keeps the admin API's lines only (the Portal logs others at startup).
+const adminLog = (lines) => (line) => { if (line.startsWith("The admin API")) lines.push(line); };
+
+test("a database that fails after the service was ready is 503 unavailable, logged by its code only", async (t) => {
+  const failures = [
+    ["a connection refused", Object.assign(new Error("connect ECONNREFUSED db.internal.example:5432"), { code: "ECONNREFUSED" }), "ECONNREFUSED"],
+    ["a server shutdown", Object.assign(new Error("terminating connection due to administrator command"), { code: "57P01" }), "57P01"],
+    ["an error with no code", new TypeError("Cannot read properties of undefined (reading 'query') at db.internal.example"), "error"],
+    ["a code that isn't a plain one", Object.assign(new Error("odd"), { code: "has a space and db.internal.example" }), "error"]
+  ];
+  for (const [label, failure, reason] of failures) {
+    const lines = [];
+    let checks = 0;
+    // The first check answers (ready() succeeded and the first request passed); every later one fails, as in an outage.
+    const app = await start(t, { integrations: { isPortalAdmin: async () => { checks += 1; if (checks === 1) return true; throw failure; } }, log: adminLog(lines) });
+    const bearer = await adminToken(app);
+    assert.deepEqual(await answer(await call(app, PASSED, { bearer })), passed, label);
+    for (const method of ["GET", "POST"]) {
+      const response = await call(app, PASSED, { method, bearer });
+      assert.equal(response.headers.get("www-authenticate"), null, label);
+      assert.deepEqual(await answer(response), UNAVAILABLE, label + " " + method);
+    }
+    assert.deepEqual(lines, Array(2).fill("The admin API could not check the admins: " + reason + "."), label);
+    assert.equal(lines.some((line) => line.includes(bearer) || line.includes("db.internal")), false, label + ": nothing but the code is logged");
+  }
+});
+
+test("PORTAL_ADMIN_CLIENT_ID that is no client ID, this Portal's own or a Station report client's turns the admin API off, logged without the value", () => {
+  const lines = [];
+  const log = (line) => lines.push(line);
+  const own = "portal-own-client-id";
+  const station = "s-0123456789abcdefghjkmnpqrs";
+  assert.equal(adminClientIdFrom("  admin-client  ", log, own), "admin-client");
+  assert.equal(adminClientIdFrom("", log, own), null);
+  assert.equal(adminClientIdFrom(undefined, log, own), null);
+  assert.equal(adminClientIdFrom("admin", log), "admin");
+  assert.deepEqual(lines, [], "an unset or usable value logs nothing");
+  assert.equal(adminClientIdFrom(own, log, own), null);
+  assert.equal(adminClientIdFrom(station, log, own), null);
+  assert.equal(adminClientIdFrom("has a space", log, own), null);
+  assert.deepEqual(lines, [
+    "The admin API is off: PORTAL_ADMIN_CLIENT_ID is this Portal's own client ID.",
+    "The admin API is off: PORTAL_ADMIN_CLIENT_ID is a Station report client ID.",
+    "The admin API is off: PORTAL_ADMIN_CLIENT_ID is not a client ID."
+  ]);
+  // Only the exact Station report client shape; without the Portal's own ID to compare, that one is a client ID.
+  assert.equal(adminClientIdFrom("s-admin", log, own), "s-admin");
+  assert.equal(adminClientIdFrom(own, log, null), own);
+});
+
+test("a PORTAL_ADMIN_CLIENT_ID that is the Portal's own client ID or a Station report client's leaves the admin API off, 404, and ordinary tokens unchanged", async (t) => {
+  const s = await stack(t);
+  if (!s) return;
+  for (const [label, adminClientId] of [["the Portal's own client", "portal"], ["a Station report client", "s-" + "0".repeat(26)]]) {
+    const lines = [];
+    const app = await start(t, { integrations: s.service, adminClientId, log: adminLog(lines) });
+    assert.equal(lines.length, 1, label);
+    assert.match(lines[0], /^The admin API is off: PORTAL_ADMIN_CLIENT_ID is /, label);
+    assert.equal(lines[0].includes(adminClientId), false, label + ": the value is not logged");
+    // The token the admin API would have taken, and the ordinary app token of the same client.
+    const token = await adminToken(app, { client_id: adminClientId });
+    assert.deepEqual(await answer(await call(app, PASSED, { bearer: token })), [404, { error: "This page or service was not found." }], label);
+    assert.deepEqual(await answer(await call(app, PASSED, { bearer: await adminToken(app, { client_id: "portal", scope: "credits" }) })), [404, { error: "This page or service was not found." }], label);
+    // With the admin API off, the Portal's own client's ordinary token is an ordinary token: not an "admin token".
+    assert.equal((await call(app, "/api/v1/me", { bearer: await adminToken(app, { sub: OWNER, client_id: "portal", scope: "credits" }) })).status, 200, label);
+  }
+});
+
+const raw = (app, path, bearer) => new Promise((done, fail) => {
+  const { hostname, port } = new URL(app.base);
+  const sent = httpRequest({ hostname, port, path, method: "GET", headers: { Authorization: "Bearer " + bearer } }, (response) => {
+    const chunks = [];
+    response.on("data", (chunk) => chunks.push(chunk));
+    response.on("end", () => { try { done([response.statusCode, JSON.parse(Buffer.concat(chunks).toString()), response.headers]); } catch (error) { fail(error); } });
+  });
+  sent.on("error", fail);
+  sent.end();
+});
+
+test("HEAD and OPTIONS are changes, and no other path is ever taken for the admin API or for a route an admin token could use", async (t) => {
+  const s = await stack(t);
+  if (!s) return;
+  const app = await start(t, { integrations: s.service });
+  const challenge = 'Bearer error="insufficient_user_authentication", error_description="A more recent passkey sign-in is required", max_age=300';
+  // Any method but GET is a change: a 301 s old sign-in is a read's to use, not a change's.
+  assert.equal((await call(app, PASSED, { bearer: await adminToken(app, { age: 301 }) })).status, 404, "a GET of that age passes");
+  for (const method of ["HEAD", "OPTIONS", "PATCH"]) {
+    const stale = await call(app, PASSED, { method, bearer: await adminToken(app, { age: 301 }) });
+    assert.equal(stale.status, 401, method);
+    assert.equal(stale.headers.get("www-authenticate"), challenge, method);
+    assert.equal((await call(app, PASSED, { method, bearer: await adminToken(app, { age: 299 }) })).status, 404, method);
+    assert.equal((await call(app, PASSED, { method })).status, 401, method + " without a token");
+  }
+  // The versioned prefix never reaches the admin API, with a token or without.
+  const bearer = await adminToken(app);
+  for (const path of ["/api/v1/admin/v1/x", "/api/v1/admin/v1", "/api/v1/admin/v1/"]) {
+    for (const token of [bearer, undefined]) {
+      const [status, body] = await answer(await call(app, path, { bearer: token }));
+      assert.equal(status, 404, path);
+      assert.match(body.error, /^This API was not found\./, path);
+      assert.equal(body.code, undefined, path);
+    }
+  }
+  // Look-alikes are not the admin API: an admin token is refused as on any other route, and a trailing slash is its own.
+  for (const path of ["/api/admin/v1x", "/api/admin/v1x/y", "/api/admin/v10", "/api/admin", "/api/admin/", "/api//admin/v1/x", "/api/admin/v1%2Fx"]) {
+    assert.deepEqual(await answer(await call(app, path, { bearer })), ADMIN_ONLY, path);
+  }
+  assert.deepEqual(await answer(await call(app, "/api/admin/v1/", { bearer })), passed);
+  // Dot segments are resolved before routing, so a path out of the admin API lands on that route, which refuses the token;
+  // an encoded slash is no segment at all and stays inside the admin API.
+  for (const path of ["/api/admin/v1/%2e%2e/%2e%2e/v1/me", "/api/admin/v1/%2E%2e/%2e%2E/v1/me", "/api/admin/v1/../../v1/me", "/api/admin/v1/%2e%2e/%2e%2e/me", "/api/admin/v1/..%2f..%2fv1/me"]) {
+    const [status, body] = await raw(app, path, bearer);
+    const expected = path.includes("%2f") ? passed : ADMIN_ONLY;
+    assert.deepEqual([status, body], expected, "raw " + path);
+  }
+  // What fetch normalises itself reaches the same answer.
+  assert.deepEqual(await answer(await call(app, "/api/admin/v1/%2e%2e/%2e%2e/v1/me", { bearer })), ADMIN_ONLY);
+  // A path into the admin API through a dot segment is judged as the path it resolves to.
+  const [status, body] = await raw(app, "/api/x/../admin/v1/y", bearer);
+  assert.deepEqual([status, body], passed);
+});
+
+test("a request on an admin path makes no account and sets no cookie, whoever sends it", async (t) => {
+  const s = await stack(t);
+  if (!s) return;
+  const app = await start(t, { integrations: s.service });
+  const tokens = {
+    "an admin": await adminToken(app),
+    "an admin's stale token": await adminToken(app, { age: 2000 }),
+    "a stranger with an admin token": await adminToken(app, { sub: OWNER }),
+    "an ordinary app token": await adminToken(app, { sub: OWNER, client_id: "portal", scope: "credits" }),
+    "no token": undefined
+  };
+  for (const [label, bearer] of Object.entries(tokens)) {
+    for (const method of ["GET", "POST", "HEAD"]) {
+      const response = await call(app, PASSED, { method, bearer, cookie: "house_session=" + "0".repeat(43) });
+      assert.deepEqual(response.headers.getSetCookie(), [], label + " " + method);
+      await response.arrayBuffer();
+    }
+  }
+  const { accounts = [] } = await app.store.snapshot();
+  assert.deepEqual(accounts.filter((account) => [ADMIN, ADMIN_TOO, OWNER].includes(account.id)), [], "no account is made");
 });

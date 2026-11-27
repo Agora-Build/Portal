@@ -3,7 +3,7 @@
 // token works on no other route (serve.mjs). It exists only with the Portal database (the Stations and integrations stack)
 // and PORTAL_ADMIN_CLIENT_ID; otherwise every path here is today's 404. The actor of every change is the token's sub.
 import { AppError } from "./store.mjs";
-import { TokenError } from "./idp.mjs";
+import { STATION_CLIENT_ID, TokenError } from "./idp.mjs";
 
 export const ADMIN_API = "/api/admin/v1";
 export const ADMIN_SCOPE = "portal.admin";
@@ -32,15 +32,23 @@ const rateLimited = () => failure(429, "Too many admin requests. Try again in a 
 const unavailable = () => failure(503, "The admin API is unavailable right now. Try again shortly.", "unavailable");
 const routeNotFound = () => failure(404, "This admin route was not found.", "not_found");
 
+// Why a failure is logged: its code when it has a plain one, never a message (those can name a host or carry a value).
+const reasonOf = (error) => (typeof error?.code === "string" && /^[A-Za-z0-9_.-]{1,40}$/.test(error.code) ? error.code : "error");
+
 export const adminApiPath = (path) => path === ADMIN_API || path.startsWith(ADMIN_API + "/");
 
 // PORTAL_ADMIN_CLIENT_ID: the ID of Auth's admin client, or null (unset or empty: the admin API is off). A value that can't
-// be a client ID turns it off too, logged by the setting's name only.
-export function adminClientIdFrom(value, log = () => {}) {
+// be the admin client's ID turns it off too, logged by the setting's name and the reason only, never the value: one that
+// isn't a client ID at all, this Portal's own client ID (every ordinary app token would then count as an admin token and
+// be refused) or a Station report client's (the same for that Station's report tokens).
+export function adminClientIdFrom(value, log = () => {}, portalClientId = null) {
   const id = typeof value === "string" ? value.trim() : "";
   if (!id) return null;
-  if (!CLIENT_ID.test(id)) {
-    log("The admin API is off: PORTAL_ADMIN_CLIENT_ID is not a client ID.");
+  const reason = !CLIENT_ID.test(id) ? "is not a client ID"
+    : id === portalClientId ? "is this Portal's own client ID"
+    : STATION_CLIENT_ID.test(id) ? "is a Station report client ID" : null;
+  if (reason) {
+    log("The admin API is off: PORTAL_ADMIN_CLIENT_ID " + reason + ".");
     return null;
   }
   return id;
@@ -61,8 +69,10 @@ async function route() {
 // portal.admin and the MFA level (403 insufficient_scope), a whole-number auth_time not ahead (401 token), sub one of
 // the admins (403 not_admin), auth_time recent enough for a read or a change (401 mfa_required), and the admin's limits
 // (429 rate_limited), which count only requests that passed every token check. Returns { status, body }. `limit` is
-// serve.mjs's limiter and `now` its clock.
-export async function handleAdmin({ method, path, url, authorization, read, idp, integrations, adminClientId, delegatedHostWork = false, limit, now = Date.now }) {
+// serve.mjs's limiter and `now` its clock. The service is ready once and cached, so a database that goes down later
+// surfaces as a raw error from its first query: that is 503 unavailable too, not a 500, logged by its code only. Any
+// route that queries the database (Task 4's) answers the same way.
+export async function handleAdmin({ method, path, url, authorization, read, idp, integrations, adminClientId, delegatedHostWork = false, limit, now = Date.now, log = () => {} }) {
   if (!adminClientId || !integrations) throw new AppError(404, TODAY_NOT_FOUND);
   const change = method !== "GET";
   const bearer = typeof authorization === "string" && authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
@@ -85,7 +95,15 @@ export async function handleAdmin({ method, path, url, authorization, read, idp,
     if (error?.status === 503) throw unavailable();
     throw error;
   }
-  if (!(await service.isPortalAdmin(caller.sub))) throw notAdmin();
+  let admin;
+  try {
+    admin = await service.isPortalAdmin(caller.sub);
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    log("The admin API could not check the admins: " + reasonOf(error) + ".");
+    throw unavailable();
+  }
+  if (!admin) throw notAdmin();
   const window = change ? CHANGE_AUTH_SECONDS : READ_AUTH_SECONDS;
   if (seconds - caller.authTime > window) throw mfaRequired(window);
   try {
