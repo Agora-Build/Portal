@@ -84,6 +84,8 @@ const unknownStation = () => failure(403, "This Station is not registered.", "st
 const expiredChallenge = () => failure(400, "This check has expired or was already used. Start again.", "challenge");
 // D29: with the setting on, a revocation says whether to interrupt the tasks running on the owner's hosts.
 const interruptRunningRequired = () => failure(400, "Say whether to interrupt running tasks: send interruptRunning as true or false.", "interrupt_running");
+// D29: a removing Station still reads its feed and reports, and is used for nothing else.
+const stationRemoving = () => failure(409, "This Station is being removed.", "station_removing");
 const REPORT_FORM = "Send a report as { integrationId, state, reason }.";
 const DELEGATED_REPORT_FORMS = REPORT_FORM.slice(0, -1) + ', { integrationId, state: "revocation_applied", reportId, host, recordId } or { integrationId, state: "revoked", reportId, outcome, pendingHosts }.';
 const IDENTIFIER = "1 to 128 characters of letters, digits, '.', '_', ':' or '-'.";
@@ -199,11 +201,12 @@ async function viaAuth(call) {
 }
 
 // Members are not shown the Station's report client; it is not secret, but they have no use for it. Nobody is shown a
-// built-in Station's report client (its role is built_in).
+// built-in Station's report client (its role is built_in). A removing Station (D29) also says when its removal began and
+// when it completes at the latest, and takes no integration.
 function stationView(station, role) {
   const view = {
-    id: station.id, origin: station.origin, role, ownerAccount: station.ownerAccount, status: station.status, createdAt: station.createdAt,
-    builtIn: station.builtIn, name: station.name, integrationsEnabled: station.integrationsEnabled
+    id: station.id, origin: station.origin, role, ownerAccount: station.ownerAccount, status: station.status, ...removalOf(station), createdAt: station.createdAt,
+    builtIn: station.builtIn, name: station.name, integrationsEnabled: station.integrationsEnabled && station.status !== "removing"
   };
   if (role === "owner") view.reportClientId = station.reportClientId;
   return view;
@@ -244,14 +247,16 @@ const directoryCursorFor = (entry) => Buffer.from(JSON.stringify([entry.builtIn,
 // latest.
 const completeByOf = (station) => new Date(Date.parse(station.removalStartedAt) + REMOVAL_DEADLINE).toISOString();
 const removalAnswer = (station) => (station.status === "removing" ? { removed: false, removing: true, completeBy: completeByOf(station) } : { removed: true });
+// The fields a removing Station's views add: when its removal began and when it completes at the latest.
+const removalOf = (station) => (station.status === "removing" ? { removalStartedAt: station.removalStartedAt, completeBy: completeByOf(station) } : {});
 
 // A Station as the directory shows it: routing and availability only, never its report client, its owner or its members.
-// integrationsEnabled says whether an integration can be created there now: not on a removed Station, and not by a member
-// whose membership ended.
+// integrationsEnabled says whether an integration can be created there now: not on a removing (D29) or removed Station, and
+// not by a member whose membership ended. A removing Station also says when its removal began and completes at the latest.
 function directoryEntry(row) {
   return {
     id: row.id, origin: row.origin, name: row.name, builtIn: row.builtIn, access: row.access, role: row.role, status: row.status,
-    removedAt: row.removedAt, membership: row.membership, membershipEndedAt: row.membershipEndedAt,
+    removedAt: row.removedAt, ...removalOf(row), membership: row.membership, membershipEndedAt: row.membershipEndedAt,
     integrationsEnabled: row.status === "active" && row.integrationsEnabled && (row.role !== "member" || row.membership === "current"),
     createdAt: row.createdAt
   };
@@ -827,6 +832,16 @@ export function createIntegrationService({
     await tryComplete(stationId);
   }
 
+  // How far a removing Station's removal has got (D29), for the account page: of the integrations it waits for (those still
+  // revoking when it began, as its station_removing event names them), how many are revoked now. Its owner counts them all,
+  // a member only its own.
+  async function removalProgress(station, accountId) {
+    const begun = await repository.latestStationEvent(station.id, REMOVING_KIND);
+    const waited = new Set(Array.isArray(begun?.details?.revoking) ? begun.details.revoking : []);
+    const rows = (await repository.integrationsOnStation(station.id)).filter((row) => waited.has(row.id) && (station.role === "owner" || row.ownerAccount === accountId));
+    return { done: rows.filter((row) => row.state === "revoked").length, total: rows.length };
+  }
+
   // A revoked report (D29) may be the last one a removal waits for. The Station read before the report may be an active one
   // whose removal began since, so tryComplete reads it again, after the report has committed.
   async function completingAfter(station, report, answer) {
@@ -873,6 +888,14 @@ export function createIntegrationService({
   // (409 built_in), without asking Auth.
   function notBuiltIn(station) {
     if (station.builtIn) throw failure(409, BUILT_IN_FIXED, "built_in");
+    return station;
+  }
+
+  // A removing Station (D29) is used for nothing but its removal: no integration is created there, it is not shared, its
+  // members don't change, its member list isn't read and no read token is issued for it (Auth issues none either). Refused
+  // here, without asking Auth.
+  function notRemoving(station) {
+    if (station.status === "removing") throw stationRemoving();
     return station;
   }
 
@@ -1191,6 +1214,8 @@ export function createIntegrationService({
     if (delegatedHostWork && STOPPED.includes(state)) {
       Object.assign(view, { revokedAt: row.revokedAt, interruptRunning: row.interruptRunning });
       if (station?.status === "removed") view.stationRemoved = true;
+      // Its Station couldn't confirm the revocation on every host (D29): Astation offers the owner a native revoke.
+      if (row.pendingHostRevocation) view.pendingHostRevocation = true;
       if (hosts) view.revocation = revocationCounts(row, hosts);
     }
     return view;
@@ -1235,7 +1260,7 @@ export function createIntegrationService({
   // paused an integration, nor (the setting on, D29) when it was revoked or the counts of its revocation (the Station
   // sent those), nor whether that interrupts running tasks: the feed says the latter, and the answer stays as it is today.
   function reportAnswer(row, station) {
-    const { role, pausedBy, revokedAt, interruptRunning, stationRemoved, revocation, ...view } = integrationView(row, null, station);
+    const { role, pausedBy, revokedAt, interruptRunning, stationRemoved, revocation, pendingHostRevocation, ...view } = integrationView(row, null, station);
     return view;
   }
 
@@ -1386,11 +1411,12 @@ export function createIntegrationService({
   // as Interrupt does (addInterrupt: Auth is not asked), so a mirror of "revoke and interrupt" converges after another
   // revocation came first: before this call reached Auth, or while it was there (the commit finds the row stopped).
   // A false never undoes a true.
-  async function stop(accountId, id, event, { interruptRunning, details, mineOnly = false } = {}) {
+  async function stop(accountId, id, event, { interruptRunning, details, mineOnly = false, clearsPending = false } = {}) {
     const choice = delegatedHostWork && event === "revoke";
     if (choice && typeof interruptRunning !== "boolean") throw interruptRunningRequired();
     const { row, role } = await visible(accountId, id);
     if (mineOnly && role !== "owner") throw notFound();
+    if (clearsPending && row.pendingHostRevocation) return clearPending(accountId, row, { interruptRunning, details });
     // Shown as paused (its owner's account disabled): a pause is refused as for any paused integration, before Auth.
     step(shownPaused(row) ? { ...row, state: "paused", resumeState: row.state } : row, event, now());
     if (event === "revoke" && STOPPED.includes(row.state)) return choice && interruptRunning ? addInterrupt(accountId, row, role, details) : viewOf(row, role);
@@ -1406,6 +1432,19 @@ export function createIntegrationService({
     // Another revocation committed first, while this call was at Auth: the choice is still added.
     if (choice && interruptRunning && STOPPED.includes(updated.state) && !updated.interruptRunning) return addInterrupt(accountId, updated, role, details);
     return viewOf(updated, role);
+  }
+
+  // Astation's native revoke of an integration pending host revocation (D29): Astation has signed the revocation for the
+  // owner's hosts itself, so the flag is cleared, once (a call that finds it cleared under the row lock changes nothing),
+  // with an integration_revoked_natively event (the owner, the app's clientId and the choice); a true also records
+  // interruptRunning, which only goes from false to true. Its Station is gone: nothing is asked of Auth, nothing pushed.
+  async function clearPending(accountId, row, { interruptRunning, details }) {
+    const updated = await commit(row.id, (current) => {
+      if (!current.pendingHostRevocation) return null;
+      const fields = { pendingHostRevocation: false, ...(interruptRunning && !current.interruptRunning ? { interruptRunning: true } : {}) };
+      return { fields, event: { actor: accountId, kind: "integration_revoked_natively", reason: "owner", details: { ...details, interruptRunning } } };
+    }, { push: false });
+    return viewOf(updated, "owner");
   }
 
   // Interrupt running tasks (D29), for Interrupt itself and for a revoke that asks for it of an integration that is
@@ -1554,7 +1593,12 @@ export function createIntegrationService({
     // own id, and nothing of the other Agora.Build account the attempt came from or went to.
     async stations(accountId) {
       const fresh = await reconcileWithAuth(accountId);
-      const stations = (await repository.stationsFor(accountId)).map((station) => stationView(station, station.role));
+      const stations = [];
+      for (const station of await repository.stationsFor(accountId)) {
+        const view = stationView(station, station.role);
+        if (station.status === "removing") view.removalProgress = await removalProgress(station, accountId);
+        stations.push(view);
+      }
       if (!delegatedHostWork) return { stations, stale: !fresh };
       const attempts = await repository.bindingAttemptsFor(accountId, now() - ATTEMPTS_SHOWN_FOR, undefined, { limit: NOTICES_SHOWN });
       const notices = attempts.map(({ r9AccountId, genesisHash, reason, attemptedAt }) => ({ kind: "binding_attempt", accountId: r9AccountId, genesisHash, reason, attemptedAt }));
@@ -1579,14 +1623,14 @@ export function createIntegrationService({
     },
 
     async members(accountId, stationId) {
-      notBuiltIn(await usable(accountId, stationId));
+      notRemoving(notBuiltIn(await usable(accountId, stationId)));
       const answer = await byActor(accountId, () => manage.members(stationId, accountId));
       return { owner: answer.owner, members: (answer.members || []).map(({ account, addedAt }) => ({ account, addedAt })) };
     },
 
     async share(accountId, stationId, member) {
       memberAccount(member);
-      const station = await ownStation(accountId, stationId);
+      const station = notRemoving(await ownStation(accountId, stationId));
       if (member === station.ownerAccount) throw failure(400, "The owner already has this Station.", "account");
       await byActor(accountId, () => manage.addMember(stationId, member, accountId));
       const added = await appending(async (client) => {
@@ -1601,7 +1645,7 @@ export function createIntegrationService({
     // on the Station; Portal follows in one transaction, recording the removal only when it had the member.
     async unshare(accountId, stationId, member) {
       memberAccount(member);
-      const station = notBuiltIn(await usable(accountId, stationId));
+      const station = notRemoving(notBuiltIn(await usable(accountId, stationId)));
       if (station.role !== "owner" && member !== accountId) throw ownerOnly();
       await byActor(accountId, () => manage.removeMember(stationId, member, accountId));
       const wrote = await appending(async (client) => {
@@ -1655,7 +1699,7 @@ export function createIntegrationService({
 
     // A 5-minute station.read token for the browser to send to a Station this account owns or belongs to.
     async readToken(accountId, idToken, stationId) {
-      const station = await usable(accountId, stationId);
+      const station = notRemoving(await usable(accountId, stationId));
       if (!idToken) throw new AppError(401, "Sign in again to read this Station's details.");
       try {
         const { accessToken, expiresIn } = await exchange(idToken, station.origin);
@@ -1674,7 +1718,7 @@ export function createIntegrationService({
       const fields = { name: integrationName(name), scopes: integrationScopes(scopes), quotaPerSecond: quota(quotaPerSecond) };
       expiryDays(expiresInDays);
       publicKey(publicJwk);
-      const station = await usable(accountId, stationId);
+      const station = notRemoving(await usable(accountId, stationId));
       if (!station.builtIn) return create(accountId, station, fields, publicJwk, expiresInDays);
       if (!station.integrationsEnabled) throw failure(409, NOT_SUPPORTED, "not_supported");
       return oneAtATime(accountId + " " + station.id, async () => {
@@ -1726,10 +1770,10 @@ export function createIntegrationService({
     revoke: (accountId, id, { interruptRunning } = {}) => stop(accountId, id, "revoke", { interruptRunning }),
 
     // Astation's revoke, for the owner's own integrations only, as approve is (the setting on only): recorded with the
-    // app as the client.
+    // app as the client. On an integration pending host revocation it clears the flag (clearPending).
     async revokeNative(accountId, id, { interruptRunning, clientId } = {}) {
       if (!delegatedHostWork) throw notFound();
-      return stop(accountId, id, "revoke", { interruptRunning, mineOnly: true, details: { clientId } });
+      return stop(accountId, id, "revoke", { interruptRunning, mineOnly: true, clearsPending: true, details: { clientId } });
     },
 
     // Interrupt running tasks (D29): within 24 hours of the revocation, the owner or the custom Station's owner adds the

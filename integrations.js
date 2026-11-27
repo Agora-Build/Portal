@@ -33,8 +33,12 @@ const INTERRUPT_CHOICE = "Also interrupt the tasks running on your hosts now?";
 const EXPIRY_NOTE = "Expiry stops new work and queries. Work already accepted on your hosts runs until its deadline, at most 24 hours. Revoke to cancel work that hasn't started.";
 const PAUSE_NOTE = "Paused: new work is refused, and accepted work that hasn't started waits. Work running now continues.";
 const INDIRECT_NOTE = "Tasks already running on hosts continue. Within 24 hours, the owner of each revoked integration can still interrupt them.";
-// A removed Station never reads its feed again, so removing it offers no interrupt: only that running tasks continue.
-const REMOVED_NOTE = "Tasks already running on hosts continue.";
+// Removing a Station is two-phase (D29): it first passes the revocations to the hosts, then is removed; until then the
+// owner of each revoked integration can still interrupt its running tasks.
+const REMOVAL_NOTE = "Every integration on this Station is revoked. The Station first passes the revocations to your hosts, then is removed, within about a day. Tasks already running on hosts continue unless you interrupt them.";
+// An integration whose Station couldn't confirm the revocation on every host (pendingHostRevocation): Astation offers its
+// owner a native revoke.
+const PENDING_NOTE = "Revoked; your hosts weren't all told. Revoke it from Astation to make sure.";
 // What the Portal knows is that an interrupt was requested, not what the hosts then did.
 const INTERRUPTED_NOTE = "Running tasks: an interrupt was requested.";
 const DAY = 24 * 60 * 60 * 1000;
@@ -72,7 +76,11 @@ const bindingNotice = (notice) => notice?.kind !== "binding_attempt" ? "" : noti
 // A removal that revokes integrations says, with the setting on, that tasks already running on the hosts continue; unless
 // the Station is removed, the owner of each revoked integration can still interrupt them.
 const indirect = (text) => me?.delegatedHostWork ? text + " " + INDIRECT_NOTE : text;
-const removing = (text) => me?.delegatedHostWork ? text + " " + REMOVED_NOTE : text;
+// Remove Station says, with the setting on, how its two-phase removal goes (D29); off, today's text.
+const removalText = (text) => me?.delegatedHostWork ? REMOVAL_NOTE : text;
+// A removing Station's line (D29): how many of the integrations its removal waits for are revoked (the list's
+// removalProgress), as counts.
+const removingNote = (station) => "Removing: passing the revocations to your hosts" + (station.removalProgress ? " (" + station.removalProgress.done + " of " + station.removalProgress.total + " done)" : "");
 async function copy(text, label) {
   try { await navigator.clipboard.writeText(text); notify(label + " copied."); }
   catch { notify("Copying isn't available here. Select the text instead."); }
@@ -253,6 +261,7 @@ function builtInRow(station) {
 }
 function stationRow(station) {
   if (station.builtIn) return builtInRow(station);
+  if (station.status === "removing") return removingRow(station);
   const owner = station.role === "owner";
   const output = el("p", { class: "station-details", role: "status" });
   const actions = el("div", { class: "agora-project-actions" });
@@ -261,9 +270,9 @@ function stationRow(station) {
   actions.append(details);
   if (owner) {
     const remove = el("button", { class: "inline-link", type: "button", text: "Remove Station", "aria-haspopup": "dialog" });
-    remove.addEventListener("click", () => confirmed(remove, output, ["Remove " + station.origin + "?", removing("Every integration on this Station is revoked and its members lose access. This can't be undone."), "Remove Station"], async () => {
-      await request("/api/stations/" + segment(station.id), { method: "DELETE" });
-      notify("Station removed.");
+    remove.addEventListener("click", () => confirmed(remove, output, ["Remove " + station.origin + "?", removalText("Every integration on this Station is revoked and its members lose access. This can't be undone."), "Remove Station"], async () => {
+      const answer = await request("/api/stations/" + segment(station.id), { method: "DELETE" });
+      notify(answer.removing ? "Removal started." : "Station removed.");
       await loadAll();
     }));
     actions.append(remove);
@@ -283,6 +292,16 @@ function stationRow(station) {
     actions,
     output,
     ...(owner ? [membersPanel(station)] : [])
+  ]);
+}
+// A Station being removed (D29): it passes the revocations to the hosts, then is removed. Until then nothing else can be
+// done with it (the Portal refuses it), so it offers no actions, only how far it has got.
+function removingRow(station) {
+  const facts = [station.role === "owner" ? "You own it" : "Shared with you", station.createdAt ? "Added " + date(station.createdAt) : ""].filter(Boolean).join(" · ");
+  return el("article", { class: "account-card station-item", "data-row": station.id }, [
+    el("h3", { class: "mono", text: station.origin }),
+    el("p", { class: "muted", text: facts }),
+    el("p", { class: "muted", text: removingNote(station) })
   ]);
 }
 async function loadStations(current = version) {
@@ -506,7 +525,7 @@ function integrationRow(integration) {
     );
   }
   // With the setting on, what the state means for work already on the hosts.
-  const notes = !hostWork ? [] : [state === "paused" && PAUSE_NOTE, state === "expired" && EXPIRY_NOTE, STOPPED.includes(state) && integration.interruptRunning && INTERRUPTED_NOTE, appliedNote(integration), unconfirmedNote(integration)].filter(Boolean);
+  const notes = !hostWork ? [] : [state === "paused" && PAUSE_NOTE, state === "expired" && EXPIRY_NOTE, STOPPED.includes(state) && integration.interruptRunning && INTERRUPTED_NOTE, appliedNote(integration), unconfirmedNote(integration), state === "revoked" && integration.pendingHostRevocation && PENDING_NOTE].filter(Boolean);
   const badge = el("span", { class: "state-badge state-badge--" + String(state).replace(/[^a-z_]/g, "").replace(/_/g, "-"), text: locked ? PAUSED_BY_AGORA : stateLabel(state) });
   const fact = (term, value) => value ? [el("dt", { text: term }), el("dd", { text: value })] : [];
   return el("article", { class: "account-card integration-item", "data-row": integration.id }, [

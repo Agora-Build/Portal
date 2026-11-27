@@ -750,3 +750,110 @@ test("the hourly check never throws: a database failure reading the removing Sta
   assert.equal(await s.service.completeRemovals(), 1, "the first is completed by the next check");
   assert.deepEqual([await s.flag(first), await s.flag(other)], [["revoked", true], ["revoked", true]]);
 });
+
+test("Astation's native revoke of an integration pending host revocation clears the flag once, for its owner only, recording the choice, asking Auth nothing and pushing nothing", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const mine = await s.integration();
+  const kept = await s.integration();
+  const raced = await s.integration();
+  const theirs = await s.integration(MEMBER);
+  await s.service.removeStation(OWNER, s.station.id);
+  s.clock.now += 26 * HOUR;
+  await s.service.completeRemovals();
+  const listed = async (accountId, id) => (await s.service.integrations(accountId)).integrations.find((entry) => entry.id === id);
+  assert.deepEqual([(await listed(OWNER, mine)).pendingHostRevocation, (await listed(MEMBER, theirs)).pendingHostRevocation], [true, true], "each owner's list shows it");
+  const changes = s.asked("changeIntegration");
+  s.notified.length = 0;
+  // Only the integration's owner: the Station's owner and anyone else get 404 from the native route; the choice is required.
+  await assert.rejects(s.service.revokeNative(OWNER, theirs, { interruptRunning: false, clientId: "astation" }), refused(404, "not_found"));
+  await assert.rejects(s.service.revokeNative(STRANGER, mine, { interruptRunning: false, clientId: "astation" }), refused(404, "not_found"));
+  await assert.rejects(s.service.revokeNative(OWNER, mine, { clientId: "astation" }), refused(400, "interrupt_running"));
+  // The browser's revoke is not Astation's: the flag stays.
+  assert.equal((await s.service.revoke(OWNER, mine, { interruptRunning: false })).pendingHostRevocation, true);
+  const cleared = await s.service.revokeNative(OWNER, mine, { interruptRunning: true, clientId: "astation" });
+  assert.deepEqual([cleared.state, Object.hasOwn(cleared, "pendingHostRevocation"), cleared.interruptRunning, cleared.stationRemoved], ["revoked", false, true, true]);
+  assert.deepEqual([(await s.row(mine)).pendingHostRevocation, (await s.row(mine)).interruptRunning], [false, true]);
+  const [natively] = await s.events("integration_revoked_natively");
+  assert.deepEqual([natively.integration_id, natively.actor, natively.account_id, natively.state, natively.reason, natively.details],
+    [mine, OWNER, OWNER, "revoked", "owner", { clientId: "astation", interruptRunning: true }]);
+  // Once: asking again is the native revoke of a revoked integration, which changes nothing here.
+  assert.equal((await s.service.revokeNative(OWNER, mine, { interruptRunning: true, clientId: "astation" })).interruptRunning, true);
+  // A false clears it too, and records no interrupt.
+  const plain = await s.service.revokeNative(OWNER, kept, { interruptRunning: false, clientId: "astation" });
+  assert.deepEqual([Object.hasOwn(plain, "pendingHostRevocation"), (await s.row(kept)).interruptRunning], [false, false]);
+  // Two at once clear it once.
+  const both = await Promise.all([1, 2].map(() => s.service.revokeNative(OWNER, raced, { interruptRunning: false, clientId: "astation" })));
+  assert.deepEqual(both.map((view) => Object.hasOwn(view, "pendingHostRevocation")), [false, false]);
+  assert.deepEqual((await s.events("integration_revoked_natively")).map((event) => event.integration_id), [mine, kept, raced]);
+  assert.deepEqual([s.asked("changeIntegration"), s.notified], [changes, []], "Auth was not asked and nobody was pushed");
+  assert.equal((await listed(MEMBER, theirs)).pendingHostRevocation, true, "another owner's flag stays");
+});
+
+test("with the setting off nothing of it shows: a flagged integration has no pendingHostRevocation and the native revoke doesn't exist", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const id = await s.integration();
+  await s.service.removeStation(OWNER, s.station.id);
+  s.clock.now += 26 * HOUR;
+  await s.service.completeRemovals();
+  assert.deepEqual(await s.flag(id), ["revoked", true]);
+  const off = s.open({ delegatedHostWork: false });
+  const view = (await off.integrations(OWNER)).integrations.find((entry) => entry.id === id);
+  assert.deepEqual([view.state, Object.hasOwn(view, "pendingHostRevocation")], ["revoked", false]);
+  await assert.rejects(off.revokeNative(OWNER, id, { interruptRunning: true, clientId: "astation" }), refused(404, "not_found"));
+  assert.deepEqual(await s.flag(id), ["revoked", true], "the flag is as it was");
+});
+
+test("a removing Station is used for nothing else: creating an integration, sharing, member changes, its member list and a read token are 409 station_removing, before Auth", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await s.integration();
+  await s.service.removeStation(OWNER, s.station.id);
+  const calls = s.manage.calls.length;
+  const removing = (error) => refused(409, "station_removing")(error) && error.message === "This Station is being removed.";
+  await assert.rejects(s.service.createIntegration(OWNER, { stationId: s.station.id, name: "New", scopes: [], publicJwk: publicJwk() }), removing);
+  await assert.rejects(s.service.createIntegration(MEMBER, { stationId: s.station.id, name: "New", scopes: [], publicJwk: publicJwk() }), removing);
+  await assert.rejects(s.service.share(OWNER, s.station.id, STRANGER), removing);
+  await assert.rejects(s.service.unshare(OWNER, s.station.id, MEMBER), removing);
+  await assert.rejects(s.service.unshare(MEMBER, s.station.id, MEMBER), removing, "leaving too");
+  await assert.rejects(s.service.members(OWNER, s.station.id), removing);
+  await assert.rejects(s.service.readToken(MEMBER, "id-token", s.station.id), removing);
+  assert.equal(s.manage.calls.length, calls, "Auth was not asked");
+  assert.deepEqual((await s.repository.currentMembers(s.station.id)).map((member) => member.accountId), [MEMBER], "the member is still a member");
+  // The checks before it are as they were: a stranger is told nothing, and only the owner shares.
+  await assert.rejects(s.service.share(STRANGER, s.station.id, OWNER), refused(404, "not_found"));
+  await assert.rejects(s.service.share(MEMBER, s.station.id, STRANGER), refused(403, "forbidden"));
+});
+
+test("the browser's list and the directory show a removing Station with when its removal began and completes at the latest, no integrations, and the list how far it has got", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const one = await s.integration();
+  const two = await s.integration();
+  const theirs = await s.integration(MEMBER);
+  await s.integration(OWNER, { approved: false });
+  await s.service.removeStation(OWNER, s.station.id);
+  const startedAt = iso(s.clock.now);
+  const completeBy = iso(s.clock.now + 26 * HOUR);
+  await s.final(one);
+  const shown = async (accountId, id = s.station.id) => (await s.service.stations(accountId)).stations.find((entry) => entry.id === id);
+  const owner = await shown(OWNER);
+  assert.deepEqual(Object.keys(owner), ["id", "origin", "role", "ownerAccount", "status", "removalStartedAt", "completeBy", "createdAt", "builtIn", "name", "integrationsEnabled", "reportClientId", "removalProgress"]);
+  assert.deepEqual([owner.status, owner.removalStartedAt, owner.completeBy, owner.integrationsEnabled, owner.removalProgress], ["removing", startedAt, completeBy, false, { done: 1, total: 3 }],
+    "its owner counts every integration the removal waits for, not the one revoked at once");
+  assert.deepEqual((await shown(MEMBER)).removalProgress, { done: 0, total: 1 }, "a member counts its own");
+  const entry = (await s.service.directory(MEMBER)).stations.find((found) => found.id === s.station.id);
+  assert.deepEqual(Object.keys(entry), ["id", "origin", "name", "builtIn", "access", "role", "status", "removedAt", "removalStartedAt", "completeBy", "membership", "membershipEndedAt", "integrationsEnabled", "createdAt"]);
+  assert.deepEqual([entry.status, entry.removedAt, entry.removalStartedAt, entry.completeBy, entry.membership, entry.integrationsEnabled], ["removing", null, startedAt, completeBy, "current", false]);
+  // An active Station's views have none of it.
+  const other = await s.register(OWNER, "https://two.example");
+  const listed = await shown(OWNER, other.id);
+  const directed = (await s.service.directory(OWNER)).stations.find((found) => found.id === other.id);
+  assert.deepEqual([Object.hasOwn(listed, "removalStartedAt"), Object.hasOwn(listed, "removalProgress"), Object.hasOwn(directed, "removalStartedAt"), listed.integrationsEnabled], [false, false, false, true]);
+  // Once removed, the directory lists it as any removed Station.
+  await s.final(two);
+  await s.final(theirs);
+  const removed = (await s.service.directory(OWNER)).stations.find((found) => found.id === s.station.id);
+  assert.deepEqual([removed.status, removed.removedAt, Object.hasOwn(removed, "removalStartedAt"), removed.integrationsEnabled], ["removed", iso(s.clock.now), false, false]);
+});

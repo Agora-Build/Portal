@@ -1727,3 +1727,22 @@ test("ready() does not wait for the removals the first sync completes: it is rea
     await integrations.close();
   }
 });
+
+// D29: Astation finds an integration pending host revocation in its list and clears it with its native revoke.
+test("with the setting on, GET /api/v1/integrations says pendingHostRevocation and Astation's native revoke clears it", async (t) => {
+  const integrations = await stack(t, { delegatedHostWork: true });
+  if (!integrations) return;
+  const app = await start(t, { integrations: integrations.service, delegatedHostWork: "1" });
+  const owner = await signIn(app);
+  const { station } = await registerStation(app, integrations, owner.cookie);
+  const mine = await createIntegration(app, owner.cookie, station.id);
+  await integrations.db.pool.query("UPDATE integrations SET state = 'revoked', pending_host_revocation = true WHERE id = $1", [mine.id]);
+  const reader = await app.fake.issueAccessToken({ sub: owner.sub, client_id: "astation", scope: "integrations:read" });
+  const approver = await app.fake.issueAccessToken({ sub: owner.sub, client_id: "astation", scope: "integrations:approve" });
+  const listed = async () => (await (await call(app.base, "/api/v1/integrations", { bearer: reader })).json()).integrations.find((entry) => entry.id === mine.id);
+  assert.equal((await listed()).pendingHostRevocation, true);
+  const revoked = await call(app.base, "/api/v1/integrations/" + mine.id + "/revoke", { bearer: approver, method: "POST", data: { interruptRunning: true } });
+  const body = await revoked.json();
+  assert.deepEqual([revoked.status, body.state, body.interruptRunning, "pendingHostRevocation" in body], [200, "revoked", true, false]);
+  assert.equal("pendingHostRevocation" in await listed(), false);
+});
