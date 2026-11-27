@@ -479,7 +479,8 @@ export function createIntegrationService({
   // event or in neither, and every change committed later has a larger id (ids are taken in commit order, appendEvent).
   // It takes no lock, so it never waits for a writer. Each integration is in the feed's shape (the effective state as of
   // `at`) with its id, and a stopped one says when it was revoked. Only the built-in Station has the accounts (whether
-  // the Portal's view is complete, and the disabled ones) and the bindings it last reported.
+  // the Portal's view is complete, and the disabled ones), the bindings it last reported and the
+  // releases still pending (D27).
   async function checkpointOf(station) {
     const snapshot = await db.transaction(async (client) => ({
       cursor: await repository.latestCursor(station.id, client),
@@ -487,7 +488,8 @@ export function createIntegrationService({
       ...(station.builtIn ? {
         complete: await repository.baselineApplied(client),
         disabled: await repository.disabledAccountList(client),
-        bindings: await repository.bindingsOn(station.id, client)
+        bindings: await repository.bindingsOn(station.id, client),
+        pending: await repository.pendingReleasesOn(station.id, client)
       } : {})
     }), { isolation: "repeatable read", readOnly: true });
     const at = now();
@@ -498,6 +500,8 @@ export function createIntegrationService({
     if (station.builtIn) {
       checkpoint.accounts = { complete: snapshot.complete, disabled: snapshot.disabled };
       checkpoint.bindings = snapshot.bindings.map((row) => ({ account: row.accountId, accountId: row.r9AccountId, genesisHash: row.genesisHash, bindingId: row.bindingId, version: row.version, bindingState: row.bindingState }));
+      // D27: every release not settled yet, oldest first, in the same snapshot as the cursor (Portal #41).
+      checkpoint.pendingReleases = snapshot.pending.map(({ releaseId, account, accountId, genesisHash, bindingId, version, requestedAt }) => ({ releaseId, account, accountId, genesisHash, bindingId, version, requestedAt }));
     }
     return { changes: [], cursor: snapshot.cursor, checkpoint };
   }
@@ -1039,7 +1043,8 @@ export function createIntegrationService({
   // genesis only if its version is higher than the recorded one; the same version with the identical binding (account,
   // bindingId, bindingState) is the same news again and changes nothing, and any other not-newer one is refused, which
   // rolls the transaction back (its id stays free). The answer is the recorded binding. Neither is an event or a push: the
-  // checkpoint reads the bindings, and the page reads the attempts.
+  // checkpoint reads the bindings, and the page reads the attempts. A newer binding also settles the pending releases of
+  // its R9 account and genesis (D27).
   async function recordBinding(station, report, client) {
     if (report.state === "binding_attempt") {
       await repository.saveBindingAttempt({ stationId: station.id, reportId: report.reportId, accountId: report.account, r9AccountId: report.accountId, genesisHash: report.genesisHash, reason: report.reason, attemptedAt: report.attemptedAt }, client);
@@ -1048,6 +1053,13 @@ export function createIntegrationService({
     const recorded = await repository.binding(station.id, report.accountId, report.genesisHash, client);
     if (!recorded || recorded.version < report.version) {
       await repository.saveBinding({ stationId: station.id, r9AccountId: report.accountId, genesisHash: report.genesisHash, accountId: report.account, bindingId: report.bindingId, version: report.version, bindingState: report.bindingState, reportId: report.reportId }, client);
+      // D27: the newer binding settles each pending release of this R9 account at this genesis, in this transaction:
+      // applied when it is that release (released, the same bindingId), superseded otherwise. A report sent again (the same
+      // reportId, or the same version under a new one) never comes here, so a release settles once.
+      await repository.settleReleases({
+        stationId: station.id, r9AccountId: report.accountId, genesisHash: report.genesisHash, bindingId: report.bindingId, version: report.version,
+        bindingState: report.bindingState, settledAt: now()
+      }, client);
     } else if (recorded.version !== report.version || recorded.accountId !== report.account || recorded.bindingId !== report.bindingId || recorded.bindingState !== report.bindingState) {
       throw bindingNotNewer();
     }

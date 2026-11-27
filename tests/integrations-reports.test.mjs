@@ -884,7 +884,7 @@ test("the built-in Station's checkpoint has the accounts and the bindings: compl
 
   // A fresh Portal is rebuilding: nothing is known, so it isn't complete, and nobody is disabled.
   let answer = await checkpoint();
-  assert.deepEqual(Object.keys(answer.checkpoint), ["at", "integrations", "accounts", "bindings"]);
+  assert.deepEqual(Object.keys(answer.checkpoint), ["at", "integrations", "accounts", "bindings", "pendingReleases"]);
   assert.deepEqual([answer.checkpoint.accounts, answer.checkpoint.bindings], [{ complete: false, disabled: [] }, []]);
   assert.deepEqual(answer.checkpoint.integrations.map((entry) => [entry.id, entry.ownerAccount, entry.state]), [[id.id, OWNER, "awaiting_approval"]]);
   assert.equal(answer.cursor, await newestEvent(s, built.id));

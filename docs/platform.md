@@ -1754,7 +1754,8 @@ off none of this exists: `?checkpoint=1` is ignored and a binding report is 400 
         "version": 3,
         "bindingState": "bound"
       }
-    ]
+    ],
+    "pendingReleases": []
   }
 }
 ```

@@ -395,3 +395,176 @@ test("with DELEGATED_HOST_WORK off, reading bindings and releases is 404 not_fou
   await assert.rejects(off.adminBindings({ account: OWNER }), refused(404, "not_found"));
   await assert.rejects(off.release(made.releaseId), refused(404, "not_found"));
 });
+
+// The Station's side (D27, Portal #41): the checkpoint lists every pending release in its snapshot, and the Station's own
+// binding_changed with a higher version settles them in its transaction.
+const CHECKPOINT = { checkpoint: true };
+const pendingEntry = (release) => ({ releaseId: release.releaseId, account: release.account, accountId: release.accountId, genesisHash: release.genesisHash, bindingId: release.bindingId, version: release.version, requestedAt: release.requestedAt });
+
+test("the built-in Station's checkpoint lists its pending releases, oldest first, in the contract's shape; a settled one leaves it; a custom Station's has none", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await report(s);
+  await report(s, { account: OTHER, accountId: "r9:account-2", bindingId: "bind-o", version: 1 });
+  const empty = await s.service.changes(s.built.reportClientId, "0", CHECKPOINT);
+  assert.deepEqual(Object.keys(empty.checkpoint), ["at", "integrations", "accounts", "bindings", "pendingReleases"]);
+  assert.deepEqual(empty.checkpoint.pendingReleases, []);
+  const first = (await s.service.releaseBinding(ADMIN, body(s))).release;
+  s.clock.now += 1000;
+  const second = (await s.service.releaseBinding(ADMIN, body(s, { accountId: "r9:account-2", bindingId: "bind-o", version: 1 }))).release;
+  const listed = (await s.service.changes(s.built.reportClientId, "0", CHECKPOINT)).checkpoint.pendingReleases;
+  assert.deepEqual(listed, [pendingEntry(first), pendingEntry(second)]);
+  for (const pending of listed) assert.deepEqual(Object.keys(pending), ["releaseId", "account", "accountId", "genesisHash", "bindingId", "version", "requestedAt"]);
+  // The Station applies the first: its released binding_changed settles it, and it leaves the checkpoint.
+  await report(s, { version: 4, bindingState: "released" });
+  assert.deepEqual((await s.service.changes(s.built.reportClientId, "0", CHECKPOINT)).checkpoint.pendingReleases, [pendingEntry(second)]);
+  const custom = await s.register(OWNER);
+  assert.deepEqual(Object.keys((await s.service.changes(custom.reportClientId, "0", CHECKPOINT)).checkpoint), ["at", "integrations"]);
+});
+
+test("pendingReleases and the cursor are one snapshot: a release in flight shows in neither, and its change comes after the cursor", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await report(s);
+  const client = s.built.reportClientId;
+  const before = await s.service.changes(client, "0", CHECKPOINT);
+  // Another replica's release, held inside its transaction once its feed change is written, until released.
+  let release;
+  let arrived;
+  const released = new Promise((resolve) => { release = resolve; });
+  const reached = new Promise((resolve) => { arrived = resolve; });
+  t.after(() => release());
+  const holding = {
+    ...s.repository,
+    async appendEvent(event, transaction) {
+      const written = await s.repository.appendEvent(event, transaction);
+      if (event.kind === "binding_released") { arrived(); await released; }
+      return written;
+    }
+  };
+  const writer = s.make(holding);
+  let settled = false;
+  const writing = writer.releaseBinding(ADMIN, body(s));
+  writing.then(() => { settled = true; }, () => { settled = true; });
+  await Promise.race([reached, writing]);
+  assert.equal(settled, false, "the release is inside its transaction");
+  let timer;
+  const during = await Promise.race([s.service.changes(client, "0", CHECKPOINT), new Promise((resolve) => { timer = setTimeout(() => resolve("waited"), 5000); })]);
+  clearTimeout(timer);
+  assert.notEqual(during, "waited", "a checkpoint takes no lock");
+  assert.equal(during.cursor, before.cursor);
+  assert.deepEqual(during.checkpoint.pendingReleases, []);
+  release();
+  const made = (await writing).release;
+  const after = await s.service.changes(client, "0", CHECKPOINT);
+  assert.ok(after.cursor > during.cursor);
+  assert.deepEqual(after.checkpoint.pendingReleases, [pendingEntry(made)]);
+  const resumed = await s.service.changes(client, String(during.cursor));
+  assert.deepEqual(resumed.changes.map((change) => [change.id, change.kind, change.releaseId]), [[after.cursor, "binding_released", made.releaseId]]);
+  await writer._pushesIdle();
+});
+
+test("a release committed between the checkpoint's own reads shows in none of them", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await report(s);
+  const before = await s.service.changes(s.built.reportClientId, "0", CHECKPOINT);
+  let ran = false;
+  const reading = {
+    ...s.repository,
+    async latestCursor(...args) {
+      const cursor = await s.repository.latestCursor(...args);
+      if (!ran) { ran = true; await s.service.releaseBinding(ADMIN, body(s)); }
+      return cursor;
+    }
+  };
+  const reader = s.make(reading);
+  const answer = await reader.changes(s.built.reportClientId, "0", CHECKPOINT);
+  assert.equal(ran, true, "the release committed after the cursor was read");
+  assert.deepEqual(answer, before, "the checkpoint is as it was when it began");
+  const after = await s.service.changes(s.built.reportClientId, "0", CHECKPOINT);
+  assert.ok(after.cursor > before.cursor);
+  assert.equal(after.checkpoint.pendingReleases.length, 1);
+  await reader._pushesIdle();
+});
+
+test("a binding_changed with a higher version settles each pending release of that R9 account at that genesis in its transaction: applied when it is the release, superseded otherwise", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await report(s);
+  const pending = (await s.service.releaseBinding(ADMIN, body(s))).release;
+  // Another R9 account's pending release, and the same R9 account at another genesis: neither is touched.
+  await report(s, { accountId: "r9:keep", version: 1 });
+  const kept = (await s.service.releaseBinding(ADMIN, body(s, { accountId: "r9:keep", version: 1 }))).release;
+  await report(s, { genesisHash: "a".repeat(64), version: 9, bindingState: "released" });
+  assert.equal((await s.service.release(pending.releaseId)).release.state, "pending", "another genesis settles nothing");
+  s.clock.now += 5000;
+  await report(s, { version: 5, bindingState: "released" });
+  assert.deepEqual((await s.service.release(pending.releaseId)).release, { ...pending, state: "applied", settledAt: "2026-11-27T10:00:05.000Z", settledVersion: 5 });
+  assert.equal((await s.service.release(kept.releaseId)).release.state, "pending");
+  // Superseded: a transfer to another owner, a new binding, unbound, or another binding released.
+  for (const [n, change] of [[1, { account: OTHER }], [2, { bindingId: "bind-new" }], [3, { bindingState: "unbound" }], [4, { bindingId: "bind-other", bindingState: "released" }]]) {
+    const accountId = "r9:superseded-" + n;
+    await report(s, { accountId, version: 1 });
+    const made = (await s.service.releaseBinding(ADMIN, body(s, { accountId, version: 1 }))).release;
+    await report(s, { accountId, version: 2, ...change });
+    const settled = (await s.service.release(made.releaseId)).release;
+    assert.deepEqual([settled.state, settled.settledVersion], ["superseded", 2], JSON.stringify(change));
+  }
+});
+
+test("a binding_changed with the same or a lower version settles nothing", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await report(s);
+  const pending = (await s.service.releaseBinding(ADMIN, body(s))).release;
+  await report(s);
+  await assert.rejects(report(s, { bindingState: "released" }), refused(409, "binding_version"));
+  await assert.rejects(report(s, { version: 2, bindingState: "released" }), refused(409, "binding_version"));
+  assert.deepEqual((await s.service.release(pending.releaseId)).release, pending);
+});
+
+test("settling happens once: a report whose transaction failed settles when it is sent again, and one sent again after a crash, under the same or a new reportId, settles nothing more", async (t) => {
+  let failNext = false;
+  const s = await setup(t, {
+    wrap: (repository) => ({
+      ...repository,
+      async saveStationReport(...args) {
+        if (failNext) { failNext = false; throw Object.assign(new Error("connection lost"), { code: "57P01" }); }
+        return repository.saveStationReport(...args);
+      }
+    })
+  });
+  if (!s) return;
+  await report(s);
+  const pending = (await s.service.releaseBinding(ADMIN, body(s))).release;
+  const applying = { state: "binding_changed", reportId: "binding_changed:" + "a".repeat(64), account: OWNER, accountId: R9_ACCOUNT, genesisHash: GENESIS, bindingId: "bind-1", version: 4, bindingState: "released" };
+  // The Portal fails while it records the report: nothing is recorded, and the release stays pending.
+  failNext = true;
+  await assert.rejects(s.service.report(s.built.reportClientId, applying), /connection lost/);
+  assert.equal((await s.service.release(pending.releaseId)).release.state, "pending");
+  assert.equal((await s.repository.binding(s.built.id, R9_ACCOUNT, GENESIS)).version, 3, "the report rolled back with it");
+  // Sent again under the same reportId: recorded, and the release settles.
+  s.clock.now += 1000;
+  await s.service.report(s.built.reportClientId, applying);
+  const settled = (await s.service.release(pending.releaseId)).release;
+  assert.deepEqual([settled.state, settled.settledVersion, settled.settledAt], ["applied", 4, "2026-11-27T10:00:01.000Z"]);
+  // The Station crashed before it had the answer and sends it again: the same reportId (the recorded answer), then a new one
+  // (the same version and binding: 200, the same news). Neither settles anything again.
+  s.clock.now += 1000;
+  await s.service.report(s.built.reportClientId, applying);
+  await s.service.report(s.built.reportClientId, { ...applying, reportId: "binding_changed:" + "b".repeat(64) });
+  assert.deepEqual((await s.service.release(pending.releaseId)).release, settled);
+  assert.equal(await count(s, "binding_releases", "state <> 'pending'"), 1);
+});
+
+test("with DELEGATED_HOST_WORK off the checkpoint is ignored and a binding report is 400, so nothing is listed or settled", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await report(s);
+  const pending = (await s.service.releaseBinding(ADMIN, body(s))).release;
+  const off = s.make(s.repository, { delegatedHostWork: false });
+  assert.equal(Object.hasOwn(await off.changes(s.built.reportClientId, "0", CHECKPOINT), "checkpoint"), false);
+  await assert.rejects(off.report(s.built.reportClientId, { state: "binding_changed", reportId: "binding_changed:" + "c".repeat(64), account: OWNER, accountId: R9_ACCOUNT, genesisHash: GENESIS, bindingId: "bind-1", version: 4, bindingState: "released" }), refused(400, "report"));
+  assert.equal((await s.service.release(pending.releaseId)).release.state, "pending");
+});
