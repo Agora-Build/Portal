@@ -433,7 +433,6 @@ test("pendingReleases and the cursor are one snapshot: a release in flight shows
   let arrived;
   const released = new Promise((resolve) => { release = resolve; });
   const reached = new Promise((resolve) => { arrived = resolve; });
-  t.after(() => release());
   const holding = {
     ...s.repository,
     async appendEvent(event, transaction) {
@@ -443,25 +442,30 @@ test("pendingReleases and the cursor are one snapshot: a release in flight shows
     }
   };
   const writer = s.make(holding);
-  let settled = false;
-  const writing = writer.releaseBinding(ADMIN, body(s));
-  writing.then(() => { settled = true; }, () => { settled = true; });
-  await Promise.race([reached, writing]);
-  assert.equal(settled, false, "the release is inside its transaction");
-  let timer;
-  const during = await Promise.race([s.service.changes(client, "0", CHECKPOINT), new Promise((resolve) => { timer = setTimeout(() => resolve("waited"), 5000); })]);
-  clearTimeout(timer);
-  assert.notEqual(during, "waited", "a checkpoint takes no lock");
-  assert.equal(during.cursor, before.cursor);
-  assert.deepEqual(during.checkpoint.pendingReleases, []);
-  release();
-  const made = (await writing).release;
-  const after = await s.service.changes(client, "0", CHECKPOINT);
-  assert.ok(after.cursor > during.cursor);
-  assert.deepEqual(after.checkpoint.pendingReleases, [pendingEntry(made)]);
-  const resumed = await s.service.changes(client, String(during.cursor));
-  assert.deepEqual(resumed.changes.map((change) => [change.id, change.kind, change.releaseId]), [[after.cursor, "binding_released", made.releaseId]]);
-  await writer._pushesIdle();
+  // A failing assertion must not leave the writer's transaction held: the database's close waits for it.
+  try {
+    let settled = false;
+    const writing = writer.releaseBinding(ADMIN, body(s));
+    writing.then(() => { settled = true; }, () => { settled = true; });
+    await Promise.race([reached, writing]);
+    assert.equal(settled, false, "the release is inside its transaction");
+    let timer;
+    const during = await Promise.race([s.service.changes(client, "0", CHECKPOINT), new Promise((resolve) => { timer = setTimeout(() => resolve("waited"), 5000); })]);
+    clearTimeout(timer);
+    assert.notEqual(during, "waited", "a checkpoint takes no lock");
+    assert.equal(during.cursor, before.cursor);
+    assert.deepEqual(during.checkpoint.pendingReleases, []);
+    release();
+    const made = (await writing).release;
+    const after = await s.service.changes(client, "0", CHECKPOINT);
+    assert.ok(after.cursor > during.cursor);
+    assert.deepEqual(after.checkpoint.pendingReleases, [pendingEntry(made)]);
+    const resumed = await s.service.changes(client, String(during.cursor));
+    assert.deepEqual(resumed.changes.map((change) => [change.id, change.kind, change.releaseId]), [[after.cursor, "binding_released", made.releaseId]]);
+    await writer._pushesIdle();
+  } finally {
+    release();
+  }
 });
 
 test("a release committed between the checkpoint's own reads shows in none of them", async (t) => {
@@ -511,6 +515,18 @@ test("a binding_changed with a higher version settles each pending release of th
     const settled = (await s.service.release(made.releaseId)).release;
     assert.deepEqual([settled.state, settled.settledVersion], ["superseded", 2], JSON.stringify(change));
   }
+});
+
+test("a released report with the release's bindingId but another Agora.Build account does not apply it: it settles superseded", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  await report(s);
+  const pending = (await s.service.releaseBinding(ADMIN, body(s))).release;
+  s.clock.now += 1000;
+  await report(s, { version: 4, bindingState: "released", account: OTHER });
+  const settled = (await s.service.release(pending.releaseId)).release;
+  assert.deepEqual(settled, { ...pending, state: "superseded", settledAt: "2026-11-27T10:00:01.000Z", settledVersion: 4 });
+  assert.deepEqual((await s.service.changes(s.built.reportClientId, "0", CHECKPOINT)).checkpoint.pendingReleases, []);
 });
 
 test("a binding_changed with the same or a lower version settles nothing", async (t) => {

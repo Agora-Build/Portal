@@ -1156,17 +1156,21 @@ test("releasesOf lists a binding's newest first, pendingReleasesOn a Station's p
   assert.deepEqual((await repo.pendingReleasesOn("stb")).map((release) => release.releaseId), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].map(releaseIdOf));
   // A released bind-5 at version 6: the one for bind-5 is applied, the older others superseded, the newer ones left.
   const settledAt = later(99000);
-  const settled = await repo.settleReleases({ stationId: "stb", r9AccountId: "r9-a", genesisHash: GENESIS, bindingId: "bind-5", version: 6, bindingState: "released", settledAt });
+  const settled = await repo.settleReleases({ stationId: "stb", r9AccountId: "r9-a", genesisHash: GENESIS, account: OWNER_AB, bindingId: "bind-5", version: 6, bindingState: "released", settledAt });
   assert.deepEqual(settled.map((release) => [release.version, release.state, release.settledVersion, release.settledAt]), [
     [1, "superseded", 6, settledAt.toISOString()], [2, "superseded", 6, settledAt.toISOString()], [3, "superseded", 6, settledAt.toISOString()],
     [4, "superseded", 6, settledAt.toISOString()], [5, "applied", 6, settledAt.toISOString()]
   ]);
-  assert.deepEqual(await repo.settleReleases({ stationId: "stb", r9AccountId: "r9-a", genesisHash: GENESIS, bindingId: "bind-5", version: 6, bindingState: "released", settledAt }), [], "nothing older is pending any more");
+  assert.deepEqual(await repo.settleReleases({ stationId: "stb", r9AccountId: "r9-a", genesisHash: GENESIS, account: OWNER_AB, bindingId: "bind-5", version: 6, bindingState: "released", settledAt }), [], "nothing older is pending any more");
   // The same bindingId but bound is not the release: superseded.
-  const bound = await repo.settleReleases({ stationId: "stb", r9AccountId: "r9-a", genesisHash: GENESIS, bindingId: "bind-7", version: 8, bindingState: "bound", settledAt });
+  const bound = await repo.settleReleases({ stationId: "stb", r9AccountId: "r9-a", genesisHash: GENESIS, account: OWNER_AB, bindingId: "bind-7", version: 8, bindingState: "bound", settledAt });
   assert.deepEqual(bound.map((release) => [release.version, release.state]), [[6, "superseded"], [7, "superseded"]]);
+  // Released with the release's bindingId, but for another Agora.Build account than the release names: not that release.
+  const other = await repo.settleReleases({ stationId: "stb", account: OTHER_AB, r9AccountId: "r9-a", genesisHash: GENESIS, bindingId: "bind-9", version: 10, bindingState: "released", settledAt });
+  assert.deepEqual(other.map((release) => [release.version, release.state]), [[8, "superseded"], [9, "superseded"]]);
+  await assert.rejects(repo.settleReleases({ stationId: "stb", r9AccountId: "r9-a", genesisHash: GENESIS, bindingId: "bind-11", version: 12, bindingState: "released", settledAt }), TypeError, "the account is required");
   assert.equal((await repo.releaseById(releaseIdOf(13))).state, "pending", "another R9 account is not touched");
-  assert.deepEqual((await repo.pendingReleasesOn("stb")).map((release) => release.version), [8, 9, 10, 11, 12, 1]);
+  assert.deepEqual((await repo.pendingReleasesOn("stb")).map((release) => release.version), [10, 11, 12, 1]);
   await assert.rejects(db.pool.query("UPDATE binding_releases SET state = 'applied', settled_at = now(), settled_version = 1 WHERE release_id = $1", [releaseIdOf(12)]), { code: "23514" }, "a release settles only at a higher version");
   await assert.rejects(db.pool.query("UPDATE binding_releases SET state = 'applied' WHERE release_id = $1", [releaseIdOf(12)]), { code: "23514" }, "a settled release has its time and version");
 });

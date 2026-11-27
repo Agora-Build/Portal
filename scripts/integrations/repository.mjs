@@ -748,14 +748,16 @@ export function createRepository(db) {
 
     // Settles, for a recorded binding_changed (service.recordBinding, in its transaction), every pending release of that
     // Station's R9 account at that genesis whose version is lower than the report's: applied when the report is released
-    // with the release's bindingId, superseded otherwise. Returns the releases it settled, oldest first.
-    async settleReleases({ stationId, r9AccountId, genesisHash, bindingId, version, bindingState, settledAt }, client) {
+    // with the release's bindingId, for the Agora.Build `account` the release names (the owner it was released from),
+    // superseded otherwise. Returns the releases it settled, oldest first.
+    async settleReleases({ stationId, account, r9AccountId, genesisHash, bindingId, version, bindingState, settledAt }, client) {
+      if (typeof account !== "string" || !account) throw new TypeError("account must be the Agora.Build account the report names.");
       if (!Number.isSafeInteger(version) || version < 1) throw new TypeError("version must be a positive whole number.");
       const { rows } = await run(client,
-        "WITH settled AS (UPDATE binding_releases SET state = CASE WHEN $5::text = 'released' AND binding_id = $4 THEN 'applied' ELSE 'superseded' END, " +
+        "WITH settled AS (UPDATE binding_releases SET state = CASE WHEN $5::text = 'released' AND binding_id = $4 AND account_id = $8 THEN 'applied' ELSE 'superseded' END, " +
         "settled_at = $7, settled_version = $6 WHERE station_id = $1 AND r9_account_id = $2 AND genesis_hash = $3 AND state = 'pending' AND version < $6 RETURNING *) " +
         "SELECT * FROM settled ORDER BY requested_at, release_id COLLATE \"C\"",
-        [stationId, r9AccountId, genesisHash, bindingId, bindingState, version, timeOf(settledAt, "settledAt")]);
+        [stationId, r9AccountId, genesisHash, bindingId, bindingState, version, timeOf(settledAt, "settledAt"), account]);
       return rows.map(releaseRow);
     },
 

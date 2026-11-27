@@ -990,7 +990,6 @@ test("the checkpoint is one snapshot: a writer inside its transaction shows in n
   let arrived;
   const released = new Promise((resolve) => { release = resolve; });
   const reached = new Promise((resolve) => { arrived = resolve; });
-  t.after(() => release());
   const holding = {
     ...s.repository,
     async appendEvent(event, transaction) {
@@ -1004,32 +1003,37 @@ test("the checkpoint is one snapshot: a writer inside its transaction shows in n
     repository: holding, db: s.db, manage: s.manage, stationFetch: { async get() { return { status: 404, body: "" }; } }, pushFetch: s.pushFetch,
     exchange: async () => ({}), now: () => s.clock.now, log: () => {}, delegatedHostWork: true
   });
-  let settled = false;
-  const writing = writer.revoke(OWNER, id, { interruptRunning: true });
-  writing.then(() => { settled = true; }, () => { settled = true; });
-  await Promise.race([reached, writing]);
-  assert.equal(settled, false, "the writer is inside its transaction");
-  assert.equal(await s.db.transaction(async (client) => (await client.query("SELECT pg_try_advisory_xact_lock(hashtext('portal_integration_events')) AS got")).rows[0].got), false, "and holds the event lock");
+  // A failing assertion must not leave the writer's transaction held: the database's close waits for it.
+  try {
+    let settled = false;
+    const writing = writer.revoke(OWNER, id, { interruptRunning: true });
+    writing.then(() => { settled = true; }, () => { settled = true; });
+    await Promise.race([reached, writing]);
+    assert.equal(settled, false, "the writer is inside its transaction");
+    assert.equal(await s.db.transaction(async (client) => (await client.query("SELECT pg_try_advisory_xact_lock(hashtext('portal_integration_events')) AS got")).rows[0].got), false, "and holds the event lock");
 
-  // The checkpoint doesn't wait for the writer, and reflects neither its event nor its row change.
-  let timer;
-  const during = await Promise.race([s.service.changes(client, "0", CHECKPOINT), new Promise((resolve) => { timer = setTimeout(() => resolve("waited"), 5000); })]);
-  clearTimeout(timer);
-  assert.notEqual(during, "waited", "a checkpoint takes no lock");
-  assert.equal(during.cursor, before.cursor);
-  assert.deepEqual(during.checkpoint.integrations, before.checkpoint.integrations);
-  assert.equal((await s.service.changes(client, String(before.cursor))).changes.length, 0, "the feed doesn't have the writer's event either");
+    // The checkpoint doesn't wait for the writer, and reflects neither its event nor its row change.
+    let timer;
+    const during = await Promise.race([s.service.changes(client, "0", CHECKPOINT), new Promise((resolve) => { timer = setTimeout(() => resolve("waited"), 5000); })]);
+    clearTimeout(timer);
+    assert.notEqual(during, "waited", "a checkpoint takes no lock");
+    assert.equal(during.cursor, before.cursor);
+    assert.deepEqual(during.checkpoint.integrations, before.checkpoint.integrations);
+    assert.equal((await s.service.changes(client, String(before.cursor))).changes.length, 0, "the feed doesn't have the writer's event either");
 
-  release();
-  await writing;
-  const after = await s.service.changes(client, "0", CHECKPOINT);
-  assert.ok(after.cursor > during.cursor, "the writer's event is after the checkpoint's cursor");
-  assert.equal(after.checkpoint.integrations[0].state, "revoking");
-  assert.equal(after.checkpoint.integrations[0].interruptRunning, true);
-  // Resuming at the earlier checkpoint's cursor delivers exactly that event, carrying the row change.
-  const resumed = await s.service.changes(client, String(during.cursor));
-  assert.deepEqual(resumed.changes.map((change) => [change.id, change.kind, change.integration.state]), [[after.cursor, "integration_revoked", "revoking"]]);
-  await writer._pushesIdle();
+    release();
+    await writing;
+    const after = await s.service.changes(client, "0", CHECKPOINT);
+    assert.ok(after.cursor > during.cursor, "the writer's event is after the checkpoint's cursor");
+    assert.equal(after.checkpoint.integrations[0].state, "revoking");
+    assert.equal(after.checkpoint.integrations[0].interruptRunning, true);
+    // Resuming at the earlier checkpoint's cursor delivers exactly that event, carrying the row change.
+    const resumed = await s.service.changes(client, String(during.cursor));
+    assert.deepEqual(resumed.changes.map((change) => [change.id, change.kind, change.integration.state]), [[after.cursor, "integration_revoked", "revoking"]]);
+    await writer._pushesIdle();
+  } finally {
+    release();
+  }
 });
 
 test("commits made between the checkpoint's own reads show in none of them", async (t) => {

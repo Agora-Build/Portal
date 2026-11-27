@@ -479,8 +479,7 @@ export function createIntegrationService({
   // event or in neither, and every change committed later has a larger id (ids are taken in commit order, appendEvent).
   // It takes no lock, so it never waits for a writer. Each integration is in the feed's shape (the effective state as of
   // `at`) with its id, and a stopped one says when it was revoked. Only the built-in Station has the accounts (whether
-  // the Portal's view is complete, and the disabled ones), the bindings it last reported and the
-  // releases still pending (D27).
+  // the Portal's view is complete, and the disabled ones), the bindings it last reported and the pending releases (D27).
   async function checkpointOf(station) {
     const snapshot = await db.transaction(async (client) => ({
       cursor: await repository.latestCursor(station.id, client),
@@ -1054,11 +1053,12 @@ export function createIntegrationService({
     if (!recorded || recorded.version < report.version) {
       await repository.saveBinding({ stationId: station.id, r9AccountId: report.accountId, genesisHash: report.genesisHash, accountId: report.account, bindingId: report.bindingId, version: report.version, bindingState: report.bindingState, reportId: report.reportId }, client);
       // D27: the newer binding settles each pending release of this R9 account at this genesis, in this transaction:
-      // applied when it is that release (released, the same bindingId), superseded otherwise. A report sent again (the same
-      // reportId, or the same version under a new one) never comes here, so a release settles once.
+      // applied when it is that release (released, the same bindingId, from the same Agora.Build account), superseded
+      // otherwise. A report sent again (the same reportId, or the same version under a new one) never comes here, so a
+      // release settles once.
       await repository.settleReleases({
-        stationId: station.id, r9AccountId: report.accountId, genesisHash: report.genesisHash, bindingId: report.bindingId, version: report.version,
-        bindingState: report.bindingState, settledAt: now()
+        stationId: station.id, account: report.account, r9AccountId: report.accountId, genesisHash: report.genesisHash, bindingId: report.bindingId,
+        version: report.version, bindingState: report.bindingState, settledAt: now()
       }, client);
     } else if (recorded.version !== report.version || recorded.accountId !== report.account || recorded.bindingId !== report.bindingId || recorded.bindingState !== report.bindingState) {
       throw bindingNotNewer();
