@@ -816,8 +816,8 @@ delegated work (Astation #79) waits for, comes first.
     commit, serving binding-based service only while its last complete feed read began under 60 seconds ago (it fails
     closed otherwise, and polls at least every 20 seconds);
   - recording a `binding_changed` with a higher version settles each pending release of that Station's `(accountId,
-    genesisHash)` in the same transaction: `applied` if it is `released` with the same `bindingId`, otherwise
-    `superseded`.
+    genesisHash)` in the same transaction: `applied` if it is `released` with the same `bindingId` and names the released
+    `account`, otherwise `superseded`.
 - **Admin site** (`DELEGATED_HOST_WORK=1`): an "R9 bindings" page, searched by Agora.Build account or R9 account and
   linked from the account page, shows each binding with its bound account and that account's state, its version and
   last change, and its releases. "Release R9 binding" is offered on `bound` bindings only, never on the admin's own
