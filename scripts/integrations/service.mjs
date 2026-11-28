@@ -427,12 +427,15 @@ function feedCursor(value) {
 }
 
 // What a Station needs to act on an integration; the state is the effective one, so it may be "expired". ownerAccount
-// lets the Station bind an integration to its owner before approval, when the integration itself has no token yet. A
-// stopped one also says whether its revocation interrupts running tasks (delegated, D29).
+// lets the Station bind an integration to its owner before approval, when the integration itself has no token yet. With
+// the setting on (`delegated`, D29, Portal #41) a stopped one also says whether its revocation interrupts running tasks
+// and when it was first revoked (null if that was before revokedAt was recorded), and any other says whether it is held:
+// paused, or its owner's account disabled, whatever its expiry, which is what the Station's hold and release follow.
 function feedIntegration(row, at, delegated = false) {
   const entry = { ownerAccount: row.ownerAccount, state: effectiveState(row, at), scopes: row.scopes, r9Svc: row.r9Svc, expiresAt: row.expiresAt, quotaPerSecond: row.quotaPerSecond };
-  if (delegated && STOPPED.includes(row.state)) entry.interruptRunning = row.interruptRunning;
-  return entry;
+  if (!delegated) return entry;
+  if (STOPPED.includes(row.state)) return { ...entry, interruptRunning: row.interruptRunning, revokedAt: row.revokedAt };
+  return { ...entry, held: row.state === "paused" || row.ownerDisabledAt != null };
 }
 
 // Who stopped a paused integration, for the page: Auth's pausedBy while the row is paused, and "admin" while Agora.Build
@@ -504,7 +507,7 @@ export function createIntegrationService({
   // appends under the event lock commits its event and its rows together, so a change is in the snapshot with its
   // event or in neither, and every change committed later has a larger id (ids are taken in commit order, appendEvent).
   // It takes no lock, so it never waits for a writer. Each integration is in the feed's shape (the effective state as of
-  // `at`) with its id, and a stopped one says when it was revoked. Only the built-in Station has the accounts (whether
+  // `at`, and its revokedAt or held) with its id. Only the built-in Station has the accounts (whether
   // the Portal's view is complete, and the disabled ones), the bindings it last reported and the pending releases (D27).
   async function checkpointOf(station) {
     const snapshot = await db.transaction(async (client) => ({
@@ -520,7 +523,7 @@ export function createIntegrationService({
     const at = now();
     const checkpoint = {
       at: new Date(at).toISOString(),
-      integrations: snapshot.rows.map((row) => ({ id: row.id, ...feedIntegration(row, at, true), ...(STOPPED.includes(row.state) ? { revokedAt: row.revokedAt } : {}) }))
+      integrations: snapshot.rows.map((row) => ({ id: row.id, ...feedIntegration(row, at, true) }))
     };
     if (station.builtIn) {
       checkpoint.accounts = { complete: snapshot.complete, disabled: snapshot.disabled };

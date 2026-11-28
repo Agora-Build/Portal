@@ -385,6 +385,31 @@ test("with the setting off, the Station's feed has no interruptRunning anywhere"
   assert.deepEqual(Object.keys(feed.integrations[0]).sort(), ["expiresAt", "id", "ownerAccount", "quotaPerSecond", "r9Svc", "scopes", "state"]);
 });
 
+test("with the setting off, the Station's feed has no held or revokedAt anywhere", async (t) => {
+  const s = await setup(t);
+  if (!s) return;
+  const client = s.station.reportClientId;
+  await s.service.share(OWNER, s.station.id, MEMBER);
+  const paused = await s.approved();
+  const disabled = await s.approved();
+  const revoking = await s.approved();
+  const revoked = await s.approved(MEMBER);
+  await s.service.pause(OWNER, paused);
+  await s.service.revoke(OWNER, revoking);
+  await s.service.revoke(MEMBER, revoked);
+  await s.service.report(client, { integrationId: revoked, state: "revoked" });
+  await s.repository.updateIntegration(disabled, { ownerDisabledAt: s.clock.now });
+  s.clock.now += 31 * DAY;
+  const feed = await s.service.changes(client, 0);
+  const entries = [...feed.integrations, ...feed.changes.filter((change) => change.integration).map((change) => change.integration)];
+  assert.ok(entries.length >= 8 && feed.integrations.length === 4);
+  for (const entry of entries) {
+    for (const key of ["held", "revokedAt", "interruptRunning"]) assert.equal(Object.hasOwn(entry, key), false, key + " on " + entry.state);
+  }
+  assert.deepEqual(feed.integrations.map((entry) => entry.state), ["expired", "expired", "revoking", "revoked"]);
+  assert.equal(Object.hasOwn(await s.service.changes(client, 0, CHECKPOINT), "checkpoint"), false, "and no checkpoint to carry them");
+});
+
 // D29: the later "interrupt running tasks" is a change in the Station's feed, pushed like the others.
 test("with the setting on, an interrupt is pushed and is a feed change with interruptRunning: true, its integration carrying it too", async (t) => {
   const s = await setup(t, { delegatedHostWork: true });
@@ -826,8 +851,11 @@ test("the checkpoint's cursor is the Station's newest event, it lists every inte
   assert.equal(checkpoint.checkpoint.at, ISO(s.clock.now));
 
   const row = async (id) => s.repository.integration(id);
-  const open = async (id, state) => ({ id, ownerAccount: OWNER, state, scopes: ["agent.view"], r9Svc: (await row(id)).r9Svc, expiresAt: (await row(id)).expiresAt, quotaPerSecond: 200 });
-  const stopped = async (id, state, interruptRunning) => ({ ...await open(id, state), interruptRunning, revokedAt: (await row(id)).revokedAt });
+  const open = async (id, state) => ({ id, ownerAccount: OWNER, state, scopes: ["agent.view"], r9Svc: (await row(id)).r9Svc, expiresAt: (await row(id)).expiresAt, quotaPerSecond: 200, held: false });
+  const stopped = async (id, state, interruptRunning) => {
+    const { held, ...entry } = await open(id, state);
+    return { ...entry, interruptRunning, revokedAt: (await row(id)).revokedAt };
+  };
   assert.deepEqual(checkpoint.checkpoint.integrations, [
     await open(live, "ready"), await open(pending, "awaiting_approval"), await stopped(revoking, "revoking", true), await stopped(revoked, "revoked", false), await stopped(never, "revoked", false)
   ]);
@@ -835,7 +863,7 @@ test("the checkpoint's cursor is the Station's newest event, it lists every inte
   assert.equal(Object.hasOwn(checkpoint.checkpoint.integrations[0], "revokedAt"), false, "a live one has none");
   assert.equal(Object.hasOwn(checkpoint.checkpoint.integrations[0], "interruptRunning"), false);
 
-  // The feed from cursor 0 ends at the same cursor, with the same integrations (its own snapshot shape, without revokedAt).
+  // The feed from cursor 0 ends at the same cursor, with the same integrations (its own snapshot shape, with the same revokedAt and held).
   const feed = await s.service.changes(client, "0");
   assert.equal(feed.cursor, checkpoint.cursor);
   assert.deepEqual(feed.integrations.map((entry) => entry.id), checkpoint.checkpoint.integrations.map((entry) => entry.id));
@@ -871,6 +899,114 @@ test("a Station with nothing yet, and a checkpoint that is not asked for, answer
     const feed = await s.service.changes(s.station.reportClientId, "0", options);
     assert.equal(Object.hasOwn(feed, "checkpoint"), false);
     assert.deepEqual(feed.integrations.map((entry) => entry.id), [id]);
+  }
+});
+
+// D29 (Portal #41): an integration that isn't stopped says whether it is held, which is what the Station's hold and release
+// control records follow; a stopped one says when it was revoked. A Station reads an integration in three places: the
+// `integration` of a change, an entry of the cursor-0 `integrations`, and an entry of the checkpoint's.
+async function seenBy(s, id) {
+  const client = s.station.reportClientId;
+  const feed = await s.service.changes(client, "0");
+  const changes = feed.changes.filter((change) => change.integrationId === id && change.integration);
+  assert.ok(changes.length > 0, "the integration has a change");
+  const { checkpoint } = await s.service.changes(client, "0", CHECKPOINT);
+  return {
+    change: changes.at(-1).integration,
+    feed: feed.integrations.find((entry) => entry.id === id),
+    checkpoint: checkpoint.integrations.find((entry) => entry.id === id)
+  };
+}
+const heldAs = async (s, id) => {
+  const seen = await seenBy(s, id);
+  assert.deepEqual([seen.feed.state, seen.checkpoint.state], [seen.change.state, seen.change.state], "the same state in each");
+  assert.deepEqual([seen.feed.held, seen.checkpoint.held], [seen.change.held, seen.change.held], "the same held in each");
+  return [seen.change.state, seen.change.held];
+};
+
+test("with the setting on, an integration that isn't stopped says whether it is held, whatever its expiry: paused by anyone, or its owner disabled", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  await s.service.share(OWNER, s.station.id, MEMBER);
+  const plain = await s.approved();
+  const paused = await s.approved();
+  const stationPaused = await s.approved(MEMBER);
+  const disabled = await s.approved();
+  const resumed = await s.approved();
+  const pending = await s.create();
+  for (const id of [plain, paused, stationPaused, disabled, resumed]) await s.service.report(client, { integrationId: id, state: "ready" });
+  await s.service.pause(OWNER, paused);
+  await s.service.pause(OWNER, stationPaused);
+  await s.service.pause(OWNER, resumed);
+  await s.service.resume(OWNER, resumed);
+  // Set last: a call by the owner that Auth accepts clears a flag older than it (byActor).
+  await s.repository.updateIntegration(disabled, { ownerDisabledAt: s.clock.now });
+
+  assert.deepEqual(await heldAs(s, plain), ["ready", false]);
+  assert.deepEqual(await heldAs(s, paused), ["paused", true], "paused by its owner");
+  assert.deepEqual(await heldAs(s, stationPaused), ["paused", true], "paused by its Station's owner");
+  assert.deepEqual(await heldAs(s, disabled), ["paused", true], "its owner's account is disabled");
+  assert.deepEqual(await heldAs(s, resumed), ["ready", false], "resumed");
+  assert.deepEqual(await heldAs(s, pending), ["awaiting_approval", false]);
+
+  // Expiry changes the state and nothing about being held: it never makes a control record.
+  s.clock.now += 31 * DAY;
+  const fresh = await s.approved(MEMBER);
+  await s.service.report(client, { integrationId: fresh, state: "ready" });
+  assert.deepEqual(await heldAs(s, plain), ["expired", false], "expired, not paused");
+  assert.deepEqual(await heldAs(s, paused), ["expired", true], "expired, and it was paused");
+  assert.deepEqual(await heldAs(s, stationPaused), ["expired", true]);
+  assert.deepEqual(await heldAs(s, disabled), ["expired", true], "expired, and its owner is disabled");
+  assert.deepEqual(await heldAs(s, resumed), ["expired", false]);
+  assert.deepEqual(await heldAs(s, pending), ["expired", false]);
+  assert.deepEqual(await heldAs(s, fresh), ["ready", false], "a ready one");
+  const { feed } = await seenBy(s, paused);
+  assert.equal(typeof feed.held, "boolean");
+});
+
+test("with the setting on, a stopped integration has no held, and its revokedAt is the first revocation's time on the change, the cursor-0 entry and the checkpoint", async (t) => {
+  const s = await setup(t, { delegatedHostWork: true });
+  if (!s) return;
+  const client = s.station.reportClientId;
+  const revoking = await s.approved();
+  const revoked = await s.approved();
+  const wasPaused = await s.approved();
+  const legacy = await s.approved();
+  const live = await s.approved();
+  await s.service.pause(OWNER, wasPaused);
+  const first = s.clock.now;
+  await s.service.revoke(OWNER, revoking, { interruptRunning: false });
+  s.clock.now += 60000;
+  await s.service.revoke(OWNER, revoked, { interruptRunning: false });
+  await s.service.report(client, { integrationId: revoked, state: "revoked" });
+  s.clock.now += 60000;
+  await s.service.revoke(OWNER, wasPaused, { interruptRunning: false });
+  await s.repository.updateIntegration(wasPaused, { ownerDisabledAt: s.clock.now });
+  // Revoked before migration 004, which began to record when.
+  await s.repository.updateIntegration(legacy, { state: "revoked", revokedAt: null });
+
+  const dated = { [revoking]: ISO(first), [revoked]: ISO(first + 60000), [wasPaused]: ISO(first + 120000), [legacy]: null };
+  for (const [id, revokedAt] of Object.entries(dated)) {
+    const seen = await seenBy(s, id);
+    assert.deepEqual([seen.change.revokedAt, seen.feed.revokedAt, seen.checkpoint.revokedAt], [revokedAt, revokedAt, revokedAt], id);
+    assert.equal((await s.repository.integration(id)).revokedAt, revokedAt);
+    for (const entry of Object.values(seen)) assert.equal(Object.hasOwn(entry, "held"), false, "a stopped integration has no held: " + entry.state);
+  }
+  assert.deepEqual(await heldAs(s, live), ["provisioning", false]);
+  assert.equal(Object.hasOwn((await seenBy(s, live)).feed, "revokedAt"), false, "a live one has no revokedAt");
+
+  // A later interrupt leaves the time as it was, on the interrupt's own change too.
+  s.clock.now += 3600000;
+  await s.service.interrupt(OWNER, revoking);
+  await s.service.interrupt(OWNER, revoked);
+  const later = await s.service.changes(client, 0);
+  const interrupts = later.changes.filter((change) => change.kind === "integration_interrupt_requested");
+  assert.deepEqual(interrupts.map((change) => [change.integrationId, change.integration.interruptRunning, change.integration.revokedAt]), [[revoking, true, dated[revoking]], [revoked, true, dated[revoked]]]);
+  for (const id of [revoking, revoked]) {
+    const seen = await seenBy(s, id);
+    assert.deepEqual([seen.change.revokedAt, seen.feed.revokedAt, seen.checkpoint.revokedAt], [dated[id], dated[id], dated[id]], "after the interrupt");
+    assert.deepEqual([seen.feed.interruptRunning, seen.checkpoint.interruptRunning], [true, true]);
   }
 });
 
