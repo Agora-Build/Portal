@@ -1966,11 +1966,12 @@ which are described after the change feed ("The built-in Station's binding repor
   - An own revoke recorded after its own deadline is final at once: `all_applied` when every covered host already has the
     revocation in force (through a native revoke), else `deadline_passed`.
 - **The 24-hour clock** starts at `min(revoked_at_ms, issued_at + 1 h)`: `revoked_at_ms` is when the Portal revoked the
-  integration and `issued_at` is the own revoke's. The Station reads `revoked_at_ms` from the `at` of its feed's
-  `integration_revoked` change for the integration, or from the integration's `revokedAt` in the feed and the checkpoint
-  (the first revocation's time, `null` for one revoked before migration 004; the answer to a report carries neither).
-  Keep the start, so that a restart doesn't move the deadline. The Portal runs no clock of its own and
-  takes the report when it comes.
+  integration and `issued_at` is the own revoke's. The Station reads `revoked_at_ms` from the integration's `revokedAt`
+  (on the feed's `integration` objects, the cursor-0 entries and the checkpoint: the first revocation's time), and only
+  when that is `null` (revoked before migration 004) from the `at` of its feed's first `integration_revoked` change for
+  the integration. The two can differ: a revocation the Portal read from Auth's feed is dated when Auth made it, and the
+  change when the Portal recorded it. The answer to a report carries neither. Keep the start, so that a restart doesn't
+  move the deadline. The Portal runs no clock of its own and takes the report when it comes.
 - **The answers.** The Portal itself answers 200, 400, 401, 403, 404, 409, 413, 415, 429, 500 (any unexpected error, such
   as a database statement timeout) and 503 here; the other rows are for a proxy in between, or a mistake. A 500 is in the
   retry class.
@@ -2100,10 +2101,10 @@ on `integration` objects) and `disabledAccounts` is not served; the account chan
   follow; expiry never produces one (below). Agreed on
   [Portal #41](https://github.com/Agora-Build/Portal/issues/41#issuecomment-7234713182).
 - `integration.revokedAt` is when the integration was first revoked, as an ISO time, on the same objects and in the
-  checkpoint's `integrations`, for integrations whose `state` is `revoking` or `revoked` only, beside
-  `interruptRunning`.
+  checkpoint's `integrations`, for integrations whose `state` is `revoking` or `revoked` only, beside `interruptRunning`.
   A later interrupt (`integration_interrupt_requested`) does not move it. It is `null` for an integration revoked before
-  migration 004, which did not record when. It is the same value as the checkpoint's, which already had it. Agreed on
+  migration 004, which did not record when. It is the same value as the checkpoint's, which already had it, and where
+  the 24-hour clock starts (above). Agreed on
   [Portal #41](https://github.com/Agora-Build/Portal/issues/41#issuecomment-7234713182).
 - A revoked change's own `interruptRunning`, on `integration_revoked`, is what that change stated: `true` when the revocation
   asked to interrupt, and `false` when it did not, for an indirect revocation (a member removed, a Station removed, an
