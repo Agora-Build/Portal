@@ -114,11 +114,12 @@ test("removing a Station begins its two-phase removal: Auth first, then the Stat
   assert.deepEqual([s.asked("beginStationRemoval"), (await s.events("station_removing")).length], [1, 1]);
 });
 
-test("the last final report completes the removal: Auth's complete-removal, the Station removed with nothing pending, and one more push", async (t) => {
+test("the last final completes removal and flags only services with unconfirmed hosts", async (t) => {
   const s = await setup(t);
   if (!s) return;
   const one = await s.integration();
   const two = await s.integration(MEMBER);
+  const late = await s.integration();
   await s.service.removeStation(OWNER, s.station.id);
   s.notified.length = 0;
   // A removing Station reports as an active one does: a host applied the revocation, then the final.
@@ -127,14 +128,20 @@ test("the last final report completes the removal: Auth's complete-removal, the 
   assert.equal((await s.final(one)).state, "revoked");
   assert.equal((await s.repository.station(s.station.id)).status, "removing", "one integration is still revoking");
   assert.equal(s.asked("completeStationRemoval"), 0);
+  // A second Portal process receives the confirmation before removal completes.
+  await s.final(late, { outcome: "deadline_passed", pendingHosts: ["tablet"] });
+  await s.open().report(s.station.reportClientId, { integrationId: late, state: "revocation_applied", reportId: "late-tablet", host: "tablet", recordId: RECORD });
   s.clock.now += 1000;
   assert.equal((await s.final(two, { outcome: "deadline_passed", pendingHosts: ["desk"] })).state, "revoked");
   const removed = await s.repository.station(s.station.id);
   assert.deepEqual([removed.status, removed.removedAt], ["removed", iso(s.clock.now)]);
   assert.deepEqual([s.asked("completeStationRemoval"), s.authStation().status, s.authStation().reportClientRevoked], [1, "removed", true]);
-  assert.deepEqual([await s.flag(one), await s.flag(two)], [["revoked", false], ["revoked", false]], "each had its final: nothing pending");
+  assert.deepEqual([await s.flag(one), await s.flag(two), await s.flag(late)], [["revoked", false], ["revoked", true], ["revoked", false]]);
+  const visible = (await s.open().integrations(MEMBER)).integrations.find((row) => row.id === two);
+  assert.equal(visible.pendingHostRevocation, true);
+  assert.equal(visible.revocation.unconfirmedHosts, 1);
   const [done] = await s.events("station_removed");
-  assert.deepEqual([done.actor, done.account_id, done.reason, done.details], ["system", OWNER, "removal_completed", { completedBy: "all_revoked", pendingHostRevocation: 0 }]);
+  assert.deepEqual([done.actor, done.account_id, done.reason, done.details], ["system", OWNER, "removal_completed", { completedBy: "all_revoked", pendingHostRevocation: 1 }]);
   assert.deepEqual(s.notified, [s.station.id], "pushed once more: its token is refused from now on");
   assert.ok(s.logs.includes("Station removal completed: every integration revoked."));
   await assert.rejects(s.service.changes(s.station.reportClientId, "0"), refused(403, "station"));
