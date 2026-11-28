@@ -1193,12 +1193,13 @@ so it never reads its integrations' revocations, and they stay `revoking`.
    at start, after its first sync with Auth and once the feed reader has started (`ready()` does not wait for it), and then
    after each hourly built-in Station sync that reached Auth. So a removal completes at the first check at or after
    `completeBy`, up to about an hour later; a sync that failed is tried again a minute later and checks nothing. The
-   completion asks Auth to complete the removal (`POST /manage/v1/stations/<id>/complete-removal`, always as `system`), which
-   removes the Station and revokes its report client. Then, in one transaction, the Portal marks the Station `removed`,
-   revokes every integration on it that isn't revoked yet and flags those with an R9 service pending host revocation (below),
-   records `station_removed` (reason `removal_completed`, with `completedBy` and `pendingHostRevocation`, the number flagged)
-   and pushes the Station once more: its token is refused from now on, which is how it learns to stop. `completedBy` has
-   three values:
+   completion asks Auth to complete the removal (`POST /manage/v1/stations/<id>/complete-removal`, always as `system`),
+   which removes the Station and revokes its report client. Then, in one transaction, the Portal marks the Station
+   `removed`, revokes every integration on it that isn't revoked yet, flags pending host revocation (below) those of
+   them with an R9 service and those already revoked whose `deadline_passed` final still has an unconfirmed host,
+   records `station_removed` (reason `removal_completed`, with `completedBy` and `pendingHostRevocation`, the number
+   flagged) and pushes the Station once more: its token is refused from now on, which is how it learns to stop.
+   `completedBy` has three values:
 
    - `all_revoked`: every integration on it was revoked.
    - `deadline`: `completeBy` had passed at the check.
@@ -1232,13 +1233,15 @@ every integration on the Station is revoked at once, as below. A Station whose o
 `Station removal begun in Portal: Auth has it removing.`, and a check that couldn't read the removing Stations logs
 `Station removals not checked: <code>.`
 
-**Pending host revocation.** An integration revoked without its Station's final report, so that a host may not have been
-told, is `revoked` with `pending_host_revocation`. It is set at the completion of a removal, on the integrations not yet
-revoked, and, with the setting on, whenever a Station is gone without the two phases: Auth no longer lists it, another
-Station took its origin, or it was removed in one step because Auth has no two-phase removal. Only integrations with an R9 service (`r9_svc`, set by approval) can need a native revoke.
-On removal, the Portal also checks each `deadline_passed` final against the hosts that have confirmed for that
-integration. If any named host still has no confirmation, the owner gets the same flag. Confirmations received
-after the final and before completion count, including on another Portal replica. Its view says
+**Pending host revocation.** An integration whose revocation may not have reached every host is `revoked` with
+`pending_host_revocation`. It is set at the completion of a removal and, with the setting on, whenever a Station is gone
+without the two phases: Auth no longer lists it, another Station took its origin, or it was removed in one step because
+Auth has no two-phase removal. Each time it is set on an integration that has an R9 service (`r9_svc`, set by its
+approval: one never approved has none, so no host holds it) and either wasn't revoked yet (no final report came) or was
+revoked with a `deadline_passed` final that still names a host with no confirmation. Confirmations that came after the
+final count, received on any Portal replica; a final that accounts for every host (`all_applied`, or `deadline_passed`
+with each named host confirmed since) needs no flag. Agreed with Astation on Portal #41
+([7213808741](https://github.com/Agora-Build/Portal/issues/41#issuecomment-7213808741)). Its view says
 `pendingHostRevocation: true` (the lists, `GET /api/v1/integrations` included, with the setting on), and the account page
 says "Revoked; your hosts weren't all told. Revoke it from Astation to make sure." Astation offers its owner a native
 `revoke`, and its call, `POST /api/v1/integrations/<id>/revoke` `{ interruptRunning }` (the native route, the integration's
@@ -2026,12 +2029,12 @@ them. The full rules are Atem's, in
   signed for it before, across a restart, a reset's snapshot and a handover.
 - **Removal is two-phase with both settings on.** Atem's §9 says a Station learns of its own removal only through a
   two-phase removal, and with `DELEGATED_HOST_WORK` and Auth's `AUTH_DELEGATED_HOST_WORK` on the Portal does that
-  ("Removing A Station"): the Station's integrations go `revoking` with reason `station_removed`, the Station still reads
-  its feed and reports while it issues and serves their records, and the removal completes once they are all `revoked`
-  or at the first hourly check at or after 26 hours. Those with an R9 service still revoking then, and those of a
-  Station that leaves without the two phases, are flagged pending host revocation for the owner's native revoke
-  ("Routes"). With either setting off, removal is one step, as before: the Station reads its feed no more and never
-  serves those records.
+  ("Removing A Station"): the Station's integrations go `revoking` with reason `station_removed`, the Station still
+  reads its feed and reports while it issues and serves their records, and the removal completes once they are all
+  `revoked` or at the first hourly check at or after 26 hours. Those with an R9 service still revoking then or whose
+  `deadline_passed` final still names an unconfirmed host, and those of a Station that leaves without the two phases,
+  are flagged pending host revocation for the owner's native revoke ("Routes"). With either setting off, removal is one
+  step, as before: the Station reads its feed no more and never serves those records.
 
 **The change feed.** `GET /api/v1/stations/changes?cursor=<n>` returns
 `{ changes, cursor }` and, only for `cursor=0`, `integrations`, a snapshot of
