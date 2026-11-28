@@ -716,13 +716,18 @@ export function createIntegrationService({
   // Inside the caller's transaction every integration on it that isn't revoked yet is revoked: a live one at once, as
   // revokeOn's direct revocation does (no interrupt), and one still revoking without the final report it will never get
   // (its own choice kept). Each of them that has an R9 service (r9Svc: a host may hold it) is flagged pending host
-  // revocation, for the owner's native revoke in Astation. Returns how many it flagged.
+  // revocation, as is a service whose final still has unconfirmed hosts. Returns how many it flagged.
   async function abandonOn(client, stationId, { actor, reason }) {
     const before = await repository.integrationsOnStation(stationId, client);
     await revokeOn(client, stationId, () => true, { actor, reason, direct: true });
     let flagged = 0;
     for (const listed of before) {
-      if (listed.state === "revoked") continue;
+      if (listed.state === "revoked") {
+        if (!listed.r9Svc || listed.revocationOutcome !== "deadline_passed") continue;
+        // A host can confirm after the final and before removal completes.
+        const hosts = await repository.revocationHosts(listed.id, client);
+        if (revocationCounts(listed, hosts).unconfirmedHosts === 0) continue;
+      }
       const row = await repository.integrationForUpdate(listed.id, client);
       if (row.state === "revoking") {
         await repository.updateIntegration(row.id, { state: "revoked", resumeState: null }, client);
