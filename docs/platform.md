@@ -1967,8 +1967,9 @@ which are described after the change feed ("The built-in Station's binding repor
     revocation in force (through a native revoke), else `deadline_passed`.
 - **The 24-hour clock** starts at `min(revoked_at_ms, issued_at + 1 h)`: `revoked_at_ms` is when the Portal revoked the
   integration and `issued_at` is the own revoke's. The Station reads `revoked_at_ms` from the `at` of its feed's
-  `integration_revoked` change for the integration: neither the answer to a report nor the feed's `integration` objects
-  carry `revokedAt`. Keep the start, so that a restart doesn't move the deadline. The Portal runs no clock of its own and
+  `integration_revoked` change for the integration, or from the integration's `revokedAt` in the feed and the checkpoint
+  (the first revocation's time, `null` for one revoked before migration 004; the answer to a report carries neither).
+  Keep the start, so that a restart doesn't move the deadline. The Portal runs no clock of its own and
   takes the report when it comes.
 - **The answers.** The Portal itself answers 200, 400, 401, 403, 404, 409, 413, 415, 429, 500 (any unexpected error, such
   as a database statement timeout) and 503 here; the other rows are for a proxy in between, or a mistake. A 500 is in the
@@ -2084,13 +2085,26 @@ refused (Auth's 401 `invalid_client`, the Portal's 403): that is its stop signal
 
 **With `DELEGATED_HOST_WORK=1` (off by default):** the feed also says what to do about tasks already running on the
 Station's hosts ([D29](integrations.md#311-delegated-host-work-d29)). With the setting off, what was recorded while it
-was on stays in the feed, but `interruptRunning` is no longer carried (neither on changes nor on `integration` objects)
-and `disabledAccounts` is not served; the account changes and the `integration_interrupt_requested` kind are still served
-as recorded.
+was on stays in the feed, but `interruptRunning`, `held` and `revokedAt` are no longer carried (neither on changes nor
+on `integration` objects) and `disabledAccounts` is not served; the account changes and the
+`integration_interrupt_requested` kind are still served as recorded.
 
 - `integration.interruptRunning` is the integration's current choice: whether to interrupt the tasks running on the
   owner's hosts. It is on the `integration` of a change and on each `integrations` snapshot entry, for integrations whose
   `state` is `revoking` or `revoked` only. It only ever goes from `false` to `true`; act on it as you do on `state`.
+- `integration.held` is whether the integration is held, on the same objects and in the checkpoint's `integrations`, for
+  integrations that are not `revoking` or `revoked` (a stopped one has no `held`). It is `true` while the integration is
+  paused (by its owner, its Station's owner or an Agora.Build admin) or its owner's account is disabled, whatever its
+  expiry, and `false` otherwise, so an `expired` integration that was paused, or whose owner is disabled, is
+  `held: true`, and one that was not is `held: false`. It is what the Station's `hold` and `release` control records
+  follow; expiry never produces one (below). Agreed on
+  [Portal #41](https://github.com/Agora-Build/Portal/issues/41#issuecomment-7234713182).
+- `integration.revokedAt` is when the integration was first revoked, as an ISO time, on the same objects and in the
+  checkpoint's `integrations`, for integrations whose `state` is `revoking` or `revoked` only, beside
+  `interruptRunning`.
+  A later interrupt (`integration_interrupt_requested`) does not move it. It is `null` for an integration revoked before
+  migration 004, which did not record when. It is the same value as the checkpoint's, which already had it. Agreed on
+  [Portal #41](https://github.com/Agora-Build/Portal/issues/41#issuecomment-7234713182).
 - A revoked change's own `interruptRunning`, on `integration_revoked`, is what that change stated: `true` when the revocation
   asked to interrupt, and `false` when it did not, for an indirect revocation (a member removed, a Station removed, an
   integration Auth no longer lists) and for one recorded before the setting was on. A revocation the Portal first saw in
@@ -2144,7 +2158,8 @@ off none of this exists: `?checkpoint=1` is ignored and a binding report is 400 
         "scopes": ["agent.view", "agent.prompt"],
         "r9Svc": "9d41c7a2e08b5f36d1a4c9e72b085f3ad6c1e49b7a02d8f5c3e61b9a4d70f2c8",
         "expiresAt": "2026-12-21T10:00:00.000Z",
-        "quotaPerSecond": 200
+        "quotaPerSecond": 200,
+        "held": false
       },
       {
         "id": "i-01kb4t3n9y6r8s4x0a2d7e5gjk",
@@ -2203,7 +2218,8 @@ A custom Station's checkpoint has `at` and `integrations` only:
         "scopes": ["agent.view"],
         "r9Svc": "e3a96d0b52c8f147a9d3e6b0c25f8a71d4e90b36c7a5f218e0d94b3a6c15f7e2",
         "expiresAt": "2026-12-10T10:00:00.000Z",
-        "quotaPerSecond": 200
+        "quotaPerSecond": 200,
+        "held": true
       }
     ]
   }
@@ -2221,8 +2237,9 @@ A custom Station's checkpoint has `at` and `integrations` only:
   `state` is the effective one as of `at`, so an integration past its expiry reads `expired`.
 - **`integrations`** lists every integration on the Station in any state, revoked and stopped ones included, oldest
   first, in the feed's integration shape (`ownerAccount`, `state`, `scopes`, `r9Svc`, `expiresAt`, `quotaPerSecond`) plus
-  its `id`. A stopped one (`revoking` or `revoked`) also has `interruptRunning` and `revokedAt`. `revokedAt` is `null` for
-  a revocation from before migration 004, which did not record when.
+  its `id`. A stopped one (`revoking` or `revoked`) also has `interruptRunning` and `revokedAt`, and any other has
+  `held`, exactly as the feed's `integration` and cursor-0 entries do. `revokedAt` is `null` for a revocation from
+  before migration 004, which did not record when.
 - **`accounts`, `bindings` and `pendingReleases` appear on the built-in Station only.** A custom Station gets none of them,
   ever.
   - `accounts.disabled` lists the Agora.Build account IDs disabled now, in account order. What it means depends on

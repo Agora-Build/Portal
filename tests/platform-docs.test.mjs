@@ -19,7 +19,7 @@ const NAMES = [
   "binding-changed-request", "binding-changed-answer", "binding-version-error", "binding-attempt-request", "binding-attempt-answer",
   "admin-bindings", "admin-release-request", "admin-release-answer", "admin-release-error", "binding-released-change"
 ];
-const FIXED = ["kind", "reason", "role", "status", "membership", "access", "state", "bindingState", "builtIn", "integrationsEnabled", "stale", "complete", "interruptRunning", "quotaPerSecond", "version", "name", "accountState"];
+const FIXED = ["kind", "reason", "role", "status", "membership", "access", "state", "bindingState", "builtIn", "integrationsEnabled", "stale", "complete", "interruptRunning", "held", "quotaPerSecond", "version", "name", "accountState"];
 const document = readFileSync(new URL("../docs/platform.md", import.meta.url), "utf8");
 const examples = Object.fromEntries([...document.matchAll(/^[ ]*```json example:([a-z-]+)\n([\s\S]*?)^[ ]*```$/gm)].map((match) => [match[1], JSON.parse(match[2])]));
 
