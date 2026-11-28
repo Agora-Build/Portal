@@ -1235,10 +1235,10 @@ every integration on the Station is revoked at once, as below. A Station whose o
 **Pending host revocation.** An integration revoked without its Station's final report, so that a host may not have been
 told, is `revoked` with `pending_host_revocation`. It is set at the completion of a removal, on the integrations not yet
 revoked, and, with the setting on, whenever a Station is gone without the two phases: Auth no longer lists it, another
-Station took its origin, or it was removed in one step because Auth has no two-phase removal. Each time only an integration
-that has an R9 service (`r9_svc`, set by its approval) and wasn't revoked yet is flagged: one never approved has none, so no
-host holds it. An integration whose final report already came is not flagged today, even with hosts that didn't confirm
-(`deadline_passed`); whether to flag those too is still being settled with Astation and Atem (Portal #41). Its view says
+Station took its origin, or it was removed in one step because Auth has no two-phase removal. Only integrations with an R9 service (`r9_svc`, set by approval) can need a native revoke.
+On removal, the Portal also checks each `deadline_passed` final against the hosts that have confirmed for that
+integration. If any named host still has no confirmation, the owner gets the same flag. Confirmations received
+after the final and before completion count, including on another Portal replica. Its view says
 `pendingHostRevocation: true` (the lists, `GET /api/v1/integrations` included, with the setting on), and the account page
 says "Revoked; your hosts weren't all told. Revoke it from Astation to make sure." Astation offers its owner a native
 `revoke`, and its call, `POST /api/v1/integrations/<id>/revoke` `{ interruptRunning }` (the native route, the integration's
